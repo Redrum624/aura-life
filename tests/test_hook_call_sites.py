@@ -285,32 +285,141 @@ def test_the_site_count_matches_the_documented_thirteen():
     )
 
 
+def _hooks_module_bindings(tree):
+    """Every local name in *tree* bound to the ``aura_life.hooks`` module.
+
+    Covers the four import forms that can produce an attribute-style hook call::
+
+        from aura_life import hooks           -> {"hooks"}
+        from aura_life import hooks as _x     -> {"_x"}
+        import aura_life.hooks as h           -> {"h"}
+        import aura_life.hooks                -> {"aura_life.hooks"}  (dotted access)
+
+    Bounded on purpose: it resolves bindings from the module's own import
+    statements only. It still cannot see a binding laundered through an
+    assignment (``h = hooks``), a dynamic lookup (``getattr(hooks, name)()``), or
+    ``importlib.import_module("aura_life.hooks")``. None of those are idioms this
+    codebase uses; if one appears the census goes blind to it, and this comment is
+    the record of that limit.
+    """
+    bound = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module == "aura_life":
+            for alias in node.names:
+                if alias.name == "hooks":
+                    bound.add(alias.asname or "hooks")
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                if alias.name == "aura_life.hooks":
+                    # `import a.b` binds `a`; the call then reads `a.b.hook()`.
+                    bound.add(alias.asname or "aura_life.hooks")
+    return bound
+
+
+def _attribute_call_offenders(module, source):
+    """Attribute-style hook calls in *source*, e.g. ``hooks.get_config()``.
+
+    Returns ``(offenders, saw_binding)``. The second value lets a caller prove the
+    scan actually looked at code that binds the hooks module, rather than at
+    nothing.
+    """
+    tree = ast.parse(source)
+    bound = _hooks_module_bindings(tree)
+    offenders = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+            continue
+        if node.func.attr not in HOOK_NAMES:
+            continue
+        # Match against what this module actually bound, not the literal name
+        # "hooks" -- an alias would otherwise slip straight past.
+        base = ast.unparse(node.func.value)
+        if base in bound:
+            offenders.append(f"{module}:{node.lineno} {base}.{node.func.attr}()")
+    return offenders, bool(bound)
+
+
 def test_the_census_idiom_cannot_be_bypassed():
     """No module may call a hook by attribute (``hooks.get_config()``).
 
     The census only understands ``from aura_life.hooks import <hook>``. A module
-    that did ``from aura_life import hooks`` and then called ``hooks.get_config()``
-    would be an unguarded call site the walk cannot see, so the idiom itself is
-    pinned. ``aura_life.defaults`` and ``aura_life.hooks`` are exempt — they use
-    the registry API (``configure``/``is_configured``), not the hooks.
+    that did ``from aura_life import hooks`` -- or ``as _x`` -- and then called
+    ``hooks.get_config()`` would be an unguarded call site the walk cannot see, so
+    the idiom itself is pinned. ``aura_life.defaults`` and ``aura_life.hooks`` are
+    exempt: they use the registry API (``configure`` / ``is_configured``), not the
+    hooks.
     """
+    modules = _library_modules()
+    # Intrinsic non-emptiness guard. Without it a misconfigured LIBRARY_DIR makes
+    # the loop below never run and `offenders == []` pass vacuously -- a false
+    # clean on the very property this test is the authority for. Deliberately not
+    # delegated to test_the_walk_actually_scanned_the_library: this test must hold
+    # when run alone (`pytest -k idiom_cannot_be_bypassed`).
+    assert len(modules) > 50, f"only {len(modules)} modules scanned -- wrong directory?"
+
     offenders = []
-    for path in _library_modules():
+    scanned = 0
+    for path in modules:
         module = _module_name(path)
         if module in _REGISTRY_MODULES:
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr in HOOK_NAMES
-                and isinstance(node.func.value, ast.Name)
-                and node.func.value.id == "hooks"
-            ):
-                offenders.append(f"{module}:{node.lineno} hooks.{node.func.attr}()")
+        found, _ = _attribute_call_offenders(module, path.read_text(encoding="utf-8"))
+        offenders.extend(found)
+        scanned += 1
+
+    assert scanned > 50, f"only {scanned} non-exempt modules scanned"
     assert offenders == [], (
         "hook called by attribute, which the census walk cannot see:\n  "
         + "\n  ".join(offenders)
         + "\nUse `from aura_life.hooks import <hook>` so this test can audit it."
+    )
+
+
+_IDIOM_SAMPLE = """
+from aura_life import hooks
+from aura_life import hooks as _aliased
+import aura_life.hooks as _dotted_alias
+import aura_life.hooks
+
+def plain():
+    return hooks.get_config()
+
+def aliased():
+    return _aliased.get_llm_service()
+
+def dotted_alias():
+    return _dotted_alias.geocode("x")
+
+def fully_dotted():
+    return aura_life.hooks.persona_now()
+
+def registry_api_is_not_a_hook_call():
+    hooks.configure(persona_now=None)
+    return hooks.is_configured("persona_now")
+"""
+
+
+def test_the_idiom_guard_sees_through_aliases():
+    """Guard for the guard: matching the literal name ``hooks`` is one rename away
+    from blind, so the binding is resolved from the module's own imports."""
+    offenders, saw_binding = _attribute_call_offenders("sample", _IDIOM_SAMPLE)
+
+    assert saw_binding
+    assert sorted(o.split()[-1] for o in offenders) == [
+        "_aliased.get_llm_service()",
+        "_dotted_alias.geocode()",
+        "aura_life.hooks.persona_now()",
+        "hooks.get_config()",
+    ], offenders
+    # configure/is_configured are registry API, not hooks -- never offenders.
+    assert not any("configure" in o or "is_configured" in o for o in offenders)
+
+
+def test_the_idiom_guard_cannot_report_clean_on_nothing():
+    """A source with no hooks binding must not look like a scanned, clean module."""
+    assert _attribute_call_offenders("sample", "x = 1") == ([], False)
+    modules = _library_modules()
+    assert len(modules) > 50, (
+        f"only {len(modules)} modules enumerated -- the idiom scan would have "
+        "reported clean by looking at nothing"
     )
