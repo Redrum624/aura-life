@@ -42,8 +42,12 @@ in total — and two of them (`life_service.py:1842`, weather;
 `life_service.py:1920`, trip geocoding) sit on the `world` tick path, held off
 only by early returns. An agent that owns its own `WorldEnvironment` and has a
 resolved lat/lon, or one given a `trip_llm`, would hit the same silent tick
-failure. `DEFERRED.md` has the full list, the
-evidence and the follow-up.
+failure. `DEFERRED.md` has the analysis and the follow-up.
+
+`tests/test_hook_call_sites.py` is the authority for that count, not this file:
+it walks the AST for every hook call site, pins the thirteen as an explicit
+allowlist, and fails when a new unguarded one appears. Adding a hook call
+without a guard is a test failure, not a silent regression.
 
 `tests/test_multi_instance.py` is the standalone guarantee: three `LifeService`
 instances sharing one `WorldEnvironment`, in a process with no Aura on

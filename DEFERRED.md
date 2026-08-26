@@ -78,13 +78,23 @@ a repair one.***
 Most hook call sites in the moved code sit inside a `try/except`, so an
 unconfigured hook degrades that feature to "unavailable". **Thirteen do not.**
 
-The list below is from an AST walk of `src/aura_life/` that checks whether the
-*import* and the *call* have a `Try` at any ancestor level; the reachability notes
-are from reading each caller. **How to re-derive the count without redoing the
-walk:** the walk reports 14 unguarded `from aura_life.hooks import ...` sites, but
-`__init__.py:162` is not one of them — it imports `HookNotConfigured`, the
-exception type, not a hook. 14 - 1 = **13**, which is also 3 (on a tick path) + 1
-(covered by a caller) + 9 (untraced), the three groups below.
+**The authority for that number is `tests/test_hook_call_sites.py`, not this
+document.** The test performs the AST walk (every `from aura_life.hooks import
+...`, checking for a `Try` at any ancestor level), pins the thirteen sites as an
+explicit allowlist keyed by module + enclosing function + hook — no line numbers,
+which churn — and fails when a new unguarded site appears or an existing one gets
+guarded. It also carries a self-test proving the walk can tell guarded from
+unguarded, and a non-emptiness guard so it cannot rot into a vacuous pass. **If
+this list and that test ever disagree, the test is right.**
+
+How the count is derived, so it need not be folklore: the raw walk reports 14
+unguarded `from aura_life.hooks import ...` sites, but `__init__.py:162` is not a
+call site — it imports `HookNotConfigured`, the exception type, not a hook. The
+test excludes it by only counting names in `hooks.HOOK_NAMES`, so the exclusion
+stays correct as the registry changes. 14 - 1 = **13**, which is also 3 (on a tick
+path) + 1 (covered by a caller) + 9 (untraced), the three groups below. The
+reachability notes are from reading each caller by hand and are *not* enforced by
+the test.
 
 Why this matters: `LifeScheduler.force_tick` wraps every tick handler in
 `except Exception: logger.error(...)`. An unguarded hook on a tick path does not
