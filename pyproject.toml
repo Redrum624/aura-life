@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aura-life"
+version = "0.1.0"
+description = "Agent life-simulation engine: mood, energy, goals, identity, planning, and daily life for autonomous personas"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = [
+  "tzdata; sys_platform == 'win32'",   # zoneinfo has no system tz database on Windows
+]
+
+[project.optional-dependencies]
+scheduler = ["apscheduler>=3.11"]       # LifeScheduler degrades to a no-op without it (life_scheduler.py:11-16)
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
