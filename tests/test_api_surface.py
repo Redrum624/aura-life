@@ -7,6 +7,7 @@ consumer uses. That must be demonstrated in a fresh interpreter (subprocess),
 not assumed or inferred from other tests having already imported aura_life.
 """
 import json
+import os
 import pathlib
 import subprocess
 import sys
@@ -16,12 +17,34 @@ import aura_life
 SNAPSHOT = pathlib.Path(__file__).parent / "api_surface.json"
 
 
-def test_public_surface_is_stable():
-    """Fails when __all__ changes. If intentional: delete the snapshot, re-run, explain in the commit."""
-    got = sorted(aura_life.__all__)
+def _snapshot(got: list) -> list:
+    """Load the snapshot for comparison — or fail loudly if it is missing.
+
+    A MISSING SNAPSHOT IS A DEFECT, NOT A FRESH START. If it were regenerated
+    silently (write-if-missing), a deleted, un-checked-out, or gitignored
+    snapshot file would make this test pass green while blessing whatever
+    __all__ currently is -- the public API could be re-baselined with zero
+    signal. Regeneration is opt-in only: set API_SURFACE_WRITE_SNAPSHOT=1.
+    (Same convention as PARITY_WRITE_GOLDEN in tests/test_persona_parity.py.)
+    """
     if not SNAPSHOT.exists():
+        if not os.environ.get("API_SURFACE_WRITE_SNAPSHOT"):
+            raise AssertionError(
+                f"API surface snapshot is missing: {SNAPSHOT}\n"
+                "This is a DEFECT, not a fresh start -- the snapshot is committed and should "
+                "always be present.\n"
+                "Restore it from git (git checkout -- tests/api_surface.json).\n"
+                "To regenerate it deliberately, re-run with API_SURFACE_WRITE_SNAPSHOT=1."
+            )
         SNAPSHOT.write_text(json.dumps(got, indent=2))
-    assert got == json.loads(SNAPSHOT.read_text())
+    return json.loads(SNAPSHOT.read_text())
+
+
+def test_public_surface_is_stable():
+    """Fails when __all__ changes. If intentional: delete the snapshot, re-run with
+    API_SURFACE_WRITE_SNAPSHOT=1, explain in the commit."""
+    got = sorted(aura_life.__all__)
+    assert got == _snapshot(got)
 
 
 def test_every_exported_name_actually_resolves():
