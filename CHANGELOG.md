@@ -65,8 +65,17 @@ the copyright holder, who holds sole copyright in both projects.
 state, outer state and full status, clock frozen and RNG seeded) was captured
 against Aura's pre-extraction code *before a single line moved*, and the extracted
 library reproduces it byte for byte. The persona-generation golden made the same
-trip and matched byte for byte on arrival. Aura keeps both goldens and runs them in
-its own suite (`server/tests/test_life_parity.py`).
+trip and matched byte for byte on arrival.
+
+The two goldens then parted ways, and each is guarded by exactly one suite:
+
+| Golden | Lives in | Run by |
+|---|---|---|
+| Life simulation (20 ticks) | `Aura: server/tests/fixtures/life_parity_golden.json` | Aura — `server/tests/test_life_parity.py` |
+| Persona generation | `aura-life: tests/fixtures/persona_parity_golden.json` | this library — `tests/test_persona_parity.py` |
+
+The persona golden moved here with the persona pipeline; it is **not** in Aura's
+fixtures and Aura's suite does not guard persona generation.
 
 Nothing was refactored on the way out. Where the extraction found a defect it
 recorded it in `DEFERRED.md` rather than fixing it, because a fix would have

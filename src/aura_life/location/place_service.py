@@ -133,7 +133,7 @@ class PlaceService:
       server_tz       — tzinfo or callable returning current UTC offset hours (float)
       rng             — random.Random instance (seeded in tests)
       get_device_loc  — callable() -> dict|None; defaults to
-                        engine.location.device_location.get_device_location.
+                        aura_life.location.device_location.get_device_location.
                         Override in tests to mock the device store.
       forecast_tz     — callable(lat, lon) -> str|None; returns IANA tz string
                         for a lat/lon via Open-Meteo Forecast.  Override in

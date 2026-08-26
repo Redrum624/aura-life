@@ -144,10 +144,47 @@ were added by the extraction.
 from aura_life import LifeService, Weather, Goal, hooks   # stable
 ```
 
-`aura_life.internals` re-exports everything else — models, context builders, the
-subsystem classes. **It is explicitly not stable and may change in a minor
+### `aura_life.internals` — what it actually is
+
+`internals.py` is eight lines. It re-exports **`LifeService`, all of `models`, and
+all of `context`** — and nothing else:
+
+```python
+from aura_life.life_service import LifeService
+from aura_life.models import *
+from aura_life.context import *
+```
+
+Measured against the facade, it adds **15 names** beyond the 116 — and **8 of those
+are leaked stdlib/typing symbols** (`Dict`, `List`, `Optional`, `Enum`, `dataclass`,
+`field`, `datetime`, `json`) that the wildcard imports dragged in. The 7 real
+additions are `BehavioralTendency`, `CalendarEntry`, `ErrandsState`,
+`InebriationState`, `LOCATION_ENUM_TO_KEY`, `LifeContextBuilder` and
+`PlaceLocationState`. **It is explicitly not stable and may change in a minor
 release.** It exists so Aura could finish migrating without being blocked on the
 facade; treat an import from it as a to-do, not an API.
+
+**It does not re-export the subsystem classes.** `EmotionEngine`,
+`TextEmotionAnalyzer`, `WorldEnvironment`, `EnergySystem`, `GoalEngine`,
+`ActivityEngine`, `LifeScheduler`, `get_emotion_persistence`, the `personas`
+entry points and 13 more — **27 names declared in submodule `__all__`s** — are on
+neither `aura_life` nor `aura_life.internals`.
+
+**Everything else is reached by its real module path**, which is a supported,
+working import — just not a stable one:
+
+```python
+from aura_life.world import WorldEnvironment
+from aura_life.emotion import EmotionEngine, TextEmotionAnalyzer
+from aura_life.energy import EnergySystem
+from aura_life.personas import get_personality
+```
+
+(`aura_life.hooks` is the exception among submodules: it *is* exported by the
+facade, so its 16 names are reachable as `aura_life.hooks.configure` and friends.)
+
+A public home for the subsystem classes is a **v0.2** decision, not a bug — nothing
+here is broken, the paths above are how consumers import them today.
 
 `tests/test_api_surface.py` pins `__all__` against a committed snapshot
 (`tests/api_surface.json`), so the public surface cannot change without the diff
