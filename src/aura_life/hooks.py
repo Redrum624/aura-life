@@ -36,6 +36,7 @@ __all__ = [
     "configure",
     "reset",
     "is_configured",
+    "provider_for",
     # hooks
     "get_config",
     "get_user_data_root",
@@ -118,8 +119,31 @@ def reset() -> None:
 
 
 def is_configured(name: str) -> bool:
-    """Whether *name* currently has a provider registered."""
+    """Whether *name* currently has a provider registered.
+
+    True for a library default as well as a host registration -- use
+    :func:`provider_for` to tell the two apart.
+    """
     return name in _registry
+
+
+def provider_for(name: str) -> Optional[Callable[..., Any]]:
+    """The provider currently registered for *name*, or ``None`` if there is none.
+
+    The only supported way to see *which* implementation a hook resolves to.
+    ``aura_life.defaults`` ships a default for ``persona_now``, so
+    ``is_configured("persona_now")`` is ``True`` even with no host installed;
+    comparing against ``aura_life.defaults.DEFAULT_PROVIDERS[name]`` is how a
+    consumer distinguishes "the library's own" from "the host's".
+
+    Raises:
+        ValueError: if *name* is not one of :data:`HOOK_NAMES`.
+    """
+    if name not in HOOK_NAMES:
+        raise ValueError(
+            f"unknown aura_life hook {name!r}; known hooks: {', '.join(HOOK_NAMES)}"
+        )
+    return _registry.get(name)
 
 
 def _call(name: str, *args: Any, **kwargs: Any) -> Any:

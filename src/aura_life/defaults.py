@@ -33,13 +33,25 @@ module and is registered from ``aura_life/__init__.py``.
 
 **How it interacts with a host.** :func:`install` uses the ordinary
 ``hooks.configure`` path, so a host bridge that registers ``persona_now``
-overwrites it, and ``hooks.reset()`` drops it along with every host provider --
-which is what leaves the bare raise-when-unconfigured contract intact for the
-hook tests that assert it. Call :func:`install` again to restore it.
+afterwards overwrites it, and ``hooks.reset()`` drops it along with every host
+provider -- which is what leaves the bare raise-when-unconfigured contract intact
+for the hook tests that assert it.
+
+:func:`install` **never overwrites a provider that is already registered**. It is
+safe to call at any point, including after a host bridge has installed its own
+clock: a host that has registered ``persona_now`` keeps it. Without that rule, the
+documented "call ``install()`` again after a ``reset()``" recovery would silently
+replace a host's clock -- a virtual or frozen one, say -- with the system clock,
+and nothing would report it.
 
 Consequence worth knowing: ``hooks.is_configured("persona_now")`` is ``True`` with
-no host installed. :data:`DEFAULT_PROVIDERS` is how you tell a library default
-apart from a host registration.
+no host installed, because a library default *is* a registration. To tell which
+implementation a hook currently resolves to, use ``hooks.provider_for(name)`` and
+compare it against :data:`DEFAULT_PROVIDERS`::
+
+    from aura_life import defaults, hooks
+    hooks.provider_for("persona_now") is defaults.DEFAULT_PROVIDERS["persona_now"]
+    # True  -> the library's own clock; False -> the host's
 """
 
 from typing import Any, Callable, Dict, Optional
@@ -83,10 +95,21 @@ DEFAULT_PROVIDERS: Dict[str, Callable[..., Any]] = {
 
 
 def install() -> None:
-    """Register :data:`DEFAULT_PROVIDERS` with the hook registry.
+    """Register :data:`DEFAULT_PROVIDERS` for any hook that has no provider yet.
 
     Called once from ``aura_life/__init__.py``, so any consumer that imports the
-    package -- or any module in it -- gets the defaults. Idempotent, and a host
-    bridge installed afterwards overwrites them.
+    package -- or any module in it -- gets the defaults. Idempotent.
+
+    **Non-clobbering by design.** A hook that already has a provider is left
+    alone, so calling this after a host bridge has installed its own
+    ``persona_now`` cannot silently downgrade the host's clock to the system one.
+    A host that genuinely wants the library default back can ask for it
+    explicitly: ``hooks.configure(**DEFAULT_PROVIDERS)``.
     """
-    hooks.configure(**DEFAULT_PROVIDERS)
+    missing = {
+        name: provider
+        for name, provider in DEFAULT_PROVIDERS.items()
+        if not hooks.is_configured(name)
+    }
+    if missing:
+        hooks.configure(**missing)

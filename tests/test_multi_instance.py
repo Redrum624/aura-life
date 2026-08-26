@@ -252,6 +252,9 @@ def test_missing_host_hooks_degrade_at_warning_never_at_error(tmp_path, caplog):
 
     assert list(defaults.DEFAULT_PROVIDERS) == ["persona_now"]
     assert hooks.is_configured("persona_now"), "aura_life/__init__.py did not install it"
+    # is_configured() cannot distinguish a library default from a host registration;
+    # provider_for() is the accessor that can, and this is the claim the docs make.
+    assert hooks.provider_for("persona_now") is defaults.persona_now
     for name in hooks.HOOK_NAMES:
         if name not in defaults.DEFAULT_PROVIDERS:
             assert not hooks.is_configured(name), f"{name} unexpectedly has a provider"
@@ -278,3 +281,32 @@ def test_hooks_without_a_library_default_still_raise(hook_name):
     args = {"get_config": (), "get_llm_service": (), "geocode": ("Lyon",)}[hook_name]
     with pytest.raises(hooks.HookNotConfigured):
         getattr(hooks, hook_name)(*args)
+def test_installing_defaults_never_clobbers_a_host_provider():
+    """``defaults.install()`` must not downgrade a host's clock to the system one.
+
+    The recovery path the docs describe — ``hooks.reset()``, then put things back —
+    would otherwise silently replace a host's ``persona_now`` (a virtual or frozen
+    clock, in Aura's parity driver's case) with ``datetime.now()``, and nothing
+    anywhere would report it.
+    """
+    from aura_life import defaults, hooks
+
+    def host_clock(timezone=None):
+        return "HOST-CLOCK"
+
+    assert hooks.provider_for("persona_now") is defaults.persona_now
+    try:
+        hooks.configure(persona_now=host_clock)
+        assert hooks.provider_for("persona_now") is host_clock
+
+        defaults.install()
+
+        assert hooks.provider_for("persona_now") is host_clock, (
+            "install() overwrote the host's provider"
+        )
+        assert hooks.persona_now() == "HOST-CLOCK"
+    finally:
+        hooks.configure(**defaults.DEFAULT_PROVIDERS)
+
+    # ...and it does still fill an empty slot.
+    assert hooks.provider_for("persona_now") is defaults.persona_now
