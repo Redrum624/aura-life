@@ -9,9 +9,10 @@ def _golden(got: dict) -> dict:
     A MISSING GOLDEN IS A DEFECT, NOT A FRESH START. Task 3b moves this test and its fixture
     together; if only the test arrives, silently regenerating the golden would bless whatever
     the moved code now produces. Regeneration is opt-in only: set PARITY_WRITE_GOLDEN=1.
+    Only the exact value "1" opts in -- PARITY_WRITE_GOLDEN=0 does not.
     """
     if not GOLDEN.exists():
-        if not os.environ.get("PARITY_WRITE_GOLDEN"):
+        if os.environ.get("PARITY_WRITE_GOLDEN") != "1":
             raise AssertionError(
                 f"Golden fixture is missing: {GOLDEN}\n"
                 "This is a DEFECT, not a fresh start — the fixture did not move with its test.\n"

@@ -40,10 +40,13 @@ those are **inert**: once `life_service.py`'s module-level `services.image_servi
 import was removed, nothing outside `engine` is imported before the freeze runs, so
 late-imported modules pick up the faked stdlib `datetime` automatically.
 
-They are load-bearing only for reproducing the baseline golden captured at
-`a26d46cd`, and — critically — **no test fails if one is deleted**. A future
-maintainer tidying the list would silently reintroduce wall-clock dependence, which
-manifests as a parity test that fails only at certain hours of the day.
+*Those* entries are load-bearing only for reproducing the baseline golden captured
+at `a26d46cd`, and — critically — **no test fails if one of them is deleted**. A
+future maintainer tidying the list would silently reintroduce wall-clock dependence,
+which manifests as a parity test that fails only at certain hours of the day.
+(`engine` and `aura_life` are *not* in the inert group — they cover the modules the
+simulation actually runs in — so the blanket phrasing this entry used to carry was
+wrong. Corrected in Task 7, along with the comment in the driver.)
 
 **Follow-up:** state this directly in the comment block above `FREEZE_PREFIXES`, so
 the warning lives in the code rather than in a review artefact.
@@ -203,3 +206,50 @@ Two consequences a maintainer needs to know:
    siblings, and — separately — whether `persona_now` belongs in the host-hook
    registry at all, given it is a clock rather than a host resource.
 3. Trace the nine untraced sites and record which are reachable host-free.
+
+## v0.2 API candidates
+
+The shape of the public API as shipped in 0.1.0, with the parts a second consumer
+trips over. None of these are bugs; all of them are things the extraction chose not
+to invent, because 0.1.0's contract was "behaviour identical to Aura at `b9c92aff`"
+and a new public method is not identical behaviour.
+
+### There is no public `tick()`
+
+Driving the simulation requires `svc._scheduler.force_all_ticks()` — a private
+attribute, reached through in the README's own quickstart, in
+`tests/test_multi_instance.py`, and in Aura's parity driver. The only public entry
+point is `LifeService.start()`, which needs `apscheduler` and spawns a background
+thread per persona: the wrong shape for N agents under an overseer that owns the
+clock.
+
+**Follow-up:** add `LifeService.tick()` delegating to `self._scheduler.force_all_ticks()`.
+A private world is already handled: `_on_world_tick` (`life_service.py:2469-2472`)
+calls `self._world.tick()` whenever `_shared_world` is false, so a public `tick()`
+would be complete for the single-agent case and would still leave the shared clock
+with its owner.
+
+### `WorldEnvironment` is not on the facade
+
+The shared-world construction path needs `from aura_life.world import
+WorldEnvironment`. It is in neither `aura_life.__all__` nor `aura_life.internals`,
+so the library's headline use case cannot be written against the stable surface.
+
+**Follow-up:** export `WorldEnvironment` from `aura_life`. That changes `__all__`
+from 116 names to 117 and requires regenerating `tests/api_surface.json` with
+`API_SURFACE_WRITE_SNAPSHOT=1`, which is exactly the signal that test exists to
+produce.
+
+### `LifeService.__init__` takes 18 positional parameters
+
+`persona_id` is the ninth. Every caller in this repo passes by keyword and the
+README says to, but the signature does not enforce it.
+
+**Follow-up:** consider a `*` after `db_path`. This is a breaking change for any
+positional caller, so it belongs in a major bump or in 0.x with a note.
+
+### `persona_id` has no public accessor
+
+The quickstart reads `agent._persona_id` to label its output.
+
+**Follow-up:** add a read-only `persona_id` property.

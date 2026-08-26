@@ -24,11 +24,12 @@ def _snapshot(got: list) -> list:
     silently (write-if-missing), a deleted, un-checked-out, or gitignored
     snapshot file would make this test pass green while blessing whatever
     __all__ currently is -- the public API could be re-baselined with zero
-    signal. Regeneration is opt-in only: set API_SURFACE_WRITE_SNAPSHOT=1.
+    signal. Regeneration is opt-in only: set API_SURFACE_WRITE_SNAPSHOT=1. Only the
+    exact value "1" opts in -- API_SURFACE_WRITE_SNAPSHOT=0 does not.
     (Same convention as PARITY_WRITE_GOLDEN in tests/test_persona_parity.py.)
     """
     if not SNAPSHOT.exists():
-        if not os.environ.get("API_SURFACE_WRITE_SNAPSHOT"):
+        if os.environ.get("API_SURFACE_WRITE_SNAPSHOT") != "1":
             raise AssertionError(
                 f"API surface snapshot is missing: {SNAPSHOT}\n"
                 "This is a DEFECT, not a fresh start -- the snapshot is committed and should "
