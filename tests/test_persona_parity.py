@@ -15,8 +15,8 @@ def _golden(got: dict) -> dict:
         if os.environ.get("PARITY_WRITE_GOLDEN") != "1":
             raise AssertionError(
                 f"Golden fixture is missing: {GOLDEN}\n"
-                "This is a DEFECT, not a fresh start — the fixture did not move with its test.\n"
-                "Restore it from git (git checkout -- server/tests/fixtures/persona_parity_golden.json).\n"
+                "This is a DEFECT, not a fresh start — the fixture is committed and should always be present.\n"
+                "Restore it from git (git checkout -- tests/fixtures/persona_parity_golden.json).\n"
                 "To regenerate it deliberately, re-run with PARITY_WRITE_GOLDEN=1."
             )
         GOLDEN.parent.mkdir(parents=True, exist_ok=True)
