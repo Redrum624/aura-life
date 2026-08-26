@@ -161,6 +161,13 @@ from aura_life.schedule import (
 from aura_life import hooks
 from aura_life.hooks import HookNotConfigured
 
+# Register the library's own hook defaults. Only ``persona_now`` has one, and
+# without it every activity tick of a host-free LifeService dies silently --
+# see aura_life/defaults.py. A host bridge installed later overwrites it.
+from aura_life import defaults as _defaults
+
+_defaults.install()
+
 __all__ = [
     "LifeService",
     # Location

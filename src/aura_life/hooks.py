@@ -19,6 +19,13 @@ replaced function-local ``from config import get_config`` statements whose
 failure mode was ``ModuleNotFoundError`` (itself an ``ImportError``), and every
 ``except ImportError`` guard already written around those call sites must keep
 behaving exactly as it did.
+
+One hook is an exception: ``persona_now`` is the clock, not a host resource, and
+the library ships its own implementation for it in :mod:`aura_life.defaults`,
+registered when ``aura_life`` is imported. Nothing is imported here to make that
+happen -- this module still imports ``typing`` and nothing else -- and
+:func:`reset` drops it along with everything else. See that module for why the
+default exists at all.
 """
 
 from typing import Any, Callable, Dict, Optional
@@ -101,7 +108,12 @@ def configure(**providers: Callable[..., Any]) -> None:
 
 
 def reset() -> None:
-    """Forget every registered provider (tests, and host teardown)."""
+    """Forget every registered provider (tests, and host teardown).
+
+    This drops the library's own defaults too (see :mod:`aura_life.defaults`),
+    leaving *every* hook in the raise-when-unconfigured state. Call
+    ``aura_life.defaults.install()`` to put them back.
+    """
     _registry.clear()
 
 
