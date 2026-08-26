@@ -29,6 +29,26 @@ regression test that calls `_scan_calendar_for_triggers` without a shim.
 
 ## Extraction artefacts to consolidate
 
+### Most `FREEZE_PREFIXES` entries in the parity driver are inert but must not be removed
+
+*Found: Task 2c review (2026-08-26).*
+
+`server/tests/parity_driver.py` freezes the clock in modules matching a list that
+now includes `context`, `services`, `data`, `memory`, `config`, `prompt` and
+`pipeline` alongside `engine`/`aura_life`/`personas`. On the current tree most of
+those are **inert**: once `life_service.py`'s module-level `services.image_service`
+import was removed, nothing outside `engine` is imported before the freeze runs, so
+late-imported modules pick up the faked stdlib `datetime` automatically.
+
+They are load-bearing only for reproducing the baseline golden captured at
+`a26d46cd`, and — critically — **no test fails if one is deleted**. A future
+maintainer tidying the list would silently reintroduce wall-clock dependence, which
+manifests as a parity test that fails only at certain hours of the day.
+
+**Follow-up:** state this directly in the comment block above `FREEZE_PREFIXES`, so
+the warning lives in the code rather than in a review artefact.
+
+
 ### The parity driver carries its own copy of the follow-up adapter
 
 *Found: Task 2b (2026-08-26).*
