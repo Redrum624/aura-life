@@ -37,11 +37,12 @@ hooks.provider_for("persona_now") is defaults.DEFAULT_PROVIDERS["persona_now"]
 ```
 
 ⚠️ **`persona_now` is not the only unguarded hook call site — it is the only one a
-bare tick reaches today.** Ten others are unguarded at the call site, and two of
-them (`life_service.py:1842`, weather; `life_service.py:1920`, trip geocoding) sit
-on the `world` tick path and are held off only by early returns. An agent that owns
-its own `WorldEnvironment` and has a resolved lat/lon, or one given a `trip_llm`,
-would hit the same silent tick failure. `DEFERRED.md` has the full list, the
+bare tick reaches today.** Twelve others are unguarded at the call site — thirteen
+in total — and two of them (`life_service.py:1842`, weather;
+`life_service.py:1920`, trip geocoding) sit on the `world` tick path, held off
+only by early returns. An agent that owns its own `WorldEnvironment` and has a
+resolved lat/lon, or one given a `trip_llm`, would hit the same silent tick
+failure. `DEFERRED.md` has the full list, the
 evidence and the follow-up.
 
 `tests/test_multi_instance.py` is the standalone guarantee: three `LifeService`

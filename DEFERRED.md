@@ -76,10 +76,15 @@ would change behaviour Aura's parity golden pins. **This is a recording entry, n
 a repair one.***
 
 Most hook call sites in the moved code sit inside a `try/except`, so an
-unconfigured hook degrades that feature to "unavailable". **Eleven do not.** The
-list below is from an AST walk of `src/aura_life/` that checks whether the *import*
-and the *call* have a `Try` at any ancestor level; the reachability notes are from
-reading each caller.
+unconfigured hook degrades that feature to "unavailable". **Thirteen do not.**
+
+The list below is from an AST walk of `src/aura_life/` that checks whether the
+*import* and the *call* have a `Try` at any ancestor level; the reachability notes
+are from reading each caller. **How to re-derive the count without redoing the
+walk:** the walk reports 14 unguarded `from aura_life.hooks import ...` sites, but
+`__init__.py:162` is not one of them — it imports `HookNotConfigured`, the
+exception type, not a hook. 14 - 1 = **13**, which is also 3 (on a tick path) + 1
+(covered by a caller) + 9 (untraced), the three groups below.
 
 Why this matters: `LifeScheduler.force_tick` wraps every tick handler in
 `except Exception: logger.error(...)`. An unguarded hook on a tick path does not
@@ -122,7 +127,7 @@ plausibly would — walks straight into it.**
 
 | Site | Covered by |
 |---|---|
-| `emotion_persistence.py:297-298` (`get_emotion_persistence`, legacy-mode branch) | `life_service.py:3799` `try:` / `:3816-3817` `except Exception: logger.warning("Failed to persist activity emotions: ...")` |
+| `emotion_persistence.py:297-298` (`get_emotion_persistence`, legacy-mode branch) | `life_service.py:3788` `try:` / `:3816-3817` `except Exception: logger.warning("Failed to persist activity emotions: ...")` |
 
 That WARNING is the single message a host-free tick emits, and it is expected
 degradation rather than a bug — but note the guard belongs to the *caller*, so any
@@ -169,7 +174,7 @@ Two consequences a maintainer needs to know:
   — is the accessor that tells which implementation a hook resolves to; compare it
   against `aura_life.defaults.DEFAULT_PROVIDERS[name]`. (`DEFAULT_PROVIDERS` alone
   only says which hooks *have* a default, which is why the accessor exists.)
-* This is the **only** hook with a default, and the other ten unguarded sites above
+* This is the **only** hook with a default, and the other twelve unguarded sites above
   are unchanged. Any of them that becomes reachable fails the same silent way, and
   only `tests/test_multi_instance.py`'s "no `ERROR` records / all five `last_ticks`
   stamped" assertions would notice.

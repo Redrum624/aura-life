@@ -281,6 +281,8 @@ def test_hooks_without_a_library_default_still_raise(hook_name):
     args = {"get_config": (), "get_llm_service": (), "geocode": ("Lyon",)}[hook_name]
     with pytest.raises(hooks.HookNotConfigured):
         getattr(hooks, hook_name)(*args)
+
+
 def test_installing_defaults_never_clobbers_a_host_provider():
     """``defaults.install()`` must not downgrade a host's clock to the system one.
 
