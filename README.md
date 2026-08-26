@@ -167,7 +167,7 @@ facade; treat an import from it as a to-do, not an API.
 **It does not re-export the subsystem classes.** `EmotionEngine`,
 `TextEmotionAnalyzer`, `WorldEnvironment`, `EnergySystem`, `GoalEngine`,
 `ActivityEngine`, `LifeScheduler`, `get_emotion_persistence`, the `personas`
-entry points and 13 more — **27 names declared in submodule `__all__`s** — are on
+entry points and 12 more — **26 names declared in submodule `__all__`s** — are on
 neither `aura_life` nor `aura_life.internals`.
 
 **Everything else is reached by its real module path**, which is a supported,
@@ -181,7 +181,10 @@ from aura_life.personas import get_personality
 ```
 
 (`aura_life.hooks` is the exception among submodules: it *is* exported by the
-facade, so its 16 names are reachable as `aura_life.hooks.configure` and friends.)
+facade, so its 17 otherwise-unreachable names are reachable as
+`aura_life.hooks.configure` and friends. One of them, `persona_now`, is declared in
+both `aura_life.defaults.__all__` and `aura_life.hooks.__all__` — it counts as a hook
+name, not a path-only one, because `from aura_life.hooks import persona_now` works.)
 
 A public home for the subsystem classes is a **v0.2** decision, not a bug — nothing
 here is broken, the paths above are how consumers import them today.
