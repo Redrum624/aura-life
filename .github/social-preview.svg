@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="640" viewBox="0 0 1280 640" role="img" aria-label="aura-life - an agent life-simulation engine for autonomous personas">
+  <title>aura-life</title>
+
+  <defs>
+    <!-- horizontal fade so the rules and ticks dissolve rather than stop dead -->
+    <linearGradient id="fade" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0"    stop-color="#000"/>
+      <stop offset="0.14" stop-color="#fff"/>
+      <stop offset="0.86" stop-color="#fff"/>
+      <stop offset="1"    stop-color="#000"/>
+    </linearGradient>
+    <mask id="fadeMask">
+      <rect x="0" y="0" width="1280" height="640" fill="url(#fade)"/>
+    </mask>
+  </defs>
+
+  <!-- field -->
+  <rect x="-4" y="-4" width="1288" height="648" fill="#0A0E14"/>
+
+  <!-- motif: decorative, deliberately low contrast -->
+  <g mask="url(#fadeMask)" fill="none" shape-rendering="crispEdges" stroke-width="1.5">
+    <g stroke="#212C39">
+      <path d="M80 108 H1200"/>
+      <path d="M80 516 H1200"/>
+      <path d="M80 108 v-6 M100 108 v-6 M120 108 v-6 M140 108 v-6 M160 108 v-6 M180 108 v-6 M200 108 v-6 M220 108 v-6 M240 108 v-6 M260 108 v-6 M280 108 v-6 M300 108 v-6 M320 108 v-6 M340 108 v-6 M360 108 v-6 M380 108 v-6 M400 108 v-6 M420 108 v-6 M440 108 v-6 M460 108 v-6 M480 108 v-6 M500 108 v-6 M520 108 v-6 M540 108 v-6 M560 108 v-6 M580 108 v-6 M600 108 v-6 M620 108 v-6 M640 108 v-6 M660 108 v-6 M680 108 v-6 M700 108 v-6 M720 108 v-6 M740 108 v-6 M760 108 v-6 M780 108 v-6 M800 108 v-6 M820 108 v-6 M840 108 v-6 M860 108 v-6 M880 108 v-6 M900 108 v-6 M920 108 v-6 M940 108 v-6 M960 108 v-6 M980 108 v-6 M1000 108 v-6 M1020 108 v-6 M1040 108 v-6 M1060 108 v-6 M1080 108 v-6 M1100 108 v-6 M1120 108 v-6 M1140 108 v-6 M1160 108 v-6 M1180 108 v-6 M1200 108 v-6"/>
+    </g>
+    <g stroke="#4FD1C5" stroke-opacity="0.34">
+      <path d="M80 516 v7 M96 516 v9.4 M112 516 v14.6 M128 516 v20 M144 516 v22.6 M160 516 v21.1 M176 516 v16.3 M192 516 v10.6 M208 516 v6.6 M224 516 v5.1 M240 516 v5.4 M256 516 v6.2 M272 516 v6.1 M288 516 v5.1 M304 516 v3.9 M320 516 v3.2 M336 516 v3 M352 516 v3.1 M368 516 v3.2 M384 516 v3.7 M400 516 v5.2 M416 516 v8 M432 516 v11.2 M448 516 v13.5 M464 516 v13.5 M480 516 v11.1 M496 516 v8.1 M512 516 v6.8 M528 516 v8.9 M544 516 v14 M560 516 v19.7 M576 516 v23.1 M592 516 v22.4 M608 516 v17.9 M624 516 v12 M640 516 v7.4 M656 516 v5.5 M672 516 v5.9 M688 516 v7 M704 516 v7.4 M720 516 v6.5 M736 516 v5 M752 516 v3.7 M768 516 v3.1 M784 516 v3 M800 516 v3.1 M816 516 v3.4 M832 516 v4.3 M848 516 v6.4 M864 516 v9.2 M880 516 v11.6 M896 516 v12.1 M912 516 v10.4 M928 516 v7.8 M944 516 v6.5 M960 516 v8.3 M976 516 v13.1 M992 516 v19.1 M1008 516 v23.2 M1024 516 v23.3 M1040 516 v19.3 M1056 516 v13.3 M1072 516 v8.2 M1088 516 v5.9 M1104 516 v6.3 M1120 516 v7.8 M1136 516 v8.7 M1152 516 v8.1 M1168 516 v6.4 M1184 516 v4.5 M1200 516 v3.4"/>
+    </g>
+  </g>
+
+  <!-- wordmark -->
+  <text x="640" y="346" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif"
+        font-size="220" font-weight="700" letter-spacing="-2"
+        fill="#E8EDF2">aura<tspan fill="#4FD1C5">-life</tspan></text>
+
+  <!-- tagline -->
+  <text x="640" y="436" text-anchor="middle" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif"
+        font-size="38" font-weight="400" letter-spacing="0.5"
+        fill="#9AAABB">An agent life-simulation engine for autonomous personas.</text>
+</svg>
