@@ -14,6 +14,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from aura_life._safe_ids import safe_join, safe_persona_id
+from aura_life.personas.personality_config import get_default_languages
+
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +34,20 @@ def _parse_json_list(raw, default):
         return result if isinstance(result, list) else default
     except (json.JSONDecodeError, TypeError, ValueError):
         return default
+
+
+def _default_languages_list() -> List[str]:
+    """Fresh copy of the configured default language list."""
+    return list(get_default_languages())
+
+
+def _default_languages_sql_literal() -> str:
+    """The configured default languages as a single-quoted SQL string literal.
+
+    JSON-encoded to match the storage format of the ``languages`` column.
+    """
+    encoded = json.dumps(_default_languages_list(), separators=(",", ":"))
+    return "'" + encoded.replace("'", "''") + "'"
 
 
 class ProfileDatabase:
@@ -120,7 +137,7 @@ class ProfileDatabase:
                     cultural_stance TEXT DEFAULT '[]',
                     cultural_summary TEXT DEFAULT '',
                     appearance_origin TEXT DEFAULT 'local',
-                    languages TEXT DEFAULT '["English","French"]',
+                    languages TEXT DEFAULT __DEFAULT_LANGUAGES__,
                     -- Multi-user isolation: device that created this persona ('' = unset)
                     owner_device_id TEXT DEFAULT '',
                     -- Metadata
@@ -163,7 +180,7 @@ class ProfileDatabase:
                     media_type TEXT NOT NULL,
                     title TEXT NOT NULL
                 );
-            """)
+            """.replace("__DEFAULT_LANGUAGES__", _default_languages_sql_literal()))
             conn.commit()
 
             # Migrate existing databases: add columns that may not exist yet
@@ -187,7 +204,7 @@ class ProfileDatabase:
                 ("cultural_stance", "TEXT DEFAULT '[]'"),
                 ("cultural_summary", "TEXT DEFAULT ''"),
                 ("appearance_origin", "TEXT DEFAULT 'local'"),
-                ("languages", "TEXT DEFAULT '[\"English\",\"French\"]'"),
+                ("languages", "TEXT DEFAULT " + _default_languages_sql_literal()),
                 ("hair_length", "TEXT DEFAULT ''"),
                 # Multi-user isolation (v2.27.0)
                 ("owner_device_id", "TEXT DEFAULT ''"),
@@ -314,7 +331,7 @@ class ProfileDatabase:
                 json.dumps(getattr(parsed, "cultural_stance", [])),
                 getattr(parsed, "cultural_summary", ""),
                 getattr(parsed, "appearance_origin", "local"),
-                json.dumps(getattr(parsed, "languages", ["English", "French"])),
+                json.dumps(getattr(parsed, "languages", _default_languages_list())),
                 1 if is_preset else 0, now, now,
             ))
             conn.execute(
@@ -505,9 +522,9 @@ class ProfileDatabase:
                 (_get("persona_type", "human"), _get("relationship_with_user", ""), _get("relationship_title", ""), _get("orientation", "").lower()),
             )
             # Place identity fields (T1.1)
-            _langs = _get("languages", ["English", "French"])
+            _langs = _get("languages", _default_languages_list())
             if isinstance(_langs, str):
-                _langs = [lang.strip() for lang in _langs.split(",") if lang.strip()] or ["English", "French"]
+                _langs = [lang.strip() for lang in _langs.split(",") if lang.strip()] or _default_languages_list()
             _stance = _get("cultural_stance", [])
             conn.execute(
                 """UPDATE profile_core SET
@@ -797,7 +814,7 @@ class ProfileDatabase:
                 "appearance_origin": (row["appearance_origin"] if "appearance_origin" in row.keys() else None) or "local",
                 "languages": _parse_json_list(
                     row["languages"] if "languages" in row.keys() else None,
-                    default=["English", "French"],
+                    default=_default_languages_list(),
                 ),
                 # Multi-user isolation (v2.27.0)
                 "owner_device_id": (row["owner_device_id"] if "owner_device_id" in row.keys() else None) or "",
@@ -902,11 +919,35 @@ class ProfileDatabase:
     # ------------------------------------------------------------------
 
     def update_field(self, field: str, value) -> None:
-        """Update a single scalar field in profile_core."""
+        """Update a single scalar field in profile_core.
+
+        ``field`` is a SQL *identifier*, not a bindable parameter, so it is
+        checked against the live schema before it reaches the statement --
+        the same persistence-layer boundary ``update_appearance`` enforces
+        with ``_LOOKS_COLUMNS`` below. Without it, a caller-supplied
+        ``"name = 'x', owner_device_id"`` rewrote the multi-user isolation
+        column; ``PRAGMA table_info`` reduces the accepted set to real column
+        names, and the identifier is quoted regardless.
+
+        Args:
+            field: Name of an existing ``profile_core`` column.
+            value: Bound as a parameter, so it is never part of the SQL text.
+
+        Raises:
+            ValueError: if ``field`` is not a string, or names no column on
+                ``profile_core``. Previously a bad name raised
+                ``sqlite3.OperationalError`` (or, when crafted, silently
+                succeeded); it now always raises before touching the DB.
+        """
+        if not isinstance(field, str) or not self._column_exists(field):
+            raise ValueError(
+                f"update_field: {field!r} is not a profile_core column"
+            )
+        quoted = '"' + field.replace('"', '""') + '"'
         conn = self._connect()
         try:
             conn.execute(
-                f"UPDATE profile_core SET {field} = ?, updated_at = ? WHERE id = 1",
+                f"UPDATE profile_core SET {quoted} = ?, updated_at = ? WHERE id = 1",
                 (value, datetime.utcnow().isoformat()),
             )
             conn.commit()
@@ -1095,19 +1136,38 @@ def _parse_color(color_str: str) -> int:
 
 
 def get_profile_db(persona_id: str) -> ProfileDatabase:
-    """Get a ProfileDatabase for a persona, using the standard data path."""
+    """Get a ProfileDatabase for a persona, using the standard data path.
+
+    Raises:
+        ValueError: if ``persona_id`` is not a well-formed id. It becomes a
+            directory name here and ``ProfileDatabase.__init__`` mkdir -p's it,
+            so an unchecked ``..`` segment created an attacker-chosen tree
+            outside ``data_dir``. See :mod:`aura_life._safe_ids`.
+    """
     from aura_life.hooks import get_config
     config = get_config()
-    db_path = str(config.data_dir / persona_id / "profile.db")
+    persona_id = safe_persona_id(persona_id)
+    db_path = str(safe_join(config.data_dir, persona_id, "profile.db"))
     return ProfileDatabase(db_path)
 
 
 def get_owner_device_id(persona_id: str, data_dir=None) -> str:
-    """Owner device of a persona ('' = unset → owner-only for customs, N/A for presets)."""
+    """Owner device of a persona ('' = unset → owner-only for customs, N/A for presets).
+
+    Raises:
+        ValueError: if ``persona_id`` is not a well-formed id. This function
+            reads the multi-user isolation key back out of whatever
+            ``profile.db`` the path lands on, so an unchecked id was an
+            arbitrary-read primitive against another tenant's owner token.
+            ``.lower()`` normalization is kept -- it now happens inside
+            :func:`~aura_life._safe_ids.safe_persona_id`, after the charset
+            check passes.
+    """
+    persona_id = safe_persona_id(persona_id)
     if data_dir is None:
         from aura_life.hooks import get_config
         data_dir = get_config().data_dir
-    db_path = Path(data_dir) / persona_id.lower() / "profile.db"
+    db_path = safe_join(data_dir, persona_id, "profile.db")
     if not db_path.exists():
         return ""
     try:

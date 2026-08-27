@@ -1,7 +1,7 @@
 """
 Life Context Builder
 
-Builds context sections for system prompts from Samantha's life state.
+Builds context sections for system prompts from the persona's life state.
 
 Token budget (fallback path):
   Total context ≤ 2000 tokens (~8000 chars) to leave room for
@@ -52,7 +52,7 @@ if TYPE_CHECKING:
 
 class LifeContextBuilder:
     """
-    Builds context for system prompts from Samantha's autonomous life.
+    Builds context for system prompts from the persona's autonomous life.
 
     Creates narrative sections describing:
     - Current location and ambiance
@@ -1299,7 +1299,7 @@ class LifeContextBuilder:
         return " ".join(parts)
 
     def _build_trip_section(self) -> str:
-        """Build a short note when the persona is travelling away from home (T4.1).
+        """Build a short note when the persona is travelling away from home.
 
         Only shown when on_trip is True; omitted for AI personas or when trip data
         is missing.  Also appends a slow-reply acknowledgement when the destination

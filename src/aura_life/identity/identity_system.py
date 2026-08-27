@@ -287,7 +287,7 @@ class IdentitySystem:
         self._perceptions: Dict[str, PersonPerception] = {}
         self._trust_multiplier = self._calc_trust_multiplier(core_traits or [])
 
-        # Phase 6 expansion
+        # Values, self-esteem, ideal self and taste
         self._values: Dict[str, ValueBelief] = {}
         self._self_esteem = SelfEsteemState()
         self._ideal_self: List[IdealSelfTrait] = []

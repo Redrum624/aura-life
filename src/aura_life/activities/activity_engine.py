@@ -1,7 +1,7 @@
 """
 Activity Engine
 
-Manages Samantha's activities: selection, execution, and narrative generation.
+Manages the persona's activities: selection, execution, and narrative generation.
 """
 
 import random

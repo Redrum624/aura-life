@@ -32,7 +32,9 @@ class MultiPersonalityManager:
 
     def __init__(self):
         self._instances: Dict[str, PersonalityInstance] = {}
-        self._current_id: str = "samantha"
+        # No persona is current until one is registered and selected: a
+        # hardcoded id here resolved to a personality nobody had initialized.
+        self._current_id: Optional[str] = None
 
     def initialize_personality(
         self,
@@ -78,8 +80,38 @@ class MultiPersonalityManager:
         """Get a personality instance by ID."""
         return self._instances.get(personality_id.lower())
 
+    def remove_personality(self, personality_id: str) -> bool:
+        """Tear down a personality and drop it from the manager.
+
+        This is the teardown path for `initialize_personality`. Without it the
+        instance dict only ever grew, and every retained `PersonalityInstance`
+        pinned a `LifeService` — whose `LifeScheduler` may still hold live tick
+        jobs — for the life of the process.
+
+        Returns True if a personality was removed, False if the id was unknown.
+        """
+        pid = personality_id.lower()
+        instance = self._instances.pop(pid, None)
+        if instance is None:
+            return False
+
+        life_service = getattr(instance, "life_service", None)
+        if life_service is not None:
+            try:
+                life_service.stop()
+            except Exception as e:
+                logger.warning(f"Error stopping life service for '{pid}': {e}")
+
+        if self._current_id == pid:
+            self._current_id = None
+
+        logger.info(f"Removed personality: {pid}")
+        return True
+
     def get_current(self) -> Optional[PersonalityInstance]:
-        """Get the current active personality instance."""
+        """Get the current active personality instance, or None if unset."""
+        if self._current_id is None:
+            return None
         return self._instances.get(self._current_id)
 
     def set_current(self, personality_id: str) -> bool:
@@ -92,8 +124,8 @@ class MultiPersonalityManager:
         return False
 
     @property
-    def current_id(self) -> str:
-        """Get the current personality ID as string."""
+    def current_id(self) -> Optional[str]:
+        """Get the current personality ID, or None until `set_current` succeeds."""
         return self._current_id
 
     @property

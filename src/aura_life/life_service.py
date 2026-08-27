@@ -1,7 +1,7 @@
 """
 Life Service
 
-Main facade for Samantha's autonomous life system.
+Main facade for a persona's autonomous life system.
 Coordinates world, energy, activities, goals, and scheduling.
 """
 
@@ -11,6 +11,7 @@ import logging
 import random
 import re
 import sqlite3
+import threading
 from datetime import datetime, timedelta
 from typing import Callable, Dict, List, Optional
 
@@ -92,7 +93,43 @@ FORCED_WAKE_WINDOW_MINUTES = 20
 # so a long-running server can't accumulate an unbounded queue between restarts.
 SHAREABLE_QUEUE_MAX = 10
 
-# ============= Weather mood routing constants (T2.3) =============
+# ============= Retention bounds =============
+# Everything below is written on a fixed tick cadence and read back with a hard
+# LIMIT, so rows past the limit are never used again. Without a prune each table
+# grows for the persona's whole lifetime. Pruning happens on the write path, in
+# the connection already open, so no extra connection is taken.
+
+#: activity_logs rows kept. _load_state reads only the newest 20; the rest is
+#: write-only history, so this is generous headroom rather than a working set.
+ACTIVITY_LOG_RETENTION = 500
+
+#: Days a *shared* shareable_experiences row is kept. Unshared rows are queued
+#: work and are never pruned by age.
+SHAREABLE_RETENTION_DAYS = 90
+
+#: Completed / abandoned goals written to life_goals per save. GoalEngine keeps
+#: its own in-memory history cap; this bounds the table independently of it,
+#: because _save_goals rewrites the table wholesale on every goal tick.
+GOAL_HISTORY_PERSISTED_MAX = 20
+
+#: Distinct finished book titles kept. _pick_new_book falls back to re-reading a
+#: finished title once everything is read, so without dedupe the same title is
+#: appended again on every re-read. Evicting the oldest simply lets a long-ago
+#: title count as unread again.
+BOOKS_FINISHED_MAX = 200
+
+#: Locations registered from free text the user or the LLM produced
+#: (source="user"). Profile / occupation / interest seeds are never evicted.
+USER_LOCATION_MAX = 100
+
+#: Days a non-recurring user_calendar row is kept past its event date. Well
+#: beyond the 48h post-event check-in window, after which the row can no longer
+#: trigger anything: the upcoming scan looks forward only, the check-in scan
+#: looks at 48h, and promotion applies to recurring rows alone. Recurring rows
+#: are the anniversary source and are kept.
+CALENDAR_RETENTION_DAYS = 30
+
+# ============= Weather mood routing constants =============
 # Small one-shot nudge applied via AffectSystem.on_weather_nudge() on WEATHER CHANGE
 # (not every tick), so the push is bounded. Scale factors are unitless weights on
 # _shift_mood_positive / _shift_mood_negative internally.
@@ -310,7 +347,7 @@ CLOSE_RELATIONSHIP_STAGES = {"comfortable", "deep"}
 
 class LifeService:
     """
-    Main service coordinating Samantha's autonomous life.
+    Main service coordinating the persona's autonomous life.
 
     Manages:
     - World environment (location, weather, time)
@@ -324,7 +361,7 @@ class LifeService:
 
     def __init__(
         self,
-        db_path: str = "life.db",
+        db_path: Optional[str] = None,
         emotion_engine: Optional[object] = None,
         memory_service: Optional[object] = None,
         world_environment: Optional[WorldEnvironment] = None,
@@ -342,12 +379,17 @@ class LifeService:
         trip_geocode=None,
         user_model_provider: Optional[Callable[[str], object]] = None,
         follow_up_provider: Optional[Callable[[str], object]] = None,
+        datastore: Optional[object] = None,
     ):
         """
         Initialize the life service.
 
         Args:
-            db_path: Path to SQLite database
+            db_path: Path to the SQLite database. Optional only when a host has
+                registered the ``get_config`` hook and ``persona_id`` is given,
+                in which case it resolves to
+                ``<get_config().data_dir>/<persona_id>/life.db``. There is no
+                relative default: see :meth:`_resolve_db_path`.
             emotion_engine: Optional emotion engine for integration
             memory_service: Optional memory service for integration
             world_environment: Optional shared WorldEnvironment. When provided,
@@ -361,10 +403,23 @@ class LifeService:
                 from the persona profile (e.g. {"home": "cozy apartment..."}).
             persona_id: Persona identifier (for visual description updates).
             definition: PersonalityDefinition object (for visual description updates).
+            datastore: Optional host datastore for the user-calendar tables. When
+                supplied it must expose ``get_connection()`` as a context manager
+                yielding a live sqlite3 connection (the same contract
+                ``EmotionPersistence`` uses), and calendar rows are written there
+                instead of into ``db_path``. Optional like ``memory_service``:
+                with none supplied the calendar lives in ``db_path``, where
+                ``_init_database()`` already creates its table.
         """
-        self._db_path = db_path
+        self._db_path = self._resolve_db_path(db_path, persona_id)
         self._emotion_engine = emotion_engine
         self._memory_service = memory_service
+        # Host-supplied datastore for the user calendar. Injected, not resolved
+        # through get_persona_datastore(): every other collaborator on this class
+        # is injected, and a hook lookup would silently relocate an existing
+        # host's calendar rows out of db_path.
+        self._datastore = datastore
+        self._calendar_schema_ready = False
         self._sleep_schedule = sleep_schedule
         self._occupation = occupation
         self._interests = interests or []
@@ -409,7 +464,7 @@ class LifeService:
         self._session = ConversationSession()
         self._woke_pending = False
         self._forced_wake_at: Optional[datetime] = None
-        # Weather change tracking for one-shot mood nudge (Integration T2.3).
+        # Weather change tracking for one-shot mood nudge.
         self._last_weather_label: str = ""
         self._sustenance = SustenanceSystem()
         self._basic_needs = self._sustenance.state  # back-compat alias (same object)
@@ -481,7 +536,7 @@ class LifeService:
         self._pipeline = None  # Set externally via set_pipeline()
         self._transit: Optional[TransitState] = None  # Active transit overlay
         self._transport = TransportSystem()           # Travel estimation + mode
-        # Place-identity volatile state (current city / trip / weather) — T1.1
+        # Place-identity volatile state (current city / trip / weather)
         self._place_location: PlaceLocationState = PlaceLocationState()
 
         # WeatherService injection (default lazy-loaded singleton; mock in tests).
@@ -571,6 +626,20 @@ class LifeService:
         self._conversation_activity: str = ""
         self._conversation_activity_at: Optional[datetime] = None
 
+        # Sites that have already reported a user_model_provider failure, so a
+        # broken host provider is loud once instead of every tick forever.
+        self._user_model_failures_seen: set = set()
+
+        # Background thread handles. Both are daemon threads spawned by this
+        # class; keeping the handles is what lets stop() join them instead of
+        # leaving them mutating engine state after _save_state() has run.
+        self._visual_thread: Optional[threading.Thread] = None
+        self._init_ticks_thread: Optional[threading.Thread] = None
+        # Guards the check-and-spawn in _trigger_visual_description_update: the
+        # trigger is reachable from the scheduler tick and from the init-tick
+        # thread at once, so the is_alive() check alone would race.
+        self._visual_thread_lock = threading.Lock()
+
         # Life-driven proactive trigger state (in-memory, not persisted)
         self._life_trigger_cooldowns: Dict[str, datetime] = {}
         self._prev_mood: Optional[str] = None
@@ -585,6 +654,65 @@ class LifeService:
         self._init_database()
 
     # ============= Init Helpers =============
+
+    @staticmethod
+    def _resolve_db_path(db_path: Optional[str], persona_id: Optional[str]) -> str:
+        """Resolve the SQLite path, refusing to invent a relative one.
+
+        The default used to be the bare relative name ``"life.db"``, so a service
+        constructed without arguments wrote its database into whatever directory
+        the host process happened to be running in, and two personas started from
+        the same working directory silently shared one file. This module already
+        documents that exact class of bug — see the note in
+        ``_persist_activity_emotions`` about ``*_emotions.db`` being scattered by
+        a relative path.
+
+        With no explicit path, resolve the host's data directory the way
+        ``profile_db.get_profile_db`` does: ``<data_dir>/<persona_id>/life.db``,
+        through ``safe_join`` so a crafted persona id cannot escape it. When
+        neither an explicit path nor a host data directory is available there is
+        no correct answer, so raise instead of guessing.
+
+        Raises:
+            ValueError: when no path can be resolved, or ``persona_id`` is not a
+                well-formed id (see :mod:`aura_life._safe_ids`).
+        """
+        if db_path:
+            return db_path
+
+        if not persona_id:
+            raise ValueError(
+                "LifeService requires db_path, or a persona_id plus a host "
+                "get_config() hook so it can resolve "
+                "<data_dir>/<persona_id>/life.db. There is no relative default: "
+                "one would put the database in the host process's working "
+                "directory and let two personas share it."
+            )
+
+        from aura_life._safe_ids import safe_join, safe_persona_id
+
+        try:
+            # Imported inside the guard: an unconfigured hook must degrade into
+            # the ValueError below, not escape as HookNotConfigured. (The
+            # unguarded-call-site census in tests keys on this import's position.)
+            from aura_life.hooks import get_config
+            data_dir = get_config().data_dir
+        except Exception as exc:
+            raise ValueError(
+                f"LifeService got no db_path and cannot resolve one for "
+                f"{persona_id!r}: the host get_config() hook is unavailable "
+                f"({exc}). Pass db_path explicitly."
+            ) from exc
+
+        if not data_dir:
+            raise ValueError(
+                f"LifeService got no db_path and the host's get_config().data_dir "
+                f"is empty, so no path can be resolved for {persona_id!r}."
+            )
+
+        resolved = safe_join(data_dir, safe_persona_id(persona_id), "life.db")
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        return str(resolved)
 
     def _build_npcs(self, circle_defs: List[Dict]) -> List[NPC]:
         """Convert social_circle dicts from profile into NPC dataclasses."""
@@ -822,7 +950,47 @@ class LifeService:
         self._daily_planner._available_location_keys.add(slug)
         # Persist
         self._save_location(profile)
+        self._prune_user_locations()
         return profile
+
+    def _prune_user_locations(self) -> None:
+        """Keep the registry of user-mentioned places bounded.
+
+        Slugs here come from free text the user or the LLM produced (a ``[PLAN: …]``
+        tag, a schedule override), so a chatty or adversarial conversation would
+        otherwise grow the registry, the planner's key set and the ``life_locations``
+        table without limit, and ``_load_locations`` reloads all of them at start.
+
+        Only ``source="user"`` entries are evictable — defaults, profile,
+        occupation and interest seeds are structural. Never-visited entries go
+        first (conversational noise), oldest registration first; a place she has
+        actually been is part of her history. The location she is at right now is
+        never evicted.
+        """
+        registry = self._location_registry
+        user_keys = [k for k, p in registry.items() if p.source == "user"]
+        excess = len(user_keys) - USER_LOCATION_MAX
+        if excess <= 0:
+            return
+
+        current = (self._world.current_location or "").lower().replace(" ", "_")
+        candidates = [(i, k) for i, k in enumerate(user_keys) if k != current]
+        # Ascending by (visits, registration order) — least-attached first.
+        candidates.sort(key=lambda ik: (registry[ik[1]].visit_count, ik[0]))
+        doomed = [k for _, k in candidates[:excess]]
+        if not doomed:
+            return
+
+        for key in doomed:
+            registry.pop(key, None)
+            self._daily_planner._available_location_keys.discard(key)
+
+        with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
+            conn.executemany(
+                "DELETE FROM life_locations WHERE key = ?",
+                [(k,) for k in doomed],
+            )
+            conn.commit()
 
     # ============= Lifecycle =============
 
@@ -841,13 +1009,17 @@ class LifeService:
         self._scheduler.start()
 
         # Run initial ticks in background — scheduler is already running,
-        # endpoints return default state until first tick completes
-        import threading
-        threading.Thread(
-            target=self._scheduler.force_all_ticks,
-            daemon=True,
-            name=f"life-init-ticks-{self._persona_id}",
-        ).start()
+        # endpoints return default state until first tick completes.
+        # Guarded: _scheduler.start() is idempotent but this spawn was not, so a
+        # second start() used to add an orphan thread with no handle, still free
+        # to mutate engine state after stop() had already saved.
+        if self._init_ticks_thread is None or not self._init_ticks_thread.is_alive():
+            self._init_ticks_thread = threading.Thread(
+                target=self._scheduler.force_all_ticks,
+                daemon=True,
+                name=f"life-init-ticks-{self._persona_id}",
+            )
+            self._init_ticks_thread.start()
 
         # Log sleep schedule info
         if self._sleep_schedule:
@@ -862,8 +1034,10 @@ class LifeService:
     def _try_assign_home(self) -> None:
         """Backfill home city once for human personas that don't have one yet.
 
-        Gated by AURA_PLACE_ENABLED and persona_type; no-op when home is
-        already assigned. Safe-fail (never raises).
+        Gated by the host's injected config — ``get_config().place_enabled``
+        via ``aura_life.hooks`` — and by persona_type; no-op when home is
+        already assigned. That gate is config, not an environment variable:
+        nothing here consults ``os.environ``. Safe-fail (never raises).
         """
         try:
             from aura_life.hooks import get_config
@@ -883,9 +1057,33 @@ class LifeService:
         except Exception as exc:
             logger.warning("_try_assign_home failed: %s", exc)
 
+    #: Seconds stop() waits for each background thread before giving up on it.
+    _THREAD_JOIN_TIMEOUT = 10.0
+
     def stop(self) -> None:
-        """Stop the life service and save state."""
+        """Stop the life service and save state.
+
+        Background threads are joined *before* ``_save_state()``: both of them
+        mutate engine state, so saving first would persist a snapshot they then
+        moved on from, and returning with them still running leaves work racing a
+        service the caller believes is stopped.
+        """
         self._scheduler.stop()
+
+        for label, thread in (
+            ("init-ticks", self._init_ticks_thread),
+            ("visual-description", self._visual_thread),
+        ):
+            if thread is not None and thread.is_alive():
+                thread.join(self._THREAD_JOIN_TIMEOUT)
+                if thread.is_alive():
+                    logger.warning(
+                        "%s thread did not finish within %.0fs of stop()",
+                        label, self._THREAD_JOIN_TIMEOUT,
+                    )
+        self._init_ticks_thread = None
+        self._visual_thread = None
+
         self._save_state()
         logger.info("Life service stopped")
 
@@ -1437,8 +1635,8 @@ class LifeService:
             try:
                 um = self._user_model_provider(self._persona_id)
                 um.observe_message(text, datetime.now(), detected_emotion, emotion_intensity)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._report_user_model_failure("observe_message", exc)
 
     def on_theater_conversation(self, other_name: str, tone: str = "neutral") -> None:
         """Apply residue from a persona-to-persona (theater) conversation.
@@ -1467,11 +1665,11 @@ class LifeService:
         return self._desire_system.process_conversation_trigger(trigger_type)
 
     def increase_intimacy_openness(self, amount: float = 0.05) -> None:
-        """Increase Samantha's openness about intimate topics."""
+        """Increase the persona's openness about intimate topics."""
         self._desire_system.increase_openness(amount)
 
     def get_shareable_experiences(self, limit: int = 3) -> List[ShareableExperience]:
-        """Get experiences Samantha wants to share."""
+        """Get experiences the persona wants to share."""
         unshared = self._get_unshared_experiences()
         return sorted(unshared, key=lambda x: x.priority, reverse=True)[:limit]
 
@@ -1743,7 +1941,7 @@ class LifeService:
             pass  # Table doesn't exist yet
 
     # ------------------------------------------------------------------
-    # Place-identity state persistence (T1.1) — NO logic yet, schema only
+    # Place-identity state persistence
     # ------------------------------------------------------------------
 
     def _save_place_state(self) -> None:
@@ -1803,8 +2001,27 @@ class LifeService:
                 self._trip_catchup_pending_save = True
 
     # ------------------------------------------------------------------
-    # Real weather integration (T2.2)
+    # Real weather integration
     # ------------------------------------------------------------------
+
+    def _place_enabled(self) -> bool:
+        """Whether the host has place features enabled. Unreadable config means no.
+
+        This is a kill switch, so it fails **closed**. The check used to sit
+        inside a ``try`` whose ``except Exception`` was a bare ``pass``, which
+        meant ``HookNotConfigured`` — the state of every host that has not
+        registered ``get_config``, i.e. the default — fell through and ran the
+        feature as though the flag were on.
+        """
+        try:
+            from aura_life.hooks import get_config
+            return bool(get_config().place_enabled)
+        except Exception:
+            logger.debug(
+                "place_enabled is unreadable — treating place features as disabled",
+                exc_info=True,
+            )
+            return False
 
     def _get_weather_service(self):
         """Return the WeatherService instance (lazy-init singleton unless overridden)."""
@@ -1816,19 +2033,18 @@ class LifeService:
     def _update_weather(self) -> None:
         """Fetch real weather and override the World sim when available.
 
-        No-op for AI personas, personas without a known lat/lon, or when
-        AURA_PLACE_ENABLED or AURA_WEATHER_ENABLED is false (WeatherService
-        returns None in the latter case).
-        The World engine's existing Markov-simulated weather is the fallback and
-        is never reset here on failure.
+        No-op for AI personas, personas without a known lat/lon, for a persona
+        sharing a World it does not own, or when the host's injected config
+        reports ``place_enabled`` false (``aura_life.hooks.get_config()``).
+        That gate is config, not an environment variable: nothing on this path
+        consults ``os.environ``. Whether a real reading exists at all is the
+        host's ``get_weather_service()`` hook's call — it returns None when it
+        has nothing, and the World engine's existing Markov-simulated weather is
+        the fallback, never reset here on failure.
         """
         # Master place flag — when place is fully disabled, weather is too.
-        try:
-            from aura_life.hooks import get_config
-            if not get_config().place_enabled:
-                return
-        except Exception:
-            pass
+        if not self._place_enabled():
+            return
         # Shared-world personas don't own the World object; skip to avoid last-writer-wins races.
         if getattr(self, "_shared_world", False):
             return
@@ -1865,7 +2081,7 @@ class LifeService:
         self._save_place_state()
 
     # ------------------------------------------------------------------
-    # Travel / trip lifecycle (T4.1)
+    # Travel / trip lifecycle
     # ------------------------------------------------------------------
 
     def _trip_enabled(self) -> bool:
@@ -1983,12 +2199,8 @@ class LifeService:
             _rng: injectable random.Random instance for tests.
         """
         # Master place flag — when place is fully disabled, trips are too.
-        try:
-            from aura_life.hooks import get_config
-            if not get_config().place_enabled:
-                return
-        except Exception:
-            pass
+        if not self._place_enabled():
+            return
         # Shared-world personas don't own the world state.
         if getattr(self, "_shared_world", False):
             return
@@ -2204,7 +2416,7 @@ class LifeService:
 
     @staticmethod
     def _weather_mood_enabled() -> bool:
-        """Gate check for weather → mood nudge (T2.3). Read at call time so
+        """Gate check for weather → mood nudge. Read at call time so
         tests can monkeypatch os.environ without reloading the module."""
         import os as _os
         return _os.environ.get("AURA_WEATHER_MOOD_ENABLED", "true").lower() in ("true", "1", "yes")
@@ -2554,7 +2766,7 @@ class LifeService:
             season=self._world.season.value if hasattr(self._world.season, 'value') else str(self._world.season),
         )
 
-        # === Weather → Affect mood nudge (T2.3, human-only, on weather CHANGE) ===
+        # === Weather → Affect mood nudge (human-only, on weather CHANGE) ===
         # Route a one-shot bounded nudge when the weather label changes so the push
         # never accumulates unboundedly.  Gated by AURA_WEATHER_MOOD_ENABLED.
         if not self._is_ai and self._weather_mood_enabled():
@@ -2798,6 +3010,25 @@ class LifeService:
 
     def _record_life_trigger_cooldown(self, trigger_type: str, now: datetime):
         self._life_trigger_cooldowns[trigger_type] = now
+
+    def _report_user_model_failure(self, site: str, exc: BaseException) -> None:
+        """Report a failing host-supplied user-model provider.
+
+        WARNING the first time each site fails, DEBUG afterwards. These three
+        sites sit on the message and tick paths, so an unconditional warning
+        would be a log storm — but the bare ``except Exception: pass`` that was
+        here meant a broken provider degraded three behaviours invisibly and
+        permanently.
+        """
+        if site in self._user_model_failures_seen:
+            logger.debug("user_model_provider failed at %s: %s", site, exc, exc_info=True)
+            return
+        self._user_model_failures_seen.add(site)
+        logger.warning(
+            "user_model_provider failed at %s: %s — this behaviour stays degraded "
+            "until the host provider is fixed (reported once per site)",
+            site, exc, exc_info=True,
+        )
 
     def _relationship_is_close(self) -> bool:
         """True when the user<->persona bond is close (comfortable/deep stage).
@@ -3129,8 +3360,8 @@ class LifeService:
                         candidates[i] = (ttype, min(1.0, urgency + 0.1), topic, hint)
                     elif any(d in topic_lower for d in disengaged):
                         candidates[i] = (ttype, max(0.0, urgency - 0.15), topic, hint)
-            except Exception:
-                pass
+            except Exception as exc:
+                self._report_user_model_failure("engagement_weighting", exc)
 
         # --- Select and create triggers ---
         # Pick top 3 candidates by urgency, then weighted-random one
@@ -3170,8 +3401,8 @@ class LifeService:
             try:
                 um = self._user_model_provider(self._persona_id)
                 quiet_windows = um.quiet_windows if um.quiet_windows else None
-            except Exception:
-                pass
+            except Exception as exc:
+                self._report_user_model_failure("quiet_windows", exc)
 
         fm.create_trigger(
             trigger_type=follow_up_type,
@@ -3220,7 +3451,7 @@ class LifeService:
                     energy_after=0.7,
                 )
                 self._record_activity(log)
-                logger.info("Samantha went to sleep")
+                logger.info("The persona went to sleep")
                 return
 
         # Check if conditions are right for an intimate activity
@@ -3404,7 +3635,7 @@ class LifeService:
             self._media.book_progress += random.uniform(0.05, 0.12)
             if self._media.book_progress >= 1.0:
                 finished_title = self._media.current_book
-                self._media.books_finished.append(finished_title)
+                self._record_finished_book(finished_title)
                 self._create_shareable_from_text(
                     f"Just finished reading {finished_title}!",
                     context="After finishing the last page"
@@ -3681,9 +3912,14 @@ class LifeService:
                 self._trigger_arrival_message(current_location)
 
     def _trigger_visual_description_update(self) -> None:
-        """Run visual description generation in a background daemon thread."""
-        import threading
+        """Run visual description generation in a background daemon thread.
 
+        At most one at a time. This fires at the end of every activity tick and
+        again on resume, and the hook it calls is host LLM + image work; with no
+        in-flight guard a hook slower than the tick interval stacked a new thread
+        per tick, each closing over the service and the world and pinning both,
+        and ``stop()`` neither joined nor cancelled them.
+        """
         persona_id = self._persona_id
         definition = self._definition
         life_service = self
@@ -3696,7 +3932,18 @@ class LifeService:
             except Exception as e:
                 logger.warning(f"Background visual description update failed: {e}")
 
-        threading.Thread(target=_run, daemon=True).start()
+        # The check and the spawn must be atomic: this is reachable from the
+        # scheduler tick and from the init-tick thread at the same time.
+        with self._visual_thread_lock:
+            if self._visual_thread is not None and self._visual_thread.is_alive():
+                logger.debug("Visual description update already in flight — skipping")
+                return
+            self._visual_thread = threading.Thread(
+                target=_run,
+                daemon=True,
+                name=f"life-visual-{self._persona_id}",
+            )
+            self._visual_thread.start()
 
     def _trigger_arrival_message(self, location: str) -> None:
         """Create a proactive follow-up trigger when the persona arrives at a user-expected location."""
@@ -3789,9 +4036,24 @@ class LifeService:
             from aura_life.emotion.emotion_persistence import get_emotion_persistence
             from pathlib import Path
 
-            # Extract persona_id from db_path (format: "data/{persona}/life.db")
+            # Extract persona_id from db_path (format: "data/{persona}/life.db").
+            # A bare relative filename has NO parent directory name at all:
+            # Path("mara.db").parent.name is "" (and Path("./mara.db") normalises
+            # to the same thing), never ".". Testing only against "." meant the
+            # empty string was accepted as a persona id and the explicitly-passed
+            # self._persona_id was never consulted.
             db_parent = Path(self._db_path).parent.name
-            persona_id = db_parent if db_parent != "." else (self._persona_id or "samantha")
+            persona_id = db_parent if db_parent not in ("", ".") else (self._persona_id or "")
+            if not persona_id:
+                # No id to write under. Inventing one silently wrote every
+                # persona's emotions to a hardcoded name — better to skip and
+                # say so than to persist under a made-up identity.
+                logger.warning(
+                    "Cannot persist activity emotions: no persona_id, and db_path "
+                    "%r has no persona directory to derive one from",
+                    self._db_path,
+                )
+                return
 
             # Use the persona's CONSOLIDATED datastore so emotions are written into
             # memory.db — never a stray "{persona}_emotions.db" in the working dir.
@@ -4390,29 +4652,9 @@ class LifeService:
             """)
 
             # User calendar table — events extracted from conversation
-            cursor.execute("""
-                CREATE TABLE IF NOT EXISTS user_calendar (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    event_name TEXT NOT NULL,
-                    event_date TEXT NOT NULL,
-                    date_str TEXT DEFAULT '',
-                    recurring INTEGER DEFAULT 0,
-                    feeling TEXT DEFAULT 'neutral',
-                    importance REAL DEFAULT 0.5,
-                    source_memory_content TEXT DEFAULT '',
-                    triggered INTEGER DEFAULT 0,
-                    promoted_to_anniversary INTEGER DEFAULT 0,
-                    created_at TEXT NOT NULL
-                )
-            """)
+            self._ensure_calendar_schema(conn)
 
-            # Migration: post-event check-in tracking (added 2026-06)
-            try:
-                cursor.execute("ALTER TABLE user_calendar ADD COLUMN followed_up INTEGER DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass  # column already exists
-
-            # Place-identity volatile state table (T1.1)
+            # Place-identity volatile state table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS life_location_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -4666,6 +4908,12 @@ class LifeService:
             self._trip_catchup_pending_save = False
             self._save_place_state()
 
+        # Apply the user-location cap to what came back off disk too, or a database
+        # written before the cap simply reloads its whole registry on every start.
+        # Deferred out of the block above for the same reason: it writes, and the
+        # cursor was still open.
+        self._prune_user_locations()
+
     def _save_state(self) -> None:
         """Save state to database."""
         with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
@@ -4777,6 +5025,19 @@ class LifeService:
             ))
 
             log.id = cursor.lastrowid
+
+            # Retention: one row lands here every activity tick (~72/day) and
+            # only the newest 20 are ever read back, so without this the table is
+            # pure write-only growth on the user's disk.
+            cursor.execute("""
+                DELETE FROM activity_logs
+                WHERE id NOT IN (
+                    SELECT id FROM activity_logs
+                    ORDER BY started_at DESC, id DESC
+                    LIMIT ?
+                )
+            """, (ACTIVITY_LOG_RETENTION,))
+
             conn.commit()
 
         # Add to recent
@@ -4792,10 +5053,14 @@ class LifeService:
             # Clear and rewrite (simple approach)
             cursor.execute("DELETE FROM life_goals")
 
+            # This is a DELETE + full reinsert on every goal tick, so the write
+            # cost is the size of the history. Bound it here rather than relying
+            # on GoalEngine's own in-memory cap: the table is this method's
+            # responsibility. Both lists are append-ordered, so [-N:] is newest.
             all_goals = (
                 self._goal_engine.active_goals
-                + self._goal_engine.completed_goals
-                + self._goal_engine.abandoned_goals
+                + self._goal_engine.completed_goals[-GOAL_HISTORY_PERSISTED_MAX:]
+                + self._goal_engine.abandoned_goals[-GOAL_HISTORY_PERSISTED_MAX:]
             )
             for goal in all_goals:
                 data = goal.to_dict()
@@ -4920,7 +5185,7 @@ class LifeService:
             self._shareable_queue = self._shareable_queue[-SHAREABLE_QUEUE_MAX:]
 
     def _save_shareable(self) -> None:
-        """Save shareable experiences."""
+        """Save shareable experiences, then drop long-since-shared ones."""
         with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
             cursor = conn.cursor()
 
@@ -4935,6 +5200,15 @@ class LifeService:
                         exp.shared_at.isoformat() if exp.shared_at else None,
                         exp.id,
                     ))
+
+            # Retention: the load path only ever reads `shared = 0`, so a row
+            # stays on disk forever the moment it is shared. Unshared rows are
+            # still queued work and are never pruned by age.
+            cutoff = (datetime.now() - timedelta(days=SHAREABLE_RETENTION_DAYS)).isoformat()
+            cursor.execute("""
+                DELETE FROM shareable_experiences
+                WHERE shared = 1 AND COALESCE(shared_at, created_at) < ?
+            """, (cutoff,))
 
             conn.commit()
 
@@ -4992,7 +5266,11 @@ class LifeService:
                 )
                 self._record_life_trigger_cooldown("excitement_share", datetime.now())
             except Exception:
-                pass
+                # Matches the sibling trigger handlers: without this the trigger
+                # can be permanently dead in production with zero signal.
+                logger.warning(
+                    "Life trigger: EXCITEMENT_SHARE dispatch failed", exc_info=True
+                )
 
         # Boost priority of the most recent shareable (just created by caller)
         if self._shareable_queue:
@@ -5022,6 +5300,23 @@ class LifeService:
 
         # Persist skills
         self._save_skills()
+
+    def _record_finished_book(self, title: str) -> None:
+        """Record a finished book, without duplicates and without unbounded growth.
+
+        ``_pick_new_book`` deliberately falls back to ``random.choice(books)`` once
+        every title has been read, so the same title finishes again and again. The
+        list is JSON-serialized into ``life_media_state`` on every save, so a plain
+        append grew both memory and disk forever. Evicting the oldest at the cap
+        only means a long-ago title counts as unread again.
+        """
+        if not title:
+            return
+        if title in self._media.books_finished:
+            return
+        self._media.books_finished.append(title)
+        if len(self._media.books_finished) > BOOKS_FINISHED_MAX:
+            self._media.books_finished = self._media.books_finished[-BOOKS_FINISHED_MAX:]
 
     def _pick_new_book(self) -> Optional[str]:
         """Pick a new book from preferences that hasn't been finished yet."""
@@ -5223,8 +5518,13 @@ class LifeService:
                 )
             if loaded_values:
                 self._identity._values = loaded_values
+        except sqlite3.OperationalError:
+            pass  # Table doesn't exist yet — normal on first run
         except Exception:
-            pass  # Table might not have data yet
+            # A row-parse failure, a bad formed_at, a ValueBelief that won't
+            # build: real corruption, not a first run. The broad catch here
+            # discarded all of it with no log at any level.
+            logger.warning("Failed to load identity values", exc_info=True)
 
         # Load behavioral tendencies
         try:
@@ -5243,8 +5543,10 @@ class LifeService:
                             current=entry.get("current", entry.get("baseline", 0.1)),
                             last_surfaced=datetime.fromisoformat(entry["last_surfaced"]) if entry.get("last_surfaced") else None,
                         )
+        except sqlite3.OperationalError:
+            pass  # Table doesn't exist yet — normal on first run
         except Exception:
-            pass  # Table might not exist yet
+            logger.warning("Failed to load behavioral tendencies", exc_info=True)
 
     def _save_affect(self) -> None:
         """Save affect state to database."""
@@ -5671,8 +5973,15 @@ class LifeService:
             if row and row["current_location"]:
                 self._world._current_location = row["current_location"]
                 return
+        except sqlite3.OperationalError:
+            pass  # Table doesn't exist yet — normal on first run
         except Exception:
-            pass  # Table may not exist yet
+            # Say so before falling back, or a genuine read failure is
+            # indistinguishable from an empty first-run database.
+            logger.warning(
+                "Failed to load world location; falling back to plan slot / last "
+                "activity / 'home'", exc_info=True,
+            )
 
         # Fallback: use current plan slot location
         if self._daily_planner.current_plan:
@@ -5722,10 +6031,21 @@ class LifeService:
             conn.commit()
 
     def _load_locations(self, cursor) -> None:
-        """Load persisted locations from database and merge into registry."""
+        """Load persisted locations from database and merge into registry.
+
+        Only the query is allowed to fail quietly (no table on a first run). A bad
+        row is logged and skipped rather than ending the loop: the broad catch that
+        used to wrap the whole loop let one malformed row silently truncate the
+        persona's known places, leaving a half-populated planner key set.
+        """
         try:
             cursor.execute("SELECT * FROM life_locations")
-            for row in cursor.fetchall():
+            rows = cursor.fetchall()
+        except sqlite3.OperationalError:
+            return  # Table doesn't exist yet — normal on first run
+
+        for row in rows:
+            try:
                 key = row["key"]
                 if key in self._location_registry:
                     # Update existing entry with persisted visit data
@@ -5746,8 +6066,8 @@ class LifeService:
                         last_visit=row["last_visit"],
                     )
                     self._daily_planner._available_location_keys.add(key)
-        except Exception:
-            pass  # Table may not exist yet on first run
+            except Exception:
+                logger.warning("Skipping unreadable life_locations row", exc_info=True)
 
     def _save_needs_state(self) -> None:
         """Save the Sustenance engine state to the database."""
@@ -6167,7 +6487,7 @@ class LifeService:
         }
 
     # ------------------------------------------------------------------
-    # Persona-local time helpers (T1.3)
+    # Persona-local time helpers
     # ------------------------------------------------------------------
 
     def _persona_timezone(self) -> str:
@@ -6481,12 +6801,73 @@ class LifeService:
 
     # ============= Calendar CRUD =============
 
+    @staticmethod
+    def _ensure_calendar_schema(conn) -> None:
+        """Create the ``user_calendar`` table and its migration on *conn*.
+
+        Runs against both backing stores: ``_init_database()`` creates it inside
+        ``db_path``, and an injected host datastore gets it on first use — the
+        host owns that file and has no reason to already carry this schema.
+        """
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS user_calendar (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                event_name TEXT NOT NULL,
+                event_date TEXT NOT NULL,
+                date_str TEXT DEFAULT '',
+                recurring INTEGER DEFAULT 0,
+                feeling TEXT DEFAULT 'neutral',
+                importance REAL DEFAULT 0.5,
+                source_memory_content TEXT DEFAULT '',
+                triggered INTEGER DEFAULT 0,
+                promoted_to_anniversary INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL
+            )
+        """)
+        # Migration: post-event check-in tracking (added 2026-06)
+        try:
+            conn.execute("ALTER TABLE user_calendar ADD COLUMN followed_up INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # column already exists
+
+    @contextlib.contextmanager
+    def _calendar_connection(self):
+        """Yield the connection the ``user_calendar`` table lives on.
+
+        Two shapes, both supported:
+
+        * a host that injected ``datastore=`` gets calendar rows in its own
+          consolidated store (the contract ``EmotionPersistence`` already uses);
+        * with no datastore — the plain library shape — rows go to ``db_path``,
+          where ``_init_database()`` has already created the table.
+
+        This helper exists because the three calendar methods below opened the
+        host datastore directly while nothing ever assigned that attribute, so
+        both public methods raised ``AttributeError`` on first call and the daily
+        scan failed silently inside its ``except``.
+        """
+        if self._datastore is not None:
+            with self._datastore.get_connection() as conn:
+                if not self._calendar_schema_ready:
+                    self._ensure_calendar_schema(conn)
+                    self._calendar_schema_ready = True
+                yield conn
+            return
+
+        with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+
     def add_calendar_entry(self, entry: CalendarEntry) -> bool:
         """Add a calendar entry with event_name+event_date dedup.
 
         Returns True if added, False if duplicate.
         """
-        with self._datastore.get_connection() as conn:
+        with self._calendar_connection() as conn:
             date_str = entry.event_date.isoformat() if entry.event_date else ""
             # Dedup check
             existing = conn.execute(
@@ -6496,7 +6877,7 @@ class LifeService:
             if existing:
                 return False
 
-            conn.execute("""
+            cursor = conn.execute("""
                 INSERT INTO user_calendar
                 (event_name, event_date, date_str, recurring, feeling, importance,
                  source_memory_content, triggered, promoted_to_anniversary, created_at)
@@ -6508,7 +6889,10 @@ class LifeService:
                 entry.source_memory_content,
                 (entry.created_at or datetime.now()).isoformat(),
             ))
-        logger.info(f"[CALENDAR] Added: {entry.event_name} on {entry.date_str}")
+            entry.id = cursor.lastrowid
+        # The event name is user-derived personal content ("extracted from
+        # conversation"), so it never reaches the host log — id only, at DEBUG.
+        logger.debug("[CALENDAR] Added entry id=%s", entry.id)
 
         # Also add anticipation to MemoryTimeSystem so it flows into context
         if entry.event_date and entry.event_date > datetime.now():
@@ -6527,7 +6911,7 @@ class LifeService:
         now_str = now.isoformat()
 
         entries = []
-        with self._datastore.get_connection() as conn:
+        with self._calendar_connection() as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute("""
                 SELECT * FROM user_calendar
@@ -6561,7 +6945,7 @@ class LifeService:
         cutoff = (now + timedelta(days=3)).isoformat()
         now_str = now.isoformat()
 
-        with self._datastore.get_connection() as conn:
+        with self._calendar_connection() as conn:
             conn.row_factory = sqlite3.Row
 
             # --- Untriggered events within 3 days ---
@@ -6633,7 +7017,7 @@ class LifeService:
                     "UPDATE user_calendar SET promoted_to_anniversary = 1 WHERE id = ?",
                     (row["id"],),
                 )
-                logger.info(f"[CALENDAR] Promoted recurring event to anniversary: {row['event_name']}")
+                logger.debug("[CALENDAR] Promoted recurring event id=%s to anniversary", row["id"])
 
             # --- Post-event check-ins: ask how a just-passed event went ---
             window_start = (now - timedelta(hours=48)).isoformat()
@@ -6664,7 +7048,22 @@ class LifeService:
                     "UPDATE user_calendar SET followed_up = 1 WHERE id = ?", (row["id"],)
                 )
                 self._record_life_trigger_cooldown("event_check_in", now)
-                logger.info(f"[CALENDAR] Post-event check-in triggered for: {row['event_name']}")
+                logger.debug("[CALENDAR] Post-event check-in triggered for entry id=%s", row["id"])
+
+            # --- Retention: drop rows that can never fire again ---
+            # A non-recurring event past the retention window is finished
+            # business: the block above only looks forward, the check-in block
+            # only looks back 48h, and promotion applies to recurring rows only.
+            # Every scan re-queries this table in full, so leaving them costs on
+            # every tick forever. Recurring rows are the anniversary source and
+            # are kept.
+            retention_cutoff = (
+                now - timedelta(days=CALENDAR_RETENTION_DAYS)
+            ).isoformat()
+            conn.execute(
+                "DELETE FROM user_calendar WHERE recurring = 0 AND event_date < ?",
+                (retention_cutoff,),
+            )
 
     def _generate_gap_narrative(self, hours: float) -> str:
         """Generate a narrative summarizing a long gap period."""

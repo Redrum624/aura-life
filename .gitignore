@@ -5,4 +5,12 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Runtime state the library writes. A contributor running the quickstart inside
+# the checkout would otherwise commit their own persona databases and their own
+# (coarsened) coordinates.
 *.db
+.device_location.json
+
+# go-public run state (see /public-repo skill)
+public-repo/

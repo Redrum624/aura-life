@@ -65,6 +65,10 @@ class SustenanceSystem:
             self._state.nutrition = min(1.0, self._state.nutrition + boost)
 
     def on_user_message(self, text: str = "") -> None:
+        """Part of the documented engine contract; this engine does not react to chat.
+
+        Intentionally inert — kept so every engine presents the same surface.
+        """
         return
 
     def reset_daily(self) -> None:

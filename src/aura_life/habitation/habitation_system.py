@@ -66,6 +66,10 @@ class HabitationSystem:
             self._recompute_comfort()
 
     def on_user_message(self, text: str = "") -> None:
+        """Part of the documented engine contract; this engine does not react to chat.
+
+        Intentionally inert — kept so every engine presents the same surface.
+        """
         return
 
     def leave_home(self) -> None:

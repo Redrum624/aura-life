@@ -1,7 +1,7 @@
 """
 Energy System
 
-Manages Samantha's energy levels, fatigue, circadian rhythms, and boosts.
+Manages the persona's energy levels, fatigue, circadian rhythms, and boosts.
 """
 
 from datetime import datetime, timedelta
@@ -105,7 +105,7 @@ ENERGY_GROWTH_TRAITS = {
 
 class EnergySystem:
     """
-    Manages Samantha's energy and fatigue cycles.
+    Manages the persona's energy and fatigue cycles.
 
     Features:
     - Circadian rhythm following real time
@@ -351,7 +351,7 @@ class EnergySystem:
         return RESPONSE_MODIFIERS.get(self.energy_level, RESPONSE_MODIFIERS[EnergyLevel.COMFORTABLE])
 
     def should_rest(self) -> bool:
-        """Check if Samantha should rest."""
+        """Check if the persona should rest."""
         return self._state.effective_level < 0.25 or self._state.fatigue > 0.7
 
     def should_sleep(

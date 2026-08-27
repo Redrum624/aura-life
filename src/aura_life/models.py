@@ -186,7 +186,7 @@ class CherishedObject:
 
 @dataclass
 class WorldState:
-    """Current state of Samantha's virtual world."""
+    """Current state of the persona's virtual world."""
     current_location: Location = Location.LIVING_ROOM
     weather: Weather = Weather.SUNNY
     virtual_time: datetime = field(default_factory=datetime.now)
@@ -210,7 +210,7 @@ class EnergyLevel(Enum):
 
 @dataclass
 class EnergyState:
-    """Samantha's current energy and fatigue state."""
+    """The persona's current energy and fatigue state."""
     level: float = 0.7  # 0-1
     fatigue: float = 0.0  # Accumulated fatigue (0-1)
     caffeine_boost: float = 0.0  # Temporary boost
@@ -258,7 +258,7 @@ class ActivityCategory(Enum):
 
 @dataclass
 class Activity:
-    """Definition of an activity Samantha can do."""
+    """Definition of an activity the persona can do."""
     name: str
     category: ActivityCategory
     energy_cost: float  # Negative = restores energy
@@ -361,7 +361,7 @@ class GoalSource(Enum):
 
 @dataclass
 class Goal:
-    """A goal Samantha is working toward."""
+    """A goal the persona is working toward."""
     id: Optional[int] = None
     title: str = ""
     description: str = ""
@@ -661,7 +661,7 @@ class TransitState:
 
 @dataclass
 class ShareableExperience:
-    """Something Samantha wants to share with the user."""
+    """Something the persona wants to share with the user."""
     id: Optional[int] = None
     activity_log_id: Optional[int] = None
     content: str = ""  # What to share

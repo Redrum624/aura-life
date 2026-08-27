@@ -1,23 +1,24 @@
 # gitleaks configuration
 #
-# The default rule set, unmodified. aura-life has no allowlist because it
-# needs none: the package is pure Python with no vendored upstream code, no
-# test-vector fixtures, and no crypto material. The two parity goldens under
-# tests/fixtures/ are life-simulation state snapshots — mood, energy, schedule
-# — and carry nothing that resembles a credential.
-#
-# Contrast with the two sibling configs, both of which exist only to pin
-# false positives this package cannot produce:
-#   - Aura's allowlists vendored llama.cpp and Vulkan-Headers, whose example
-#     keys and extension string tables trip the entropy rules.
-#   - wellness_companion's pins three known-answer crypto test vectors.
+# The default rule set, unmodified. aura-life has no allowlist because it needs
+# none: the package is pure Python with no vendored upstream code, no test-vector
+# fixtures, and no crypto material. The two committed JSON fixtures — the parity
+# golden under tests/fixtures/ and tests/api_surface.json — are a life-simulation
+# state snapshot (mood, energy, schedule) and a list of exported names; neither
+# carries anything that resembles a credential.
 #
 # If an allowlist is ever needed here, pin the exact bytes and the exact file
 # with condition = "AND", never a bare path — a path exemption would hide a
 # real secret added to that file later.
 #
-# Baseline: full-history scan on 2026-08-26 at f7b2327 reported
-# "28 commits scanned / no leaks found".
+# Verifying the tree and the history:
+#
+#   gitleaks detect --config .gitleaks.toml --no-git    # working tree
+#   gitleaks detect --config .gitleaks.toml             # full history
+#
+# No commit-pinned baseline is recorded here on purpose: any SHA written into
+# this file is stale the moment the next commit lands, which teaches a reader to
+# distrust the file. Run the commands above instead.
 
 [extend]
 useDefault = true

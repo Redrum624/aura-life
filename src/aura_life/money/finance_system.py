@@ -156,7 +156,10 @@ class FinanceSystem:
             self._recompute_feeling()
 
     def on_user_message(self, text: str = "") -> None:
-        """Finances don't react to chat directly."""
+        """Part of the documented engine contract; this engine does not react to chat.
+
+        Intentionally inert — kept so every engine presents the same surface.
+        """
         return
 
     # ------------------------------------------------------------------

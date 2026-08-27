@@ -56,6 +56,10 @@ class SkillsSystem:
         return reached
 
     def on_user_message(self, text: str = "") -> None:
+        """Part of the documented engine contract; this engine does not react to chat.
+
+        Intentionally inert — kept so every engine presents the same surface.
+        """
         return
 
     def export_state(self) -> dict:

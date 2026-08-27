@@ -1,7 +1,7 @@
 """
 Goal Engine
 
-Manages Samantha's self-generated goals based on personality, experiences, and conversations.
+Manages the persona's self-generated goals based on personality, experiences, and conversations.
 
 Goals have a living lifecycle:
 - Created with full motivation
@@ -190,12 +190,18 @@ ABANDON_REASONS = [
 
 class GoalEngine:
     """
-    Manages Samantha's goals with a living emotional lifecycle.
+    Manages the persona's goals with a living emotional lifecycle.
 
     Goals aren't just progress bars — they carry motivation that
     decays without progress. She can give up, feel lost without
     direction, and find renewed purpose in new goals.
     """
+
+    # Upper bound on the completed / abandoned history kept in memory (and
+    # therefore re-written to `life_goals` on every save). Readers only ever
+    # take the last 3, 5 or 10 (see `_build_reflection`, `export_state`,
+    # `get_status`), so this is generous headroom, not a working set.
+    MAX_GOAL_HISTORY = 20
 
     def __init__(self):
         """Initialize goal engine."""
@@ -549,6 +555,8 @@ class GoalEngine:
                 }
                 for g in self._active_goals
             ],
+            # Retained history, not a lifetime total — both lists are capped
+            # at MAX_GOAL_HISTORY.
             "completed_count": len(self._completed_goals),
             "abandoned_count": len(self._abandoned_goals),
             "is_goalless": self.is_goalless,
@@ -557,10 +565,18 @@ class GoalEngine:
         }
 
     def load_goals(self, goals: List[Goal]) -> None:
-        """Load goals from persistence."""
+        """Load goals from persistence.
+
+        History is truncated to MAX_GOAL_HISTORY on the way in: a DB written
+        before the cap existed would otherwise reinflate the lists on start.
+        """
         self._active_goals = [g for g in goals if g.is_active and not g.abandoned_at]
-        self._completed_goals = [g for g in goals if not g.is_active and g.completed_at]
-        self._abandoned_goals = [g for g in goals if g.abandoned_at is not None]
+        self._completed_goals = [
+            g for g in goals if not g.is_active and g.completed_at
+        ][-self.MAX_GOAL_HISTORY:]
+        self._abandoned_goals = [
+            g for g in goals if g.abandoned_at is not None
+        ][-self.MAX_GOAL_HISTORY:]
 
         # Detect if already goalless at load time
         if self.is_goalless:
@@ -628,6 +644,9 @@ class GoalEngine:
         if goal in self._active_goals:
             self._active_goals.remove(goal)
         self._abandoned_goals.append(goal)
+        # Keep last MAX_GOAL_HISTORY abandoned goals
+        if len(self._abandoned_goals) > self.MAX_GOAL_HISTORY:
+            self._abandoned_goals = self._abandoned_goals[-self.MAX_GOAL_HISTORY:]
 
         # Emotional weight depends on how important the goal was
         base_sadness = {
@@ -670,6 +689,9 @@ class GoalEngine:
         if goal in self._active_goals:
             self._active_goals.remove(goal)
         self._completed_goals.append(goal)
+        # Keep last MAX_GOAL_HISTORY completed goals
+        if len(self._completed_goals) > self.MAX_GOAL_HISTORY:
+            self._completed_goals = self._completed_goals[-self.MAX_GOAL_HISTORY:]
 
     def _expire_goal(self, goal: Goal) -> None:
         """Remove an expired goal without completion."""

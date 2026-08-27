@@ -2,7 +2,8 @@
 Multi-Emotion Engine
 
 Manages concurrent emotions with intensities, decay, and blend weights.
-Based on Samantha's OCEAN personality traits for emotional baseline.
+Baseline emotions come from the caller's explicit baseline, or are derived
+from an OCEAN personality profile (neutral by default).
 """
 import time
 from dataclasses import dataclass, field
@@ -46,13 +47,15 @@ class EmotionState:
     blend_weights: Dict[str, float] = field(default_factory=dict)
 
 
-# Samantha's OCEAN traits for baseline calculation
-TRAITS = {
-    "openness": 0.85,
-    "conscientiousness": 0.55,
-    "extraversion": 0.70,
-    "agreeableness": 0.80,
-    "neuroticism": 0.45
+# Neutral OCEAN profile used to derive a baseline when the caller supplies
+# neither an explicit `initial_baseline` nor `ocean_traits`. Deliberately flat:
+# a library default must not impose one character's personality on every host.
+DEFAULT_OCEAN_TRAITS = {
+    "openness": 0.5,
+    "conscientiousness": 0.5,
+    "extraversion": 0.5,
+    "agreeableness": 0.5,
+    "neuroticism": 0.5,
 }
 
 # Emotions that fade quickly
@@ -75,17 +78,26 @@ class EmotionEngine:
     BASE_DECAY_RATE = 0.001  # Per second; ~0.06 decay per minute (very slow decay)
     DECAY_INTERVAL_SEC = 1.0
 
-    def __init__(self, initial_baseline: Dict[str, float] = None):
+    def __init__(
+        self,
+        initial_baseline: Dict[str, float] = None,
+        ocean_traits: Optional[Dict[str, float]] = None,
+    ):
         """
         Initialize the emotion engine.
 
         Args:
             initial_baseline: Optional dict of emotion->intensity for this
                 personality (e.g. {"content": 0.5, "joyful": 0.4}).
-                If None, falls back to OCEAN-derived baseline.
+                If None, falls back to an OCEAN-derived baseline.
+            ocean_traits: Optional Big Five profile (openness, conscientiousness,
+                extraversion, agreeableness, neuroticism, each 0..1) used for that
+                fallback. Missing keys fall back to DEFAULT_OCEAN_TRAITS, which is
+                neutral across the board.
         """
         self._state = EmotionState()
         self._last_decay_time = time.time()
+        self._ocean_traits = {**DEFAULT_OCEAN_TRAITS, **(ocean_traits or {})}
 
         if initial_baseline:
             self._baseline_emotions = self._baseline_from_dict(initial_baseline)
@@ -100,12 +112,14 @@ class EmotionEngine:
         Calculate baseline emotions from OCEAN personality traits.
 
         Based on psychological research mapping Big Five to emotional tendencies.
+        Uses the profile passed to the constructor, or the neutral default.
         """
-        o = TRAITS["openness"]
-        c = TRAITS["conscientiousness"]
-        e = TRAITS["extraversion"]
-        a = TRAITS["agreeableness"]
-        n = TRAITS["neuroticism"]
+        traits = self._ocean_traits
+        o = traits["openness"]
+        c = traits["conscientiousness"]
+        e = traits["extraversion"]
+        a = traits["agreeableness"]
+        n = traits["neuroticism"]
 
         baselines = [
             # High openness + extraversion = curious and interested

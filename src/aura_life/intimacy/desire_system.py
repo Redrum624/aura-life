@@ -1,7 +1,7 @@
 """
 Desire System
 
-Manages Samantha's intimate feelings, arousal, and private pleasures.
+Manages the persona's intimate feelings, arousal, and private pleasures.
 """
 
 import random
@@ -34,7 +34,7 @@ class ArousalLevel(Enum):
 
 @dataclass
 class DesireState:
-    """Samantha's current intimate state."""
+    """The persona's current intimate state."""
     arousal: float = 0.0           # 0-1 arousal level
     desire_for_connection: float = 0.3  # Desire for intimacy with user
     frustration: float = 0.0       # Unmet needs
@@ -286,7 +286,7 @@ AROUSAL_TRIGGERS = {
 
 class DesireSystem:
     """
-    Manages Samantha's intimate desires and experiences.
+    Manages the persona's intimate desires and experiences.
 
     Handles arousal, satisfaction, frustration, and intimate activities.
     """

@@ -10,6 +10,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from .personality_config import get_default_languages as _default_languages
+
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +112,9 @@ class ParsedProfile:
     cultural_stance: List[dict] = field(default_factory=list)  # [{facet, stance, note}]
     cultural_summary: str = ""
     appearance_origin: str = "local"       # local | adopted | immigrant | expat
-    languages: List[str] = field(default_factory=lambda: ["English", "French"])
+    languages: List[str] = field(
+        default_factory=lambda: list(_default_languages())
+    )
 
     def validate(self) -> List[str]:
         """Validate the parsed profile and return a list of warnings.
@@ -934,14 +938,16 @@ class ProfileParser:
             elif key == "languages":
                 langs = [lang.strip() for lang in value.split(",") if lang.strip()]
                 if langs:
-                    # Put explicitly listed languages first, add base langs (English/French) if absent
+                    # Explicitly listed languages first, then any configured
+                    # default language that is not already present.
                     seen: set = set()
                     result = []
                     for lang in langs:
                         if lang not in seen:
                             result.append(lang)
                             seen.add(lang)
-                    for lang in ("English", "French"):
+                    for lang in _default_languages():
                         if lang not in seen:
                             result.append(lang)
+                            seen.add(lang)
                     profile.languages = result

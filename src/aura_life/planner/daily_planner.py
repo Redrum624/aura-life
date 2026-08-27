@@ -1,7 +1,7 @@
 """
 Daily Planner
 
-Generates a consistent daily schedule for Samantha.
+Generates a consistent daily schedule for the persona.
 
 The plan is generated once per day (at dawn or server start) and followed
 throughout the day. If conditions change (weather, energy crisis), upcoming
@@ -569,7 +569,7 @@ def get_holidays(nationality: str, year: int) -> Dict[Tuple[int, int], str]:
 
 class DailyPlanner:
     """
-    Generates and manages Samantha's daily schedule.
+    Generates and manages the persona's daily schedule.
 
     Principles:
     - Plan is generated ONCE per day, at dawn or server start
@@ -579,6 +579,9 @@ class DailyPlanner:
     - Desires and goals shape the plan
     - Energy curves are respected (no high-energy activities at night)
     """
+
+    # Upper bound on a plan's `revision_notes` (see `_note_revision`).
+    MAX_REVISION_NOTES = 20
 
     def __init__(
         self,
@@ -1011,7 +1014,7 @@ class DailyPlanner:
                 old = slot.activity_name
                 slot.activity_name = random.choice(["relaxing", "napping"])
                 slot.reason = "needed rest"
-                self._current_plan.revision_notes.append(
+                self._note_revision(
                     f"Swapped {old} at {slot.hour}:00 for {slot.activity_name} (low energy)"
                 )
                 revised = True
@@ -1022,7 +1025,7 @@ class DailyPlanner:
                 gentle = ["listening to music", "reading", "making tea", "journaling"]
                 slot.activity_name = random.choice(gentle)
                 slot.reason = f"not feeling up to it"
-                self._current_plan.revision_notes.append(
+                self._note_revision(
                     f"Swapped {old} at {slot.hour}:00 for {slot.activity_name} (low mood)"
                 )
                 revised = True
@@ -1031,7 +1034,7 @@ class DailyPlanner:
             if slot.activity_name == "stargazing" and weather not in (Weather.CLEAR_NIGHT, Weather.STARRY):
                 slot.activity_name = "reading"
                 slot.reason = "sky clouded over"
-                self._current_plan.revision_notes.append(
+                self._note_revision(
                     f"Swapped stargazing at {slot.hour}:00 for reading (weather changed)"
                 )
                 revised = True
@@ -1042,7 +1045,7 @@ class DailyPlanner:
                 if slot.activity_name in outdoor:
                     slot.activity_name = random.choice(["reading", "listening to music"])
                     slot.reason = "staying in because of rain"
-                    self._current_plan.revision_notes.append(
+                    self._note_revision(
                         f"Moved inside at {slot.hour}:00 (rain)"
                     )
                     revised = True
@@ -1151,7 +1154,7 @@ class DailyPlanner:
                 slot.activity_name = "relaxing"
                 slot.location = "home"
                 slot.reason = "day off"
-        self._current_plan.revision_notes.append("Cancelled remaining work — taking the day off")
+        self._note_revision("Cancelled remaining work — taking the day off")
         logger.info("Schedule override: cancelled remaining work slots")
 
     def override_current_location(self, location: str) -> None:
@@ -1164,7 +1167,7 @@ class DailyPlanner:
         next_slot = self._current_plan.get_next_slot()
         if next_slot:
             next_slot.location = location
-        self._current_plan.revision_notes.append(f"Moved to {location}")
+        self._note_revision(f"Moved to {location}")
         logger.info(f"Schedule override: moved to {location}")
 
     def stay_at_current_location(self) -> None:
@@ -1177,7 +1180,7 @@ class DailyPlanner:
         for slot in self._current_plan.slots:
             if slot.hour >= now_hour and not slot.completed:
                 slot.location = current_loc
-        self._current_plan.revision_notes.append(f"Staying at {current_loc}")
+        self._note_revision(f"Staying at {current_loc}")
         logger.info(f"Schedule override: staying at {current_loc}")
 
     def schedule_rendezvous(self, location: str) -> None:
@@ -1196,7 +1199,7 @@ class DailyPlanner:
                 slot.location = location
                 slot.reason = "planned meetup"
                 updated += 1
-        self._current_plan.revision_notes.append(f"Meeting at {location}")
+        self._note_revision(f"Meeting at {location}")
         logger.info(f"Schedule rendezvous: meeting at {location}")
 
     def set_planned_activity(
@@ -1248,10 +1251,27 @@ class DailyPlanner:
             # Keep slots ordered by hour (matches how generated plans are built).
             self._current_plan.slots.sort(key=lambda s: s.hour)
 
-        self._current_plan.revision_notes.append(
+        self._note_revision(
             f"Planned {activity_name} at {hour:02d}:00 ({reason})"
         )
         logger.info(f"Planned activity set: {hour:02d}:00 — {activity_name} @ {loc}")
+
+    def _note_revision(self, note: str) -> None:
+        """Record a silent plan revision, keeping the list bounded.
+
+        The plan is replaced daily, but `apply_schedule_override` adds one note
+        per user schedule command, and the whole list is JSON-serialized into
+        the `life_daily_plan` row — so a chatty day would otherwise produce an
+        arbitrarily large row.
+        """
+        if not self._current_plan:
+            return
+        self._current_plan.revision_notes.append(note)
+        # Keep last MAX_REVISION_NOTES notes
+        if len(self._current_plan.revision_notes) > self.MAX_REVISION_NOTES:
+            self._current_plan.revision_notes = (
+                self._current_plan.revision_notes[-self.MAX_REVISION_NOTES:]
+            )
 
     def load_state(self, plan: Optional[DailyPlan], desires: List[ShortTermDesire]) -> None:
         """Load persisted state."""

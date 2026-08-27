@@ -157,6 +157,7 @@ from aura_life.schedule import (
     UpcomingEvent,
     PersonaSchedule,
     get_persona_schedule,
+    clear_persona_schedule,
 )
 from aura_life import hooks
 from aura_life.hooks import HookNotConfigured
@@ -318,6 +319,7 @@ __all__ = [
     "UpcomingEvent",
     "PersonaSchedule",
     "get_persona_schedule",
+    "clear_persona_schedule",
     # Hooks
     "hooks",
     "HookNotConfigured",

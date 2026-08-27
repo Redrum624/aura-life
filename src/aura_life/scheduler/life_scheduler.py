@@ -1,7 +1,7 @@
 """
 Life Scheduler
 
-APScheduler-based background simulation for Samantha's autonomous life.
+APScheduler-based background simulation for the persona's autonomous life.
 """
 
 import logging
@@ -131,11 +131,24 @@ class LifeScheduler:
         logger.info("Life scheduler started")
 
     def stop(self) -> None:
-        """Stop the scheduler."""
-        if self._scheduler and self._is_running:
-            self._scheduler.shutdown(wait=False)
-            self._is_running = False
-            logger.info("Life scheduler stopped")
+        """Stop the scheduler and drop every reference it holds.
+
+        `wait=True` asks APScheduler to let in-flight ticks settle instead of
+        abandoning them mid-run while the owning service tears its state down.
+        Clearing `self._scheduler` afterwards releases the dead scheduler and
+        the job objects that close over the tick callbacks; leaving it set kept
+        all of that reachable for the life of the process.  `start()` rebuilds
+        the scheduler, so stop/start cycles still work.
+        """
+        scheduler, self._scheduler = self._scheduler, None
+        was_running, self._is_running = self._is_running, False
+        if scheduler is None or not was_running:
+            return
+        try:
+            scheduler.shutdown(wait=True)
+        except Exception as e:
+            logger.warning(f"Error shutting down life scheduler: {e}")
+        logger.info("Life scheduler stopped")
 
     def force_tick(self, tick_type: str) -> None:
         """

@@ -8,13 +8,16 @@ Resolution tiers (human personas only; AI personas are a no-op):
             app; the server uses it as the home anchor.  Timezone is resolved
             via Open-Meteo Forecast (which returns ``timezone`` for any lat/lon).
             City label may be blank — weather and time still work from lat/lon.
-            Only active when AURA_LOCATION_GPS_ENABLED=true.  Safe-fail: any
-            error falls through to Tier 3.
+            Only active when the host's config reports
+            ``location_gps_enabled`` (``aura_life.hooks.get_config()``); this
+            package reads no environment variables.  Safe-fail: any error falls
+            through to Tier 3.
   Tier 3 — LLM-pick: LLM picks a plausible real city; geocoded + tz-validated;
             re-rolled up to PLACE_RESOLVE_MAX_ATTEMPTS times on failure;
             falls back to a built-in safe default if all rolls fail.
 
-T1.3 will wire timezone into time-of-day — not here.
+Scope note: this module resolves and stores a home place. Feeding the resolved
+timezone into time-of-day rendering is the caller's job, not this module's.
 """
 
 import json
@@ -33,9 +36,11 @@ logger = logging.getLogger(__name__)
 _APPEARANCE_PENDING = "pending"
 
 
-# ============= Built-in fallback cities (server tz offset → EN/FR city) =============
+# ============= Built-in fallback cities (server tz offset → city) =============
 # Keyed by integer UTC offset in hours; used when all LLM+geocode attempts fail.
-# Coverage: offsets −12..+14, biased toward EN/FR-speaking places.
+# Coverage: offsets −12..+14, one well-known city per offset. Hosts that need a
+# different set should resolve a home explicitly (Tier 1) rather than relying on
+# this last-resort table.
 
 _FALLBACK_CITIES: dict = {
     -12: {"city": "Baker Island", "country": "United States", "lat": 0.19, "lon": -176.48, "timezone": "Etc/GMT+12"},
@@ -47,7 +52,7 @@ _FALLBACK_CITIES: dict = {
     -6:  {"city": "Chicago", "country": "United States", "lat": 41.88, "lon": -87.63, "timezone": "America/Chicago"},
     -5:  {"city": "Toronto", "country": "Canada", "lat": 43.65, "lon": -79.38, "timezone": "America/Toronto"},
     -4:  {"city": "Halifax", "country": "Canada", "lat": 44.65, "lon": -63.58, "timezone": "America/Halifax"},
-    -3:  {"city": "Montreal", "country": "Canada", "lat": 45.50, "lon": -73.57, "timezone": "America/Montreal"},  # approximate; Montreal is UTC-5/-4
+    -3:  {"city": "Sao Paulo", "country": "Brazil", "lat": -23.55, "lon": -46.63, "timezone": "America/Sao_Paulo"},
     -2:  {"city": "Saint-Pierre", "country": "Saint Pierre and Miquelon", "lat": 46.78, "lon": -56.17, "timezone": "America/Miquelon"},
     -1:  {"city": "Ponta Delgada", "country": "Portugal", "lat": 37.74, "lon": -25.67, "timezone": "Atlantic/Azores"},
     0:   {"city": "London", "country": "United Kingdom", "lat": 51.51, "lon": -0.13, "timezone": "Europe/London"},
@@ -195,7 +200,8 @@ class PlaceService:
             from aura_life.hooks import resolve_timezone
             return resolve_timezone(lat, lon) or ""
         except Exception as exc:
-            logger.warning("_resolve_tz_for_point(%.4f, %.4f) failed: %s", lat, lon, exc)
+            # Coordinates are user-derived: log the failure, never the point.
+            logger.warning("_resolve_tz_for_point failed: %s", exc)
             return ""
 
     # ------------------------------------------------------------------
@@ -417,10 +423,14 @@ class PlaceService:
             "You are a location assistant. Respond with ONLY a JSON object, "
             "no prose, no markdown fences."
         )
+        # The language requirement follows the library's configured default
+        # languages rather than a baked-in pair (see personality_config).
+        from aura_life.personas.personality_config import get_default_languages
+        spoken = " OR ".join(get_default_languages())
         user_prompt = (
             f"Pick ONE real city for a fictional persona ({sketch}).\n"
             f"Requirements:\n"
-            f"- English OR French spoken as a first or second language\n"
+            f"- {spoken} spoken as a first or second language\n"
             f"- Reliable smartphone and internet access\n"
             f"- UTC offset within ±{max_offset} hours of UTC{server_offset:+.0f}\n"
             f"Respond with exactly: {{\"city\": \"...\", \"country\": \"...\"}}"

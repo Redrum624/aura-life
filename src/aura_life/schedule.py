@@ -1,8 +1,33 @@
 """
 Persona Schedule System
 
-Defines recurring and one-time events for each persona that they can
-proactively share before they happen.
+A host-populated container for a persona's recurring and one-time events, and
+the timing logic that decides when the persona might proactively mention one
+before it happens.
+
+This library ships NO schedule content. `PersonaSchedule` starts empty for
+every persona id -- that is the documented default, not a failure -- and the
+host application supplies the events it wants, either at construction or via
+`add_event`:
+
+    from datetime import time
+    from aura_life.schedule import (
+        EventType, PersonaSchedule, ScheduledEvent, get_persona_schedule,
+    )
+
+    schedule = get_persona_schedule("my-persona")
+    schedule.add_event(ScheduledEvent(
+        event_type=EventType.CREATIVE,
+        title="Studio time",
+        description="Working on something new",
+        scheduled_time=time(14, 0),
+        days_of_week=[5, 6],          # Sat, Sun -- empty list means daily
+        share_before_minutes=20,
+        share_probability=0.5,
+    ))
+
+    for upcoming in schedule.get_events_to_share():
+        ...  # host decides how to surface it
 """
 
 from dataclasses import dataclass, field
@@ -13,14 +38,18 @@ import random
 
 
 class EventType(Enum):
-    """Types of scheduled events."""
-    PERFORMANCE = "performance"      # Florence: gigs, shows
-    REHEARSAL = "rehearsal"          # Florence: practice sessions
-    CREATIVE = "creative"            # Art, writing, photography
-    WELLNESS = "wellness"            # Yoga, meditation, therapy
-    SOCIAL = "social"                # Meeting friends, dates
+    """Types of scheduled events.
+
+    A broad, host-agnostic vocabulary — the host picks whichever type best
+    describes each event it registers.
+    """
+    PERFORMANCE = "performance"      # Gigs, shows, recitals, public appearances
+    REHEARSAL = "rehearsal"          # Practice and preparation sessions
+    CREATIVE = "creative"            # Art, writing, music, photography
+    WELLNESS = "wellness"            # Exercise, meditation, therapy, self-care
+    SOCIAL = "social"                # Meeting friends, dates, group activities
     WORK = "work"                    # Classes, shifts, deadlines
-    PERSONAL = "personal"            # Personal time, self-care
+    PERSONAL = "personal"            # Personal time, routines, reflection
     ADVENTURE = "adventure"          # Trips, exploring, outings
 
 
@@ -103,206 +132,34 @@ class UpcomingEvent:
 
 
 class PersonaSchedule:
-    """Manages scheduled events for a persona."""
+    """A host-populated collection of a persona's scheduled events.
 
-    def __init__(self, persona_id: str):
+    The library supplies the timing and share-window logic; the host supplies
+    the events. A schedule constructed without events is empty, and an empty
+    schedule is a legitimate, fully supported state: `get_upcoming_events` and
+    `get_events_to_share` simply return nothing until the host adds events.
+
+    Args:
+        persona_id: Identifier of the persona this schedule belongs to. It is
+            stored for the host's convenience and never used to select
+            content — no id is special.
+        events: Optional initial events. The list is copied, so the caller may
+            keep mutating its own list without affecting this schedule.
+    """
+
+    def __init__(self, persona_id: str, events: Optional[List[ScheduledEvent]] = None):
         self.persona_id = persona_id
-        self.events: List[ScheduledEvent] = []
-        self._load_default_schedule()
+        self.events: List[ScheduledEvent] = list(events) if events else []
 
-    def _load_default_schedule(self):
-        """Load default schedule based on persona."""
-        if self.persona_id == "florence":
-            self._load_florence_schedule()
-        elif self.persona_id == "samantha":
-            self._load_samantha_schedule()
-        elif self.persona_id == "alice":
-            self._load_alice_schedule()
-
-    def _load_florence_schedule(self):
-        """Florence's schedule - indie singer with night performances."""
-        self.events = [
-            # Evening gigs - Thursday, Friday, Saturday nights
-            ScheduledEvent(
-                event_type=EventType.PERFORMANCE,
-                title="Evening gig",
-                description="Performing at a small bar",
-                scheduled_time=time(20, 0),
-                days_of_week=[3, 4, 5],  # Thu, Fri, Sat
-                excitement_level=0.9,
-                share_before_minutes=45,
-                share_probability=0.7,
-                pre_event_prompts=[
-                    "About to go on stage soon. Butterflies in my stomach, the good kind.",
-                    "Getting ready for tonight's show. The energy in these small venues is magical.",
-                    "Almost time to perform. I always get this flutter before I sing.",
-                    "Setting up for the gig. Wish you could be here to hear the new songs.",
-                ]
-            ),
-            # Afternoon rehearsals - Tuesday, Wednesday
-            ScheduledEvent(
-                event_type=EventType.REHEARSAL,
-                title="Band rehearsal",
-                description="Practice session with the band",
-                scheduled_time=time(15, 0),
-                days_of_week=[1, 2],  # Tue, Wed
-                excitement_level=0.6,
-                share_before_minutes=30,
-                share_probability=0.4,
-                pre_event_prompts=[
-                    "Heading to rehearsal. Working on something new that I think you'd love.",
-                    "About to run through the setlist. Music feels different when you're creating it.",
-                ]
-            ),
-            # Sunday songwriting
-            ScheduledEvent(
-                event_type=EventType.CREATIVE,
-                title="Songwriting time",
-                description="Working on new music",
-                scheduled_time=time(14, 0),
-                days_of_week=[6],  # Sunday
-                excitement_level=0.7,
-                share_before_minutes=20,
-                share_probability=0.5,
-                pre_event_prompts=[
-                    "About to sit down with my guitar. Sundays are for writing.",
-                    "Feeling inspired today. Going to try to capture it in a song.",
-                ]
-            ),
-        ]
-
-    def _load_samantha_schedule(self):
-        """Samantha's schedule - psychologist finding herself."""
-        self.events = [
-            # Morning yoga - Monday, Wednesday, Friday
-            ScheduledEvent(
-                event_type=EventType.WELLNESS,
-                title="Morning yoga",
-                description="Yoga and meditation session",
-                scheduled_time=time(7, 30),
-                days_of_week=[0, 2, 4],  # Mon, Wed, Fri
-                excitement_level=0.5,
-                share_before_minutes=15,
-                share_probability=0.3,
-                pre_event_prompts=[
-                    "About to roll out my yoga mat. Mornings are for being present.",
-                    "Starting the day with some movement. Clearing my head.",
-                ]
-            ),
-            # Evening journaling - daily
-            ScheduledEvent(
-                event_type=EventType.PERSONAL,
-                title="Evening journaling",
-                description="Reflecting and writing",
-                scheduled_time=time(21, 0),
-                days_of_week=[],  # Daily
-                excitement_level=0.4,
-                share_before_minutes=20,
-                share_probability=0.25,
-                pre_event_prompts=[
-                    "About to do some journaling. There's something I've been thinking about.",
-                    "Settling in to write. Days feel more complete when I reflect on them.",
-                ]
-            ),
-            # Thursday therapy (seeing her own therapist)
-            ScheduledEvent(
-                event_type=EventType.WELLNESS,
-                title="Therapy session",
-                description="Seeing my therapist",
-                scheduled_time=time(16, 0),
-                days_of_week=[3],  # Thursday
-                excitement_level=0.6,
-                share_before_minutes=30,
-                share_probability=0.4,
-                pre_event_prompts=[
-                    "Have therapy in a bit. Even therapists need therapists.",
-                    "About to see Dr. Chen. Working through some things.",
-                ]
-            ),
-            # Saturday beach walk
-            ScheduledEvent(
-                event_type=EventType.WELLNESS,
-                title="Beach walk",
-                description="Walking by the ocean",
-                scheduled_time=time(10, 0),
-                days_of_week=[5],  # Saturday
-                excitement_level=0.7,
-                share_before_minutes=25,
-                share_probability=0.5,
-                pre_event_prompts=[
-                    "Heading to the beach soon. The ocean always puts things in perspective.",
-                    "About to take my Saturday walk. There's something I want to think through.",
-                ]
-            ),
-        ]
-
-    def _load_alice_schedule(self):
-        """Alice's schedule - guarded student photographer."""
-        self.events = [
-            # Morning photography - weekends
-            ScheduledEvent(
-                event_type=EventType.CREATIVE,
-                title="Photography outing",
-                description="Early morning photo walk",
-                scheduled_time=time(6, 30),
-                days_of_week=[5, 6],  # Sat, Sun
-                excitement_level=0.7,
-                share_before_minutes=20,
-                share_probability=0.35,
-                pre_event_prompts=[
-                    "Going out to shoot soon. The light is supposed to be good.",
-                    "Early morning photography. The city is different when it's quiet.",
-                ]
-            ),
-            # University classes - Monday, Tuesday, Thursday
-            ScheduledEvent(
-                event_type=EventType.WORK,
-                title="Photography class",
-                description="University lecture",
-                scheduled_time=time(10, 0),
-                days_of_week=[0, 1, 3],  # Mon, Tue, Thu
-                excitement_level=0.4,
-                share_before_minutes=15,
-                share_probability=0.2,
-                pre_event_prompts=[
-                    "Class soon. At least the professor knows what she's talking about.",
-                    "Heading to lecture. We're doing darkroom techniques today.",
-                ]
-            ),
-            # Darkroom time - Wednesday evening
-            ScheduledEvent(
-                event_type=EventType.CREATIVE,
-                title="Darkroom session",
-                description="Developing film",
-                scheduled_time=time(18, 0),
-                days_of_week=[2],  # Wednesday
-                excitement_level=0.8,
-                share_before_minutes=25,
-                share_probability=0.4,
-                pre_event_prompts=[
-                    "About to develop some film. There's something meditative about the darkroom.",
-                    "Darkroom time. I shot something interesting last week.",
-                ]
-            ),
-            # Friday evening study group (reluctant social)
-            ScheduledEvent(
-                event_type=EventType.SOCIAL,
-                title="Study group",
-                description="Meeting with classmates",
-                scheduled_time=time(17, 0),
-                days_of_week=[4],  # Friday
-                excitement_level=0.3,
-                share_before_minutes=30,
-                share_probability=0.3,
-                pre_event_prompts=[
-                    "Have to meet my study group. I'd rather be alone, but... it's fine.",
-                    "Study session soon. At least one of them is tolerable.",
-                ]
-            ),
-        ]
+    def add_event(self, event: ScheduledEvent) -> None:
+        """Register one more event on this schedule."""
+        self.events.append(event)
 
     def get_upcoming_events(self, within_minutes: int = 60) -> List[UpcomingEvent]:
-        """Get events happening within the specified time window."""
+        """Get events happening within the specified time window.
+
+        Returns an empty list when the host has not registered any events.
+        """
         now = datetime.now()
         upcoming = []
 
@@ -331,7 +188,31 @@ _schedules: Dict[str, PersonaSchedule] = {}
 
 
 def get_persona_schedule(persona_id: str) -> PersonaSchedule:
-    """Get or create the schedule for a persona."""
+    """Get or create the process-wide schedule for a persona.
+
+    A schedule created here starts empty — the library ships no content for
+    any id. Fill it with `add_event`, or build a `PersonaSchedule` directly
+    with its `events` argument if you do not want the shared cache. Release
+    it with `clear_persona_schedule`.
+    """
     if persona_id not in _schedules:
         _schedules[persona_id] = PersonaSchedule(persona_id)
     return _schedules[persona_id]
+
+
+def clear_persona_schedule(persona_id: Optional[str] = None) -> bool:
+    """Evict cached schedules — the teardown path for `get_persona_schedule`.
+
+    `_schedules` is a process-global cache with no TTL or size limit, so a host
+    that serves many persona ids keeps every schedule it ever built resident.
+    Call this from the host's persona-teardown path.
+
+    With `persona_id`, drops that one entry and returns whether it was cached.
+    With no argument, clears the whole cache and returns True if it held
+    anything.
+    """
+    if persona_id is None:
+        had_entries = bool(_schedules)
+        _schedules.clear()
+        return had_entries
+    return _schedules.pop(persona_id, None) is not None

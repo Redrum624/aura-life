@@ -16,7 +16,18 @@ from pathlib import Path
 from typing import Dict, List, Optional
 import threading
 
+from aura_life._safe_ids import safe_join, safe_persona_id
+
 logger = logging.getLogger(__name__)
+
+#: How many `emotion_history` rows to keep per persona DB.
+#:
+#: Every `save_emotion` appends one row and nothing ever removed them: the only
+#: reader asks for the newest 20 and the only delete was the full-wipe `reset()`,
+#: so the table grew for the lifetime of the persona. The cap is applied by
+#: `rowid`, not by timestamp -- this library's parity tests freeze the clock, and
+#: a date-based retention rule would make pruning depend on when the suite runs.
+HISTORY_MAX_ROWS = 500
 
 
 @dataclass
@@ -165,6 +176,30 @@ class EmotionPersistence:
                     VALUES (?, ?, ?, ?)
                 """, (emotion, intensity, caused_by, now.isoformat()))
 
+                self._prune_history(conn)
+
+    def _prune_history(self, conn) -> None:
+        """Keep only the newest `HISTORY_MAX_ROWS` rows of `emotion_history`.
+
+        Pruning must never break a save, and the table may belong to a
+        host-provided datastore whose schema this library does not own -- so a
+        SQLite-level failure here is logged and swallowed rather than raised.
+        `rowid` is used instead of `id` so the statement works whether or not
+        the host's table declares that column.
+        """
+        try:
+            conn.execute("""
+                DELETE FROM emotion_history
+                WHERE rowid NOT IN (
+                    SELECT rowid FROM emotion_history
+                    ORDER BY rowid DESC LIMIT ?
+                )
+            """, (HISTORY_MAX_ROWS,))
+        except sqlite3.Error as exc:
+            logger.debug(
+                "emotion_history prune skipped for %s: %s", self.persona_id, exc
+            )
+
     def get_current_emotions(self) -> Dict[str, float]:
         """Get current emotional state with decay applied."""
         with self._lock:
@@ -276,7 +311,17 @@ _persistence_managers: Dict[str, EmotionPersistence] = {}
 
 
 def get_emotion_persistence(persona_id: str, db_dir: Path = None, datastore=None) -> EmotionPersistence:
-    """Get or create emotion persistence for a persona."""
+    """Get or create emotion persistence for a persona.
+
+    Raises:
+        ValueError: if ``persona_id`` is not a well-formed id. In legacy mode it
+            becomes the filename ``<db_dir>/<persona_id>_emotions.db``, so an
+            unchecked ``..`` segment created a SQLite file anywhere the process
+            could write. Validating here rather than at the join also covers the
+            id handed to the host's ``get_persona_datastore`` hook, which builds
+            a path of its own. See :mod:`aura_life._safe_ids`.
+    """
+    persona_id = safe_persona_id(persona_id)
     if persona_id not in _persistence_managers:
         # Try to get the persona's CONSOLIDATED datastore if not provided, so emotions land
         # in memory.db. Use the public factory (it owns the cache key "{persona}:owner");
@@ -296,6 +341,29 @@ def get_emotion_persistence(persona_id: str, db_dir: Path = None, datastore=None
             if db_dir is None:
                 from aura_life.hooks import get_config
                 db_dir = get_config().data_dir
-            db_path = db_dir / f"{persona_id}_emotions.db"
+            db_path = safe_join(db_dir, f"{persona_id}_emotions.db")
             _persistence_managers[persona_id] = EmotionPersistence(persona_id, db_path=db_path)
     return _persistence_managers[persona_id]
+
+
+def clear_emotion_persistence(persona_id: Optional[str] = None) -> int:
+    """Drop cached `EmotionPersistence` instances. Returns how many were dropped.
+
+    `_persistence_managers` is a process-global cache with no eviction: every
+    persona ever touched stayed resident for the life of the process, holding
+    its loaded `_emotions` dict and its datastore reference. A host that
+    switches personas (or a test that uses a temp dir per case) needs a way to
+    let go.
+
+    Args:
+        persona_id: The persona to forget, or ``None`` to forget all of them.
+            A malformed id raises rather than silently matching nothing.
+
+    Raises:
+        ValueError: if ``persona_id`` is given and is not a well-formed id.
+    """
+    if persona_id is None:
+        dropped = len(_persistence_managers)
+        _persistence_managers.clear()
+        return dropped
+    return 1 if _persistence_managers.pop(safe_persona_id(persona_id), None) else 0

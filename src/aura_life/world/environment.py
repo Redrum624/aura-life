@@ -1,7 +1,7 @@
 """
 World Environment System
 
-Manages Samantha's virtual world: locations, weather, time, and cherished objects.
+Manages the persona's virtual world: locations, weather, time, and cherished objects.
 """
 
 import random

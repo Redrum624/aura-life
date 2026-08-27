@@ -54,7 +54,9 @@ def test_every_exported_name_actually_resolves():
 
 
 def test_surface_size_is_the_seeded_one():
-    assert len(aura_life.__all__) == 116          # 114 from Aura's engine/__init__.py + hooks + HookNotConfigured
+    # 114 from Aura's engine/__init__.py + hooks + HookNotConfigured = 116 at extraction (0.1.0);
+    # + clear_persona_schedule, the teardown for the schedule cache, added in 0.2.0 = 117.
+    assert len(aura_life.__all__) == 117
 
 
 def test_internals_exposes_life_service():

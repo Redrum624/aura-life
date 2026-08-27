@@ -22,6 +22,7 @@ from .text_emotion_analyzer import (
 from .emotion_persistence import (
     EmotionPersistence,
     PersistedEmotion,
+    clear_emotion_persistence,
     get_emotion_persistence,
 )
 
@@ -39,4 +40,5 @@ __all__ = [
     "EmotionPersistence",
     "PersistedEmotion",
     "get_emotion_persistence",
+    "clear_emotion_persistence",
 ]

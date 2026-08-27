@@ -84,6 +84,10 @@ class ErrandsSystem:
                 self._state.completed_count += 1
 
     def on_user_message(self, text: str = "") -> None:
+        """Part of the documented engine contract; this engine does not react to chat.
+
+        Intentionally inert — kept so every engine presents the same surface.
+        """
         return
 
     def add_errand(self, title: str) -> None:

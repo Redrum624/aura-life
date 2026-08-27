@@ -49,6 +49,10 @@ MILESTONE_PATTERNS = {
 class ContinuitySystem:
     """Tracks long-term narrative threads across days, weeks, months."""
 
+    # Upper bound on retained anniversaries, matching the caps its sibling
+    # collections already carry (_growth_snapshots 20, _life_chapters 12).
+    MAX_ANNIVERSARIES = 20
+
     def __init__(self):
         self._anniversaries: List[Anniversary] = []
         self._growth_snapshots: List[GrowthSnapshot] = []
@@ -327,6 +331,10 @@ class ContinuitySystem:
             yearly=yearly,
             first_occurrence=datetime.now(),
         ))
+
+        # Keep last 20 anniversaries
+        if len(self._anniversaries) > self.MAX_ANNIVERSARIES:
+            self._anniversaries = self._anniversaries[-self.MAX_ANNIVERSARIES:]
 
     def get_upcoming_anniversaries(self, days_ahead: int = 7) -> List[Anniversary]:
         """Get anniversaries coming up in the next N days."""

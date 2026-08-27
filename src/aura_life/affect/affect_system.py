@@ -29,6 +29,10 @@ POSITIVE_EMOTIONS = {"joyful", "content", "excited", "warm", "peaceful", "amused
 NEGATIVE_EMOTIONS = {"sad", "anxious", "frustrated", "angry", "lonely", "hurt", "overwhelmed", "raw"}
 HIGH_AROUSAL_EMOTIONS = {"excited", "anxious", "angry", "startled", "restless"}
 
+# Stressors this engine raises and clears itself from body state (see
+# `_update_stress`); they are never evicted by the `_stress.sources` cap.
+INTERNAL_STRESSORS = frozenset({"hunger", "sleep_deprivation"})
+
 # Weather → mood influence
 WEATHER_MOOD_MAP = {
     "sunny": 0.02,
@@ -85,6 +89,10 @@ AFFECT_GROWTH_TRAITS = {
 
 class AffectSystem:
     """Tracks background emotional state across mood, stress, loneliness, regulation, and empathy."""
+
+    # Upper bound on `_stress.sources`. The list is a human-readable summary of
+    # what is currently weighing on the persona, not an audit log.
+    MAX_STRESS_SOURCES = 10
 
     def __init__(self, core_traits: Optional[List[str]] = None, emotional_baseline: Optional[Dict[str, float]] = None):
         self._mood = MoodState()
@@ -218,10 +226,32 @@ class AffectSystem:
             self._shift_mood_negative(abs(delta) * m)
 
     def on_stressor_added(self, source: str):
-        """Add a stressor (unmet need, overdue obligation, conflict)."""
+        """Add a stressor (unmet need, overdue obligation, conflict).
+
+        Callers push free-form, rotating labels ("overdue: <chore>", "avoiding:
+        <thing>") once per tick, and the matching `on_stressor_resolved` is not
+        always issued, so the list is capped: it is only ever read as a summary
+        and is JSON-serialized into the affect row on every save.
+        """
         if source not in self._stress.sources:
             self._stress.sources.append(source)
             self._stress.level = min(1.0, self._stress.level + 0.05)
+            self._cap_stress_sources()
+
+    def _cap_stress_sources(self) -> None:
+        """Keep `_stress.sources` bounded, evicting from the free-form end.
+
+        The two body-derived stressors are pinned: `_update_stress` re-adds them
+        (each with a stress bump) whenever they are absent, so evicting them
+        would turn the cap into a slow stress ramp.
+        """
+        sources = self._stress.sources
+        if len(sources) <= self.MAX_STRESS_SOURCES:
+            return
+        pinned = [s for s in sources if s in INTERNAL_STRESSORS]
+        free = [s for s in sources if s not in INTERNAL_STRESSORS]
+        room = max(0, self.MAX_STRESS_SOURCES - len(pinned))
+        self._stress.sources = (pinned + free[-room:]) if room else pinned
 
     def on_stressor_resolved(self, source: str):
         """Remove a stressor, provide relief."""
@@ -540,7 +570,10 @@ class AffectSystem:
         system._mood.since = datetime.fromisoformat(data["mood_since"]) if data.get("mood_since") else None
         system._stress.level = data.get("stress_level", 0.0)
         sources = data.get("stress_sources", "[]")
-        system._stress.sources = json.loads(sources) if isinstance(sources, str) else sources
+        loaded = json.loads(sources) if isinstance(sources, str) else sources
+        # A row written before the cap existed can be arbitrarily long.
+        system._stress.sources = list(loaded)
+        system._cap_stress_sources()
         system._stress.coping_capacity = data.get("stress_coping_capacity", 0.7)
         system._stress.last_relief = datetime.fromisoformat(data["stress_last_relief"]) if data.get("stress_last_relief") else None
         system._loneliness.level = data.get("loneliness_level", 0.0)

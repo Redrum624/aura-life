@@ -142,6 +142,10 @@ class ShadowSystem:
     """Tracks the persona's dark psychology: unease, temptation, concealment,
     conscience, coping, and relational power."""
 
+    # Upper bound on retained secrets, matching the cap on
+    # `recent_transgressions` in `record_transgression`.
+    MAX_SECRETS = 10
+
     def __init__(self, behavioral_tendencies: Optional[dict] = None,
                  character_defects: Optional[list] = None,
                  struggles: Optional[list] = None,
@@ -601,10 +605,17 @@ class ShadowSystem:
         self._state.guilt = _clamp01(self._state.guilt + amount)
 
     def add_secret(self, secret: str) -> None:
-        """Record something she's now hiding."""
+        """Record something the persona is now hiding.
+
+        Only `confess()` shrinks this list, and it is host-driven — a host that
+        never calls it would otherwise grow the list, and the JSON blob it is
+        serialized into, without bound.
+        """
         if not secret:
             return
         self._state.secrets.append(secret)
+        if len(self._state.secrets) > self.MAX_SECRETS:
+            self._state.secrets = self._state.secrets[-self.MAX_SECRETS:]
         self._state.concealment_load = _clamp01(self._state.concealment_load + 0.2)
 
     def record_lie(self, text: str) -> None:

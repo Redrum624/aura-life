@@ -7,7 +7,7 @@ All persona data comes from profile files in profiles/presets/ or profiles/custo
 
 import logging
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -99,14 +99,44 @@ class PersonalityDefinition:
     cultural_stance: List[dict] = field(default_factory=list)
     cultural_summary: str = ""
     appearance_origin: str = "local"       # local | adopted | immigrant | expat
-    languages: List[str] = field(default_factory=lambda: ["English", "French"])
+    languages: List[str] = field(default_factory=lambda: list(get_default_languages()))
 
 
 # ---------------------------------------------------------------------------
 # Language helpers
 # ---------------------------------------------------------------------------
 
-_BASE_LANGUAGES = ("English", "French")
+# The language pair every persona is assumed to speak unless a profile says
+# otherwise. This is a configurable library default, not a property of the
+# engine: a host that serves another locale calls `set_default_languages()`
+# once at startup and every downstream default follows.
+_DEFAULT_LANGUAGES: Tuple[str, ...] = ("English", "French")
+
+
+def get_default_languages() -> Tuple[str, ...]:
+    """Return the configured default language list (ordered, first = primary)."""
+    return _DEFAULT_LANGUAGES
+
+
+def set_default_languages(*languages: str) -> None:
+    """Override the library's default language list.
+
+    Call once at host startup, before personas are built. Raises ValueError if
+    no language is given — an empty default would silently strip languages from
+    every persona.
+    """
+    global _DEFAULT_LANGUAGES
+    flat: List[str] = []
+    for lang in languages:
+        if isinstance(lang, (list, tuple)):
+            flat.extend(str(x) for x in lang if str(x).strip())
+        elif str(lang).strip():
+            flat.append(str(lang).strip())
+    if not flat:
+        raise ValueError("set_default_languages() needs at least one language")
+    seen: set = set()
+    _DEFAULT_LANGUAGES = tuple(x for x in flat if not (x in seen or seen.add(x)))
+
 
 # Countries / territories where French is the primary spoken language.
 # Matched case-insensitively against the persona's home_country field.
@@ -146,33 +176,23 @@ _FRENCH_PRIMARY_SUBSTRINGS: tuple = (
 
 
 def ensure_bilingual(langs: List[str]) -> List[str]:
-    """Return a deduplicated language list that always includes English and French.
+    """Return a deduplicated language list that always includes the defaults.
 
     Rules:
-    - English comes first (if not already the first element).
-    - French is second (right after English) if not already present.
-    - Any additional languages authored in the profile are preserved, appended after
-      the EN/FR pair.
+    - The configured default languages come first, in configured order
+      (`get_default_languages()`; ships as English then French).
+    - Any additional languages authored in the profile are preserved, appended
+      after the default block.
     - No duplicates.
     """
     seen: set = set()
     result: List[str] = []
 
-    # English first
-    if "English" not in langs:
-        result.append("English")
-        seen.add("English")
-    else:
-        result.append("English")
-        seen.add("English")
-
-    # French second
-    if "French" not in langs:
-        result.append("French")
-        seen.add("French")
-    else:
-        result.append("French")
-        seen.add("French")
+    # Configured defaults first, in order
+    for lang in get_default_languages():
+        if lang not in seen:
+            result.append(lang)
+            seen.add(lang)
 
     # Preserve any additional authored languages, deduped
     for lang in langs:
@@ -187,29 +207,32 @@ def native_language_for(home_country: Optional[str], languages: List[str]) -> st
     """Derive the persona's native (mother-tongue) language.
 
     Rules (applied in order):
-    1. If ``languages`` has a first entry that is neither "English" nor "French",
-       treat that language as native (the author explicitly signalled it).
-    2. Otherwise, check ``home_country`` against the French-primary set / substrings.
-       If matched → "French".
-    3. Default → "English".
+    1. If ``languages`` has a first entry that is not one of the configured
+       default languages, treat it as native (the author explicitly signalled it).
+    2. Otherwise, check ``home_country`` against the French-primary set /
+       substrings. If matched and French is a default language → "French".
+    3. Default → the first configured default language (ships as "English").
 
-    AI personas have no physical home (``home_country`` is empty) so they default to
-    "English" as their native digital language.
+    AI personas have no physical home (``home_country`` is empty) so they fall
+    through to rule 3.
     """
-    # Rule 1: explicitly authored non-EN/FR native
-    if languages and languages[0] not in ("English", "French"):
+    defaults = get_default_languages()
+
+    # Rule 1: explicitly authored native language outside the defaults
+    if languages and languages[0] not in defaults:
         return languages[0]
 
-    # Rule 2: home-country heuristic
-    country = (home_country or "").strip().lower()
-    if country and country in _FRENCH_PRIMARY_COUNTRIES:
-        return "French"
-    for sub in _FRENCH_PRIMARY_SUBSTRINGS:
-        if sub in country:
+    # Rule 2: home-country heuristic (only meaningful if French is a default)
+    if "French" in defaults:
+        country = (home_country or "").strip().lower()
+        if country and country in _FRENCH_PRIMARY_COUNTRIES:
             return "French"
+        for fragment in _FRENCH_PRIMARY_SUBSTRINGS:
+            if fragment in country:
+                return "French"
 
     # Rule 3: default
-    return "English"
+    return defaults[0]
 
 
 # ---------------------------------------------------------------------------
