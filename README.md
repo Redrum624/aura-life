@@ -66,6 +66,15 @@ sibling project can depend on it in place with `-e ../aura-life`.
   manually.` and returns; **you drive the ticks yourself, which is what the
   quickstart below does.** The quickstart's output was produced in an environment
   where `HAS_APSCHEDULER` is `False`.
+
+  **`start()` needs a running asyncio event loop.** APScheduler's
+  `AsyncIOScheduler` binds to the *running* loop at start time, so calling
+  `start()` from synchronous code has no loop to bind. That is not an error you
+  have to handle: the scheduler logs why and falls back to exactly the manual
+  mode above, so a synchronous host behaves the same whether or not it installed
+  this extra. If you want the background ticks, call `start()` from inside an
+  event loop (an async web server, or `asyncio.run()`); otherwise drive
+  `force_all_ticks()` yourself on whatever clock you own.
 - **`tzdata`** is a hard dependency on Windows only (`sys_platform == "win32"`),
   and is installed for you. Windows ships no system IANA timezone database, and
   without it every persona timezone silently falls back to server-local time.

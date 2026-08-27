@@ -126,7 +126,25 @@ class LifeScheduler:
                 name="Daily Plan Management",
             )
 
-        self._scheduler.start()
+        try:
+            self._scheduler.start()
+        except RuntimeError as e:
+            # AsyncIOScheduler binds to the *running* loop here. A synchronous
+            # host has none, and the origin application never hit this because
+            # it always started the service from inside an async server.
+            # Degrade to the same manual-tick fallback a host with no
+            # APScheduler at all gets -- otherwise installing the optional
+            # extra makes the failure worse instead of better.
+            self._scheduler = None
+            self._is_running = False
+            logger.warning(
+                "Life scheduler could not start: %s. "
+                "AsyncIOScheduler needs a running asyncio event loop; call "
+                "start() from inside one, or drive the ticks yourself with "
+                "force_all_ticks(). Life simulation will run manually.",
+                e,
+            )
+            return
         self._is_running = True
         logger.info("Life scheduler started")
 

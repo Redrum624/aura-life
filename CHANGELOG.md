@@ -55,6 +55,18 @@ findings were fixed test-first.
 
 ### Fixed
 
+- **`start()` crashed instead of degrading when the `[scheduler]` extra was
+  installed without a running event loop.** APScheduler's `AsyncIOScheduler`
+  binds to the running loop at start time. The origin application always
+  started the service from inside an async server, so this never surfaced
+  there — but a synchronous host that installed the optional extra got
+  `RuntimeError: no running event loop`, while a host that installed *nothing*
+  got the documented "run manually" fallback. The stricter dependency produced
+  the worse failure. `start()` now degrades to the same fallback and logs the
+  real cause. Found by running the suite from a clean checkout with the extra
+  installed — the development environment did not have `apscheduler`, so two
+  thread-lifecycle tests had only ever exercised the no-scheduler path.
+
 - **`persona_id` was silently discarded for any relative `db_path`.**
   `_persist_activity_emotions` derived the id with
   `db_parent if db_parent != "." else self._persona_id`, but
