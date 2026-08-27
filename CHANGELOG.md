@@ -144,7 +144,7 @@ findings were fixed test-first.
 - Six test modules: `test_persona_id_safety`, `test_calendar_datastore`,
   `test_collection_caps`, `test_life_service_retention`,
   `test_life_service_failure_modes`, `test_emotion_history_retention`. The suite is
-  **319 tests across 21 modules**, up from 129 across 13; the original 129 still pass
+  **324 tests across 22 modules**, up from 129 across 13; the original 129 still pass
   unchanged.
 
 ### Changed

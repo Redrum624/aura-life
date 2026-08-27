@@ -4,7 +4,7 @@
 [![Latest release](.github/badges/latest-badge.svg)](https://github.com/Redrum624/aura-life/releases/latest)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/tests-319%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-324%20passing-brightgreen)
 ![Dependencies](https://img.shields.io/badge/runtime%20deps-1%20(Windows%20only)-blue)
 
 > **aura-life** — *a life that keeps running when nobody is watching.*
@@ -436,7 +436,7 @@ the origin application on purpose — see `CHANGELOG.md`.
 ## Tests
 
 ```bash
-python -m pytest tests -q          # 319 tests across 21 modules, no network
+python -m pytest tests -q          # 324 tests across 22 modules, no network
 ```
 
 The suite must be run in an environment with **no host application on

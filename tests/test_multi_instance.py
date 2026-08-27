@@ -171,7 +171,16 @@ def test_three_agents_share_one_world_without_cross_contamination(tmp_path, capl
 
     # -- 4. The shared world advanced, and all three agents observe the same one.
     assert before[0]["world"] != after[0]["world"], "the shared world did not advance"
-    assert all(s["world"] == after[0]["world"] for s in after)
+    # Identity, not value equality. `after` holds three SEQUENTIAL get_status()
+    # reads, and WorldEnvironment derives time_of_day/weather from the wall
+    # clock -- so a boundary crossed between the first read and the third makes
+    # the three snapshots differ for a reason that has nothing to do with
+    # sharing. Comparing the values failed roughly one run in four.
+    # "All three observe the same world" is exactly object identity, and that
+    # cannot race.
+    assert all(a._world is world for a in agents), (
+        "agents are not sharing one WorldEnvironment"
+    )
 
     # -- 5. Each agent has its own database file, and it has been written to.
     for i in range(AGENT_COUNT):
