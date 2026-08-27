@@ -1,5 +1,5 @@
 """
-Aura Emotion System
+Emotion System
 
 3-tier emotion hierarchy with real-time emotion detection and management.
 """

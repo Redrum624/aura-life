@@ -1,9 +1,7 @@
 aura-life
 Copyright (c) 2026 Redrum624
 
-This code originated in the Aura project by the same author
-(https://github.com/Redrum624/Aura — private, and still private at
-the time of this release; extracted 2026-08-26, commit b9c92aff), which is
-licensed under the PolyForm Noncommercial License 1.0.0. The extracted subset is
-relicensed here under the Apache License, Version 2.0, by the copyright holder,
-who holds sole copyright in both projects.
+Portions of this code were previously developed by the same author under the
+PolyForm Noncommercial License 1.0.0 in a separate, unpublished project. That
+subset is relicensed here under the Apache License, Version 2.0, by the
+copyright holder, who holds sole copyright in both works.

@@ -132,7 +132,7 @@ findings were fixed test-first.
 - Six test modules: `test_persona_id_safety`, `test_calendar_datastore`,
   `test_collection_caps`, `test_life_service_retention`,
   `test_life_service_failure_modes`, `test_emotion_history_retention`. The suite is
-  **298 tests across 19 modules**, up from 129 across 13; the original 129 still pass
+  **319 tests across 21 modules**, up from 129 across 13; the original 129 still pass
   unchanged.
 
 ### Changed
@@ -187,9 +187,9 @@ These are visible to a caller. None was avoidable while fixing the row above it.
 ## [0.1.0] - 2026-08-26
 
 First release. aura-life is the life-simulation engine and persona pipeline
-extracted from Aura (private repo: github.com/Redrum624/Aura) at commit
-`b9c92aff`, relicensed from PolyForm Noncommercial 1.0.0 to Apache-2.0 by the
-copyright holder, who holds sole copyright in both projects.
+extracted from a larger private application by the same author, relicensed from
+PolyForm Noncommercial 1.0.0 to Apache-2.0 by the copyright holder, who holds
+sole copyright in both projects.
 
 ### Added
 
@@ -205,7 +205,7 @@ copyright holder, who holds sole copyright in both projects.
 - **The persona pipeline** — `aura_life.personas`: genre randomisation, personality
   configuration, profile storage, place generation and appearance generation.
 - Together: **32,088 lines across 82 modules and 32 subpackages**, importing
-  standalone with no Aura present.
+  standalone with no host application present.
 - **A curated public facade.** `aura_life.__all__` exported **116 names** at 0.1.0 (117 as of 0.2.0): the 114
   the origin repo's own engine package exported — verified set-equal at extraction
   time, against a repository that is not published, so that half of the claim is not
@@ -232,12 +232,12 @@ copyright holder, who holds sole copyright in both projects.
   cooldowns and proactive follow-up triggers.
 - **A multi-instance guarantee.** `tests/test_multi_instance.py` runs three
   `LifeService` instances against one shared `WorldEnvironment`, in a process with no
-  Aura on `sys.path`, and asserts on the *log stream* rather than on "did not raise"
+  host application on `sys.path`, and asserts on the *log stream* rather than on "did not raise"
   — because `LifeScheduler.force_tick` swallows handler exceptions and only logs them
   at `ERROR`. Zero `ERROR` records, all five tick handlers completing, private state
   advancing, and a sentinel written through the public API landing in exactly one
   agent's database.
-- **Tests relocated from Aura**: `test_affect`, `test_behavior`, `test_chaos`,
+- **Tests relocated from the origin repo**: `test_affect`, `test_behavior`, `test_chaos`,
   `test_character_evolution`, `test_continuity`, `test_expression`,
   `test_life_events`, `test_memory_time` — the eight that exercised only the moved
   subsystems — plus `test_persona_parity` and its golden. New here:

@@ -20,7 +20,8 @@ name — deliberately **not** line numbers, which churn on every edit above them
 The point is that a new unguarded site is caught, not that the file never moves.
 
 None of the thirteen may be "fixed" here: they are moved code under a verbatim
-contract, and adding a guard would change behaviour Aura's parity golden pins. See
+contract, and adding a guard would change behaviour the origin host's parity
+golden pins. See
 `DEFERRED.md` for the follow-up and for which two are live hazards.
 """
 

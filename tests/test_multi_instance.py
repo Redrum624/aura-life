@@ -1,8 +1,8 @@
 """Task 6 — many ``LifeService`` instances in one process, no host application.
 
-Aura runs exactly one persona per process, behind a bridge that fills every host
-hook. The second consumer of this library is a **sandbox**: N agents living in
-one shared world under an LLM overseer, with no Aura anywhere. Nothing in the
+The origin host runs exactly one persona per process, behind a bridge that fills
+every host hook. The second consumer of this library is a **sandbox**: N agents
+living in one shared world under an LLM overseer, with no host anywhere. Nothing in the
 extraction so far has exercised that shape, so this module is where the library
 is driven purely as a library for the first time.
 
@@ -40,9 +40,9 @@ import pytest
 from aura_life.life_service import LifeService
 from aura_life.world import WorldEnvironment
 
-#: Aura's top-level packages. If any of these are importable in the test process,
-#: the library is not actually being exercised standalone.
-AURA_PACKAGES = ("config", "services", "data", "engine")
+#: The origin host's top-level packages. If any of these are importable in the
+#: test process, the library is not actually being exercised standalone.
+HOST_PACKAGES = ("config", "services", "data", "engine")
 
 AGENT_COUNT = 3
 
@@ -110,23 +110,23 @@ def _dump(db_file):
 
 
 # ----------------------------------------------------------------------
-# The environment really is Aura-free
+# The environment really is host-free
 # ----------------------------------------------------------------------
 
-def test_the_test_process_has_no_aura_in_it():
+def test_the_test_process_has_no_host_in_it():
     """Guards every other assertion in this file.
 
-    If Aura ever leaked onto ``sys.path`` — a stray ``.pth``, a developer running
-    this suite from Aura's venv — the hooks would be configurable and the tests
-    below would prove nothing about standalone use.
+    If a host application ever leaked onto ``sys.path`` — a stray ``.pth``, a
+    developer running this suite from a host's venv — the hooks would be
+    configurable and the tests below would prove nothing about standalone use.
     """
-    leaked = [name for name in AURA_PACKAGES if name in sys.modules]
-    assert leaked == [], f"Aura packages already imported: {leaked}"
+    leaked = [name for name in HOST_PACKAGES if name in sys.modules]
+    assert leaked == [], f"Host packages already imported: {leaked}"
 
     import importlib.util
 
-    found = [name for name in AURA_PACKAGES if importlib.util.find_spec(name)]
-    assert found == [], f"Aura is importable from this environment: {found}"
+    found = [name for name in HOST_PACKAGES if importlib.util.find_spec(name)]
+    assert found == [], f"A host application is importable from this environment: {found}"
 
 
 # ----------------------------------------------------------------------
@@ -213,8 +213,8 @@ def test_a_bare_agent_survives_a_user_message_and_a_tick(tmp_path, caplog):
     one. It must not raise, and — since the tick path swallows exceptions — it
     must not log an error either.
     """
-    assert not any(m in sys.modules for m in AURA_PACKAGES), (
-        "Aura leaked into the library test process"
+    assert not any(m in sys.modules for m in HOST_PACKAGES), (
+        "A host application leaked into the library test process"
     )
 
     caplog.set_level(logging.WARNING)
@@ -288,7 +288,8 @@ def test_installing_defaults_never_clobbers_a_host_provider():
 
     The recovery path the docs describe — ``hooks.reset()``, then put things back —
     would otherwise silently replace a host's ``persona_now`` (a virtual or frozen
-    clock, in Aura's parity driver's case) with ``datetime.now()``, and nothing
+    clock, in the origin host's parity driver's case) with ``datetime.now()``, and
+    nothing
     anywhere would report it.
     """
     from aura_life import defaults, hooks

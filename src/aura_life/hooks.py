@@ -7,11 +7,11 @@ module is the single seam between the two: the engine calls the plain functions
 below, and the host registers implementations once at startup with
 :func:`configure`.
 
-Aura registers them in ``server/aura_life_bridge.py``; a different host would
-write its own five-line bridge.
+The origin host registers them in a small bridge module of its own; a different
+host would write its own five-line bridge.
 
 Nothing here imports the host — that is the point. This file must keep importing
-only the standard library so ``import aura_life`` works with no Aura present.
+only the standard library so ``import aura_life`` works with no host present.
 
 When a hook has not been configured it raises :class:`HookNotConfigured`, a
 subclass of :class:`ImportError`. That inheritance is load-bearing: these calls

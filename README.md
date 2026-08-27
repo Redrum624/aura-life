@@ -1,8 +1,10 @@
 # aura-life
 
+[![Downloads](.github/badges/downloads-badge.svg)](https://github.com/Redrum624/aura-life/releases)
+[![Latest release](.github/badges/latest-badge.svg)](https://github.com/Redrum624/aura-life/releases/latest)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/tests-298%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-319%20passing-brightgreen)
 ![Dependencies](https://img.shields.io/badge/runtime%20deps-1%20(Windows%20only)-blue)
 
 > **aura-life** — *a life that keeps running when nobody is watching.*
@@ -425,12 +427,13 @@ the origin application on purpose — see `CHANGELOG.md`.
 ## Tests
 
 ```bash
-python -m pytest tests -q          # 298 tests across 19 modules, no network
+python -m pytest tests -q          # 319 tests across 21 modules, no network
 ```
 
-The suite must be run in an environment with **no Aura on `sys.path`**;
-`tests/test_multi_instance.py` asserts that explicitly, because otherwise every
-"works standalone" claim in it would be vacuous. The notable files:
+The suite must be run in an environment with **no host application on
+`sys.path`**; `tests/test_multi_instance.py` asserts that explicitly, because
+otherwise every "works standalone" claim in it would be vacuous. The notable
+files:
 
 | File | What it protects |
 |---|---|
@@ -445,8 +448,9 @@ The suite must be run in an environment with **no Aura on `sys.path`**;
 | `test_life_service_failure_modes.py` | the kill switch fails closed; failures log instead of vanishing |
 
 Nothing in the suite walks every module, so the "everything under `aura_life`
-imports with no Aura present" check is a manual one (it reports 82 — the 83 files
-minus `aura_life/__init__.py`, which is the package being walked):
+imports with no host application present" check is a manual one (it reports 82
+— the 83 files minus `aura_life/__init__.py`, which is the package being
+walked):
 
 ```bash
 python -c "import pkgutil, importlib, aura_life; \
@@ -470,16 +474,23 @@ Regeneration is opt-in and requires the exact value `1`
 
 ## Where this came from
 
-aura-life was extracted on 2026-08-26 from Aura (private repo:
-`github.com/Redrum624/Aura`), at commit `b9c92aff`, by the copyright
-holder — who relicensed the extracted subset under Apache-2.0. See `NOTICE`.
+aura-life was extracted from a larger private application by the same author,
+who holds sole copyright in both and relicensed the extracted subset under
+Apache-2.0. See `NOTICE`.
 
 The extraction was a **pure move**: a golden snapshot of twenty simulated ticks
 was captured against the pre-extraction code, and the post-extraction library
-reproduces it byte for byte. `CHANGELOG.md` records what moved, what deliberately
-did not, and what was fixed afterwards — because the "no refactoring" contract
+reproduces it byte for byte. Measured at extraction, **70 of the 78 moved
+modules were line-for-line identical to their originals**, the remainder
+differing only where imports had to be rewritten. `CHANGELOG.md` records what
+moved, what deliberately did not, and what was fixed afterwards — because the
+"no refactoring" contract
 that made the parity proof meaningful ended at publication, and the security and
 resource-leak findings from the pre-release audit were fixed rather than shipped.
+
+## Downloads
+
+![Downloads over time](.github/badges/downloads.svg)
 
 ## License
 

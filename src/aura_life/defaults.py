@@ -11,10 +11,10 @@ guards degrade that feature to "unavailable" with a ``WARNING``.
 
 **Why it needs a default.** ``LifeService.persona_local_now()`` calls the
 ``persona_now`` hook *unguarded* -- it is the single hook call site in the moved
-code with no ``try/except ImportError`` around it, because in Aura it replaced a
-``from context.time_context import persona_now`` that could not fail. Aura always
-installs its bridge, so that site never fires there. A bare library consumer has
-no bridge: every ``activity`` tick then dies inside
+code with no ``try/except ImportError`` around it, because in the origin host it
+replaced a ``from context.time_context import persona_now`` that could not fail.
+That host always installs its bridge, so that site never fires there. A bare
+library consumer has no bridge: every ``activity`` tick then dies inside
 ``LifeScheduler.force_tick``, which catches the exception and only
 ``logger.error``s it. The library would import cleanly, construct a
 ``LifeService`` cleanly, tick forever and simulate nothing. Three agents in a
@@ -71,7 +71,7 @@ def persona_now(timezone: Optional[str] = None) -> Any:
 
     ``datetime`` and ``zoneinfo`` are imported at call time, not at module
     import, so a host or test that fakes the ``datetime`` module still gets its
-    fake -- the same late-binding property Aura's bridge relies on.
+    fake -- the same late-binding property the origin host's bridge relies on.
     """
     from datetime import datetime
 
