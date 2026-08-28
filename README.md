@@ -24,6 +24,18 @@ the surrounding application arrives through a twelve-function hook registry the
 host fills in at startup. A host-free process still runs a complete life — just
 without narration, real weather or place lookups.
 
+<p align="center">
+  <a href=".github/concept-map.png"><img src=".github/concept-map.png" width="100%"
+     alt="Concept map of aura-life: the host application feeds twelve hooks; LifeScheduler drives five ticks; LifeService orchestrates thirty engine subpackages grouped into body and rhythm, inner weather, intent and action, place and means, others and self, and time and meaning; a shared WorldEnvironment on the left; context, get_status() and shareable experiences read out on the right; SQLite persistence below."></a>
+</p>
+
+<p align="center"><sub>
+  Click to enlarge · source:
+  <a href="docs/diagrams/concept-map.mm.md"><code>docs/diagrams/concept-map.mm.md</code></a>
+  (interactive markmap) and
+  <a href=".github/concept-map.svg"><code>.github/concept-map.svg</code></a>
+</sub></p>
+
 ## Why aura-life
 
 - **N agents, one world, one process.** No `LifeService` state lives in a

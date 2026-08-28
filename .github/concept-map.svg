@@ -1,0 +1,200 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1800" height="1530" viewBox="0 0 1800 1530" role="img" aria-label="aura-life concept map: the host seam, the tick loop, the orchestrator, thirty engine subpackages, the shared world, and the readouts">
+<title>aura-life &#8212; concept map</title>
+<defs>
+<marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#2B3949"/></marker>
+</defs>
+<rect x="0" y="0" width="1800" height="1530" fill="#0A0E14"/>
+<text x="56" y="76" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="46" font-weight="700" letter-spacing="-0.5" fill="#E8EDF2">aura<tspan fill="#4FD1C5">-life</tspan></text>
+<path d="M240 46 v36" stroke="#212C39" stroke-width="1.5"/>
+<text x="264" y="76" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="30" font-weight="300" fill="#9AAABB" text-anchor="start" letter-spacing="0">concept map</text>
+<text x="1744" y="60" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#6B7C8E" text-anchor="end" letter-spacing="0">32 subpackages · 83 modules · 32,949 lines</text>
+<text x="1744" y="84" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#6B7C8E" text-anchor="end" letter-spacing="0">1 runtime dependency, and only on Windows</text>
+<path d="M56 112 H1744" stroke="#212C39" stroke-width="1.5"/>
+<rect x="56" y="150" width="300" height="272" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<text x="80" y="184" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">THE HOST APPLICATION</text>
+<text x="80" y="216" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="19" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">your app — not imported</text>
+<text x="80" y="250" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">config · data dir · datastore</text>
+<text x="80" y="275" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">LLM client · image service</text>
+<text x="80" y="300" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">real weather · geocoding</text>
+<text x="80" y="325" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">timezone · outfit · schedule</text>
+<text x="80" y="392" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">aura-life imports none of it.</text>
+<path d="M364 270 L404 270" stroke="#2B3949" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<rect x="412" y="150" width="500" height="272" rx="10" fill="#101722" stroke="#4FD1C5" stroke-width="1.5"/>
+<text x="438" y="184" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#4FD1C5" text-anchor="start" letter-spacing="1.6">THE SEAM</text>
+<text x="438" y="218" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="19" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">aura_life.hooks</text>
+<text x="438" y="244" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">12 functions. Imports typing and nothing else.</text>
+<text x="438" y="276" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">get_config</text>
+<text x="438" y="295" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">get_user_data_root</text>
+<text x="438" y="314" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">get_persona_datastore</text>
+<text x="438" y="333" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">get_llm_service</text>
+<text x="438" y="352" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">get_weather_service</text>
+<text x="438" y="371" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">get_image_service</text>
+<text x="676" y="276" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">geocode</text>
+<text x="676" y="295" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">resolve_timezone</text>
+<text x="676" y="314" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">persona_now *</text>
+<text x="676" y="333" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">get_schedule_phase</text>
+<text x="676" y="352" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">resolve_outfit_for_context</text>
+<text x="676" y="371" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="13" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">generate_and_update</text>
+<text x="438" y="400" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">* the one library default — a zoneinfo clock</text>
+<rect x="936" y="150" width="370" height="272" rx="10" fill="#101722" stroke="#212C39" stroke-width="1.5"/>
+<text x="960" y="184" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">THE CLOCK</text>
+<text x="960" y="218" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="19" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">LifeScheduler</text>
+<text x="960" y="254" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">world</text>
+<text x="1088" y="254" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#2B3949" text-anchor="start" letter-spacing="0">···</text>
+<text x="1132" y="254" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">5 min</text>
+<text x="960" y="279" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">energy</text>
+<text x="1088" y="279" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#2B3949" text-anchor="start" letter-spacing="0">···</text>
+<text x="1132" y="279" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">5 min</text>
+<text x="960" y="304" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">activity</text>
+<text x="1088" y="304" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#2B3949" text-anchor="start" letter-spacing="0">···</text>
+<text x="1132" y="304" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">20 min</text>
+<text x="960" y="329" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">plan</text>
+<text x="1088" y="329" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#2B3949" text-anchor="start" letter-spacing="0">···</text>
+<text x="1132" y="329" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">30 min</text>
+<text x="960" y="354" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">goal</text>
+<text x="1088" y="354" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#2B3949" text-anchor="start" letter-spacing="0">···</text>
+<text x="1132" y="354" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="16" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">60 min</text>
+<text x="960" y="400" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">No public tick(). The caller owns the clock.</text>
+<rect x="1330" y="150" width="414" height="272" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<text x="1354" y="184" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">TWO PER-PERSONA PROVIDERS</text>
+<text x="1354" y="216" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="17" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">constructor args, not hooks</text>
+<text x="1354" y="254" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">user_model_provider</text>
+<text x="1354" y="276" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">response rate · quiet windows · topics</text>
+<text x="1354" y="314" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">follow_up_provider</text>
+<text x="1354" y="336" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">proactive follow-up triggers</text>
+<text x="1354" y="400" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">Duck-typed. Omitting both is supported.</text>
+<path d="M600 422 L600 484" stroke="#2B3949" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<text x="618" y="456" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">unconfigured  →  HookNotConfigured  →  that feature degrades; the tick completes</text>
+<path d="M1240 422 L1240 484" stroke="#2B3949" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<text x="1258" y="456" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">drives 5 ticks</text>
+<rect x="56" y="490" width="300" height="340" rx="10" fill="#101722" stroke="#212C39" stroke-width="1.5"/>
+<text x="80" y="524" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">THE SHARED WORLD</text>
+<text x="80" y="558" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="18" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">WorldEnvironment</text>
+<text x="80" y="598" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">weather · season</text>
+<text x="80" y="623" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">time of day · clock</text>
+<text x="80" y="648" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">locations · cherished objects</text>
+<path d="M80 694 H332" stroke="#212C39" stroke-width="1.5"/>
+<text x="80" y="726" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="17" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">N personas, one world,</text>
+<text x="80" y="750" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="17" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">one process.</text>
+<text x="80" y="784" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">Hand one in and you own its</text>
+<text x="80" y="803" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">clock — LifeService will not</text>
+<text x="80" y="822" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">tick a world it was given.</text>
+<rect x="56" y="854" width="300" height="353" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<text x="80" y="890" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">THE CLAIM</text>
+<text x="80" y="934" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="27" font-weight="700" fill="#E8EDF2" text-anchor="start" letter-spacing="0">State,</text>
+<text x="80" y="968" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="27" font-weight="700" fill="#4FD1C5" text-anchor="start" letter-spacing="0">not narration.</text>
+<text x="80" y="1016" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">The usual alternative is a</text>
+<text x="80" y="1039" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">prompt that claims a backstory,</text>
+<text x="80" y="1062" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">regenerated from scratch on</text>
+<text x="80" y="1085" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">every request.</text>
+<text x="80" y="1130" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">This one keeps running when</text>
+<text x="80" y="1153" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">nobody is watching.</text>
+<path d="M364 640 L396 640" stroke="#2B3949" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<rect x="390" y="490" width="1010" height="717" rx="10" fill="#101722" stroke="#2B3949" stroke-width="1.5"/>
+<text x="418" y="524" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">THE ORCHESTRATOR</text>
+<text x="418" y="568" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="30" font-weight="700" fill="#E8EDF2" text-anchor="start" letter-spacing="0">LifeService</text>
+<text x="418" y="598" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">7,077 lines · one instance per persona · no module-level singleton</text>
+<text x="418" y="626" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="16" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">Engines never call each other. Every signal is routed through here.</text>
+<rect x="418" y="655" width="304" height="244" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<rect x="418" y="655" width="4" height="244" rx="2" fill="#4FD1C5"/>
+<text x="440" y="693" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="20" font-weight="600" fill="#4FD1C5" text-anchor="start" letter-spacing="0">Body &amp; rhythm</text>
+<text x="440" y="715" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">what the body does to the day</text>
+<text x="440" y="747" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">energy</text>
+<text x="440" y="772" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">body</text>
+<text x="440" y="797" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">sustenance</text>
+<text x="440" y="822" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">cognitive</text>
+<text x="440" y="847" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">intimacy</text>
+<rect x="742" y="655" width="304" height="244" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<rect x="742" y="655" width="4" height="244" rx="2" fill="#A78BFA"/>
+<text x="764" y="693" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="20" font-weight="600" fill="#A78BFA" text-anchor="start" letter-spacing="0">Inner weather</text>
+<text x="764" y="715" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">mood that outlives the spike</text>
+<text x="764" y="747" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">emotion</text>
+<text x="764" y="772" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">affect</text>
+<text x="764" y="797" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">shadow</text>
+<text x="764" y="822" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">drive</text>
+<text x="764" y="847" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">chaos</text>
+<rect x="1066" y="655" width="304" height="244" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<rect x="1066" y="655" width="4" height="244" rx="2" fill="#E8B454"/>
+<text x="1088" y="693" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="20" font-weight="600" fill="#E8B454" text-anchor="start" letter-spacing="0">Intent &amp; action</text>
+<text x="1088" y="715" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">a day it writes, then lives</text>
+<text x="1088" y="747" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">planner</text>
+<text x="1088" y="772" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">activities</text>
+<text x="1088" y="797" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">goals</text>
+<text x="1088" y="822" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">skills</text>
+<text x="1088" y="847" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">errands</text>
+<text x="1088" y="872" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">behavior</text>
+<rect x="418" y="919" width="304" height="244" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<rect x="418" y="919" width="4" height="244" rx="2" fill="#7BB8E8"/>
+<text x="440" y="957" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="20" font-weight="600" fill="#7BB8E8" text-anchor="start" letter-spacing="0">Place &amp; means</text>
+<text x="440" y="979" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">a home, a job, a way to get there</text>
+<text x="440" y="1011" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">world</text>
+<text x="440" y="1036" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">location</text>
+<text x="440" y="1061" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">habitation</text>
+<text x="440" y="1086" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">transportation</text>
+<text x="440" y="1111" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">job</text>
+<text x="440" y="1136" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">money</text>
+<rect x="742" y="919" width="304" height="244" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<rect x="742" y="919" width="4" height="244" rx="2" fill="#F08C8C"/>
+<text x="764" y="957" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="20" font-weight="600" fill="#F08C8C" text-anchor="start" letter-spacing="0">Others &amp; self</text>
+<text x="764" y="979" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">who it knows, who it becomes</text>
+<text x="764" y="1011" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">social</text>
+<text x="764" y="1036" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">identity</text>
+<text x="764" y="1061" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">expression</text>
+<text x="764" y="1086" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">personas</text>
+<text x="764" y="1111" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">persona_evolution</text>
+<rect x="1066" y="919" width="304" height="244" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<rect x="1066" y="919" width="4" height="244" rx="2" fill="#7DD3A0"/>
+<text x="1088" y="957" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="20" font-weight="600" fill="#7DD3A0" text-anchor="start" letter-spacing="0">Time &amp; meaning</text>
+<text x="1088" y="979" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">the slow arcs that build meaning</text>
+<text x="1088" y="1011" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">continuity</text>
+<text x="1088" y="1036" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">memory_time</text>
+<text x="1088" y="1061" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">life_events</text>
+<text x="418" y="1189" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">30 engines here · plus scheduler (above) and context (right) = 32 subpackages</text>
+<path d="M1408 640 L1432 640" stroke="#2B3949" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<rect x="1440" y="490" width="304" height="320" rx="10" fill="#101722" stroke="#212C39" stroke-width="1.5"/>
+<text x="1464" y="524" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">WHAT THE HOST READS</text>
+<text x="1464" y="558" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="18" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">context</text>
+<text x="1464" y="582" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">LifeContextBuilder</text>
+<text x="1464" y="612" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">Prompt sections, assembled</text>
+<text x="1464" y="632" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">under a token budget.</text>
+<text x="1464" y="670" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">location · weather · trip</text>
+<text x="1464" y="692" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">energy · mood · stress</text>
+<text x="1464" y="714" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">loneliness · needs · room</text>
+<text x="1464" y="736" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">finance · career · …</text>
+<path d="M1464 764 H1720" stroke="#212C39" stroke-width="1.5"/>
+<text x="1464" y="790" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#4FD1C5" text-anchor="start" letter-spacing="0">→ your LLM's system prompt</text>
+<rect x="1440" y="834" width="304" height="160" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<text x="1464" y="874" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="18" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">get_status()</text>
+<text x="1464" y="908" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">One dict: mood, energy,</text>
+<text x="1464" y="931" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">active goals, world state,</text>
+<text x="1464" y="954" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">recent activity count.</text>
+<rect x="1440" y="1018" width="304" height="189" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<text x="1464" y="1058" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">shareable_experiences</text>
+<text x="1464" y="1092" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">Things worth mentioning</text>
+<text x="1464" y="1115" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">next time you speak —</text>
+<text x="1464" y="1138" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">achievements, discoveries,</text>
+<text x="1464" y="1161" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">surprises, with an urgency.</text>
+<path d="M500 1207 L500 1261" stroke="#2B3949" stroke-width="2" fill="none" marker-end="url(#ar)"/>
+<text x="520" y="1242" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">persists</text>
+<rect x="56" y="1267" width="620" height="180" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<text x="80" y="1301" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">PERSISTENCE</text>
+<text x="80" y="1335" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="18" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">life.db — SQLite, one file per persona, 35 tables</text>
+<text x="80" y="1369" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">life_energy_state · life_goals · life_daily_plan</text>
+<text x="80" y="1391" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">life_affect_state · life_identity_facets · life_shadow_state</text>
+<text x="80" y="1413" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">activity_logs · shareable_experiences · life_events · …</text>
+<rect x="700" y="1267" width="540" height="180" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<text x="724" y="1301" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">THE PUBLIC SURFACE</text>
+<text x="724" y="1335" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="18" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">117 names, pinned</text>
+<text x="724" y="1369" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">Pinned against tests/api_surface.json — the surface</text>
+<text x="724" y="1391" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">cannot move without the diff saying so. Subsystem</text>
+<text x="724" y="1413" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">classes go by module path: supported, not yet stable.</text>
+<rect x="1264" y="1267" width="480" height="180" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
+<text x="1288" y="1301" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="13" font-weight="600" fill="#6B7C8E" text-anchor="start" letter-spacing="1.6">HOW IT FAILS</text>
+<text x="1288" y="1335" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="18" font-weight="600" fill="#E8EDF2" text-anchor="start" letter-spacing="0">It degrades instead of dying</text>
+<text x="1288" y="1369" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">Miss a hook and that one feature reports</text>
+<text x="1288" y="1391" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">“unavailable”; the tick still completes. The</text>
+<text x="1288" y="1413" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="14" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">unguarded exceptions are pinned by a test.</text>
+<path d="M56 1478 H1744" stroke="#212C39" stroke-width="1.5"/>
+<text x="56" y="1508" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="start" letter-spacing="0">github.com/Redrum624/aura-life</text>
+<text x="1744" y="1508" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="15" font-weight="400" fill="#6B7C8E" text-anchor="end" letter-spacing="0">324 tests passing  ·  Apache-2.0  ·  what ships unfixed is named in DEFERRED.md</text>
+</svg>
