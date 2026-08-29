@@ -444,7 +444,11 @@ class LifeService:
         # Extract core_traits once for all engines
         self._core_traits = getattr(definition, 'core_traits', []) if definition else []
 
-        self._energy = EnergySystem(sleep_schedule=sleep_schedule, core_traits=self._core_traits)
+        self._energy = EnergySystem(
+            sleep_schedule=sleep_schedule,
+            core_traits=self._core_traits,
+            now=self._world_clock(),
+        )
         self._activity_engine = ActivityEngine()
         self._goal_engine = GoalEngine()
         self._desire_system = DesireSystem(core_traits=self._core_traits)
@@ -4695,7 +4699,12 @@ class LifeService:
             cursor.execute("SELECT * FROM life_energy_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._energy = EnergySystem.from_dict(dict(row), sleep_schedule=self._sleep_schedule, core_traits=self._core_traits)
+                self._energy = EnergySystem.from_dict(
+                    dict(row),
+                    sleep_schedule=self._sleep_schedule,
+                    core_traits=self._core_traits,
+                    now=self._world_clock(),
+                )
                 # Reapply the AI flag after reload — an AI never sleeps / carries no
                 # sleep-physiology (from_dict doesn't persist persona_type).
                 self._energy._is_ai = self._is_ai
@@ -6218,7 +6227,7 @@ class LifeService:
         Used when clearing memory or after extended downtime.
         """
         # Reset energy to neutral
-        self._energy = EnergySystem(core_traits=self._core_traits)
+        self._energy = EnergySystem(core_traits=self._core_traits, now=self._world_clock())
 
         # Reset desire system
         self._desire_system = DesireSystem(core_traits=self._core_traits)
@@ -6503,6 +6512,23 @@ class LifeService:
             return self._place_location.current_timezone or ""
         except Exception:
             return ""
+
+    def _world_clock(self) -> Callable[[], datetime]:
+        """The clock the world runs on, for engines that measure elapsed time.
+
+        Distinct from :meth:`persona_local_now`, which is the ``persona_now``
+        hook and answers *what time is it where she lives* (timezone-aware,
+        used for wall-clock hours). This one answers *how much time has passed*
+        and is deliberately naive, because every ``datetime`` stored in engine
+        state is.
+
+        Falls back to ``datetime.now`` when the injected world does not expose a
+        callable ``now`` -- a host may hand in a duck-typed environment, and an
+        engine losing its clock entirely would be a worse failure than reading
+        the wall clock.
+        """
+        clock = getattr(self._world, "now", None)
+        return clock if callable(clock) else datetime.now
 
     def persona_local_now(self):
         """Return 'now' in the persona's local timezone (or server-local fallback)."""

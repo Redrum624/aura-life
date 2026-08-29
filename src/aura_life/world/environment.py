@@ -6,7 +6,7 @@ Manages the persona's virtual world: locations, weather, time, and cherished obj
 
 import random
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from ..models import (
     Location,
@@ -229,6 +229,7 @@ class WorldEnvironment:
         self,
         persona_locations: Optional[Dict[str, str]] = None,
         sleep_schedule: Optional[Dict] = None,
+        now: Optional[Callable[[], datetime]] = None,
     ):
         """Initialize the world environment.
 
@@ -239,18 +240,46 @@ class WorldEnvironment:
                 Contains wake_hour, bedtime_hour etc. Used to calculate
                 schedule-relative TimeOfDay so night-owl personas get correct
                 energy/mood at their active hours.
+            now: The clock this world runs on -- a zero-argument callable
+                returning a naive :class:`datetime`. Defaults to
+                ``datetime.now``, so an existing caller is unaffected. A
+                consumer driving *simulated* time (a sandbox stepping days in
+                milliseconds, a replay, a test) supplies its own and the whole
+                world -- including every engine that reads the clock through
+                :meth:`now` -- follows it. See :meth:`now`.
         """
         self._persona_locations: Dict[str, str] = persona_locations or {}
         self._sleep_schedule: Optional[Dict] = sleep_schedule
         self._current_location: str = "home"
+        # Must be installed before the WorldState below: building it calls
+        # _get_appropriate_weather(), which reads the clock.
+        self._now: Callable[[], datetime] = now or datetime.now
         self._state = WorldState(
             current_location=Location.LIVING_ROOM,  # legacy field kept for compat
             weather=self._get_appropriate_weather(),
-            virtual_time=datetime.now(),
-            time_of_day=self._calculate_time_of_day(datetime.now()),
-            season=self._calculate_season(datetime.now()),
+            virtual_time=self.now(),
+            time_of_day=self._calculate_time_of_day(self.now()),
+            season=self._calculate_season(self.now()),
         )
         self._update_ambiance()
+
+    def now(self) -> datetime:
+        """The current instant, from this world's clock.
+
+        Every wall-clock read inside this class goes through here, and
+        :class:`~aura_life.life_service.LifeService` hands this bound method to
+        the engines that measure elapsed time (today: the energy system), so a
+        world on a simulated clock produces a simulated circadian rhythm rather
+        than one keyed to how long the host process has been alive.
+
+        A subclass that derives time from something other than a callable --
+        Hollow's ``DeterministicWorld`` derives it from a tick counter and an
+        epoch -- overrides this method instead of passing ``now=``. Whatever
+        such an override reads must be assigned **before** it calls
+        ``super().__init__()``: the constructor builds ``WorldState``, and doing
+        so reads the clock.
+        """
+        return self._now()
 
     @property
     def state(self) -> WorldState:
@@ -290,8 +319,8 @@ class WorldEnvironment:
         - Potentially transitions weather
         - Updates ambiance
         """
-        # Update virtual time to match real time
-        now = datetime.now()
+        # Update virtual time to match the world's clock
+        now = self.now()
         self._state.virtual_time = now
         self._state.time_of_day = self._calculate_time_of_day(now)
         self._state.season = self._calculate_season(now)
@@ -476,7 +505,7 @@ class WorldEnvironment:
 
     def _get_appropriate_weather(self) -> Weather:
         """Get weather appropriate for current time and season."""
-        now = datetime.now()
+        now = self.now()
         time_of_day = self._wall_clock_time_of_day(now)
         season = self._calculate_season(now)
 
@@ -497,7 +526,7 @@ class WorldEnvironment:
     def _transition_weather(self) -> None:
         """Transition weather based on probabilities."""
         current = self._state.weather
-        time_of_day = self._wall_clock_time_of_day(datetime.now())
+        time_of_day = self._wall_clock_time_of_day(self.now())
 
         # Force night weather during night hours
         if time_of_day in (TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT):
@@ -524,7 +553,7 @@ class WorldEnvironment:
         weather_desc = WEATHER_DESCRIPTIONS.get(self._state.weather, "")
 
         # Time-specific additions — use wall clock for physical light descriptions
-        wall_time = self._wall_clock_time_of_day(datetime.now())
+        wall_time = self._wall_clock_time_of_day(self.now())
         time_additions = {
             TimeOfDay.DAWN: "The world is waking up softly",
             TimeOfDay.MORNING: "Morning light fills the space",

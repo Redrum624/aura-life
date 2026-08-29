@@ -5,7 +5,7 @@ Manages the persona's energy levels, fatigue, circadian rhythms, and boosts.
 """
 
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 from ..models import EnergyState, EnergyLevel, TimeOfDay
 
@@ -139,6 +139,7 @@ class EnergySystem:
         sleep_schedule: Optional[Dict] = None,
         core_traits: Optional[List[str]] = None,
         is_ai: bool = False,
+        now: Optional[Callable[[], datetime]] = None,
     ):
         """
         Initialize energy system.
@@ -149,6 +150,14 @@ class EnergySystem:
             core_traits: Optional personality traits for growth multiplier
             is_ai: True for AI personas — they never sleep and carry no
                 sleep-physiology (fatigue / hours-awake) in their digest.
+            now: The clock this system measures elapsed time against — a
+                zero-argument callable returning a naive :class:`datetime`.
+                Defaults to ``datetime.now``, so every existing caller keeps
+                exactly the behaviour it had. ``LifeService`` passes its
+                world's :meth:`~aura_life.world.WorldEnvironment.now`, so a
+                consumer running the world on a simulated clock gets a
+                simulated circadian rhythm instead of one keyed to how long
+                the host process has been alive. See :attr:`clock`.
         """
         # AI personas are awake at all times; LifeService may also set this
         # after construction once persona_type is known.
@@ -156,6 +165,9 @@ class EnergySystem:
         # Store sleep schedule (use defaults if not provided)
         self._sleep_schedule = sleep_schedule or self.DEFAULT_SLEEP_SCHEDULE.copy()
         self._energy_multiplier = self._calc_energy_multiplier(core_traits or [])
+        # Every wall-clock read below goes through this. Installed before the
+        # initial state is built, because building it reads the clock twice.
+        self._now: Callable[[], datetime] = now or datetime.now
 
         if initial_state:
             self._state = initial_state
@@ -167,9 +179,24 @@ class EnergySystem:
                 inspiration_boost=0.0,
                 social_boost=0.0,
                 hours_awake=0.0,
-                last_sleep_time=datetime.now() - timedelta(hours=8),
-                last_update=datetime.now(),
+                last_sleep_time=self._now() - timedelta(hours=8),
+                last_update=self._now(),
             )
+
+    @property
+    def clock(self) -> Callable[[], datetime]:
+        """The callable this system reads the time from.
+
+        ``EnergySystem().clock == datetime.now`` for a default-constructed
+        system. Compare with ``==``, not ``is``: ``datetime.now`` is a bound
+        builtin and each attribute access on the class produces a fresh object,
+        so ``datetime.now is datetime.now`` is already ``False``.
+
+        Exposed so a consumer can tell *which* clock is installed rather than
+        infer it from behaviour — the same reason
+        :func:`aura_life.hooks.provider_for` exists for the hook registry.
+        """
+        return self._now
 
     @property
     def state(self) -> EnergyState:
@@ -219,7 +246,7 @@ class EnergySystem:
         - Decays boosts
         - Accumulates fatigue if awake too long
         """
-        now = datetime.now()
+        now = self._now()
         minutes_elapsed = (now - self._state.last_update).total_seconds() / 60
         self._state.last_update = now
 
@@ -324,7 +351,7 @@ class EnergySystem:
         )
         self._state.fatigue = min(0.6, residual_fatigue + short_sleep_penalty)
         self._state.hours_awake = 0.0
-        self._state.last_sleep_time = datetime.now()
+        self._state.last_sleep_time = self._now()
 
         # Clear boosts after sleep
         self._state.caffeine_boost = 0.0
@@ -372,7 +399,7 @@ class EnergySystem:
                 While engaged she stays up (just gets tired) rather than drifting
                 off mid-conversation. Only true exhaustion overrides this.
             now_hour: Override the current hour (0-23). When ``None`` (default)
-                ``datetime.now().hour`` is used, preserving existing behavior.
+                the system clock's hour is used, preserving existing behavior.
                 LifeService passes the persona-local hour so sleep follows her
                 clock; standalone callers are unaffected.
         """
@@ -396,7 +423,7 @@ class EnergySystem:
             return False
 
         # Check if it's past bedtime
-        hour = now_hour if now_hour is not None else datetime.now().hour
+        hour = now_hour if now_hour is not None else self._now().hour
         bedtime_hour = self.bedtime_hour
         wake_hour = self.wake_hour
 
@@ -423,14 +450,14 @@ class EnergySystem:
         Args:
             in_conversation: True when the user is actively chatting.
             now_hour: Override the current hour (0-23). When ``None`` (default)
-                ``datetime.now().hour`` is used so standalone callers are
+                the system clock's hour is used so standalone callers are
                 unaffected. LifeService passes the persona-local hour.
         """
         if self._is_ai:
             return False
         if in_conversation:
             return False
-        hour = now_hour if now_hour is not None else datetime.now().hour
+        hour = now_hour if now_hour is not None else self._now().hour
         return is_within_sleep_window(hour, self.bedtime_hour, self.wake_hour)
 
     def can_do_activity(self, energy_cost: float) -> bool:
@@ -540,7 +567,7 @@ class EnergySystem:
         Args:
             time_of_day: Current time-of-day bucket (from WorldSystem).
             now_hour: Override the current hour (0-23).  When ``None``
-                (default) ``datetime.now().hour`` is used, preserving
+                (default) the system clock's hour is used, preserving
                 existing behavior.  LifeService can pass the persona-local
                 hour so hours_awake is anchored to the persona's clock.
         """
@@ -553,7 +580,7 @@ class EnergySystem:
         bedtime_hour = self.bedtime_hour
 
         # Estimate hours awake based on time of day and persona's schedule
-        hour = now_hour if now_hour is not None else datetime.now().hour
+        hour = now_hour if now_hour is not None else self._now().hour
 
         # Handle schedules where bedtime crosses midnight (e.g., 2:00 AM bedtime)
         if bedtime_hour < wake_hour:
@@ -579,7 +606,7 @@ class EnergySystem:
                 # Before wake time (should be asleep or just waking)
                 self._state.hours_awake = 0
 
-        self._state.last_update = datetime.now()
+        self._state.last_update = self._now()
 
     def hours_since_wake(self) -> float:
         """
@@ -587,7 +614,7 @@ class EnergySystem:
 
         Used for startup catch-up calculations.
         """
-        now = datetime.now()
+        now = self._now()
         wake_hour = self.wake_hour
         wake_minute = self._sleep_schedule.get("wake_minute", 0)
 
@@ -603,7 +630,8 @@ class EnergySystem:
 
     @classmethod
     def from_dict(cls, data: dict, sleep_schedule: Optional[Dict] = None,
-                  core_traits: Optional[List[str]] = None) -> "EnergySystem":
+                  core_traits: Optional[List[str]] = None,
+                  now: Optional[Callable[[], datetime]] = None) -> "EnergySystem":
         """
         Create from dict (for persistence).
 
@@ -611,7 +639,12 @@ class EnergySystem:
             data: Persisted energy state data
             sleep_schedule: Optional sleep schedule from persona profile
             core_traits: Optional personality traits for growth multiplier
+            now: Clock for the restored system, as in :meth:`__init__`. Also
+                supplies the ``last_update`` fallback when the persisted row
+                carries none, so a restore on a simulated clock does not stamp
+                the host's wall time into the state it just rehydrated.
         """
+        _now = now or datetime.now
         state = EnergyState(
             level=data.get("level", 0.7),
             fatigue=data.get("fatigue", 0.0),
@@ -620,6 +653,6 @@ class EnergySystem:
             social_boost=data.get("social_boost", 0.0),
             hours_awake=data.get("hours_awake", 0.0),
             last_sleep_time=datetime.fromisoformat(data["last_sleep_time"]) if data.get("last_sleep_time") else None,
-            last_update=datetime.fromisoformat(data["last_update"]) if data.get("last_update") else datetime.now(),
+            last_update=datetime.fromisoformat(data["last_update"]) if data.get("last_update") else _now(),
         )
-        return cls(initial_state=state, sleep_schedule=sleep_schedule, core_traits=core_traits)
+        return cls(initial_state=state, sleep_schedule=sleep_schedule, core_traits=core_traits, now=now)
