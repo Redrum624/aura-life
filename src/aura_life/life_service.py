@@ -55,6 +55,7 @@ from .affect import AffectSystem
 from .body import BodySystem
 from .cognitive import CognitiveSystem
 from .shadow import ShadowSystem
+from .sanity import SanitySystem, STATES as SANITY_STATES
 from .drive import DriveSystem
 from .behavior import BehaviorSystem
 from .memory_time import MemoryTimeSystem
@@ -130,6 +131,23 @@ USER_LOCATION_MAX = 100
 CALENDAR_RETENTION_DAYS = 30
 
 # ============= Weather mood routing constants =============
+# === Sanity -> library couplings ===
+# Applied by LifeService glue from the sanity engine's state word (never inside
+# the engine), so a host that couples to ``SanitySystem.state`` and a host that
+# reads affect or shadow directly see one story. The words are the contract;
+# the amounts live here.
+SANITY_STRESS_SOURCE = "sanity"             # affect stressor while strained or worse
+SANITY_FRAYING_RESTRAINT_PRESSURE = 0.2     # shadow restraint pull while fraying or worse
+SANITY_BREAKING_REGULATION_COLLAPSE = 1.0   # regulation capacity drained on entering breaking
+# Affect stress *level* at or above which the sanity tick reads the persona as
+# stressed. The level is what affect keeps live (it decays every tick); the
+# ``stress.sources`` labels are a capped summary that the service never
+# resolves (``struggle:*``, ``money worries`` ...), so reading *them* would make
+# every persona with a struggle erode to ``broken`` in days without a single
+# blow. 0.2 is the floor of affect's own ``get_stress_description()`` -- below
+# it, affect has nothing to say about stress.
+SANITY_STRESSED_LEVEL = 0.2
+
 # Small one-shot nudge applied via AffectSystem.on_weather_nudge() on WEATHER CHANGE
 # (not every tick), so the push is bounded. Scale factors are unitless weights on
 # _shift_mood_positive / _shift_mood_negative internally.
@@ -380,6 +398,7 @@ class LifeService:
         user_model_provider: Optional[Callable[[str], object]] = None,
         follow_up_provider: Optional[Callable[[str], object]] = None,
         datastore: Optional[object] = None,
+        sanity_rng=None,
     ):
         """
         Initialize the life service.
@@ -410,6 +429,11 @@ class LifeService:
                 instead of into ``db_path``. Optional like ``memory_service``:
                 with none supplied the calendar lives in ``db_path``, where
                 ``_init_database()`` already creates its table.
+            sanity_rng: Optional random source for the sanity engine's one
+                construction-time draw (the baseline jitter; see
+                :class:`~aura_life.sanity.SanitySystem`). ``None`` -- the
+                default -- takes no draw at all, so a host that already seeds
+                its own rng and passes nothing keeps its sequence untouched.
         """
         self._db_path = self._resolve_db_path(db_path, persona_id)
         self._emotion_engine = emotion_engine
@@ -523,6 +547,19 @@ class LifeService:
             substance_tendencies=(getattr(definition, 'substance_tendencies', {}) if definition else {}) or {},
             core_traits=(getattr(definition, 'core_traits', []) if definition else []) or [],
         )
+        self._sanity_rng = sanity_rng
+        self._sanity = SanitySystem(
+            struggles=(getattr(definition, 'struggles', []) if definition else []) or [],
+            character_defects=(getattr(definition, 'character_defects', []) if definition else []) or [],
+            intrusive_thought_themes=(getattr(definition, 'intrusive_thought_themes', []) if definition else []) or [],
+            rng=sanity_rng,
+        )
+        # Elapsed-time stamp for the sanity tick, on the world clock like energy.
+        self._sanity_ticked_at = self._world_clock()()
+        # The word the couplings were last applied for. Recorded, never applied
+        # here: the couplings fire on a *change* of word, so a persona whose
+        # baseline already sits below ``sound`` is not coupled for existing.
+        self._sanity_coupled_state: str = self._sanity.state
         self._drive = DriveSystem(
             core_traits=self._core_traits,
             comfort_zone_seeds=getattr(self._definition, 'comfort_zone_seeds', []) if self._definition else [],
@@ -1159,6 +1196,11 @@ class LifeService:
         return self._affect
 
     @property
+    def sanity(self) -> SanitySystem:
+        """Get sanity system -- the one interior number that can break."""
+        return self._sanity
+
+    @property
     def cognitive(self) -> CognitiveSystem:
         """Get cognitive system."""
         return self._cognitive
@@ -1492,6 +1534,7 @@ class LifeService:
                 **self._cognitive.export_state(),
             },
             "shadow": self._shadow.export_state(),
+            "sanity": self._sanity.export_state(),
             "memory_time": self._memory_time.export_state(),
             "continuity": self._continuity.export_state(),
             "character_evolution": self._character_evolution.export_state(),
@@ -2593,6 +2636,7 @@ class LifeService:
             "body": self._body.get_status(),
             "cognitive": self._cognitive.get_status(),
             "shadow": self._shadow.get_status(),
+            "sanity": self._sanity.get_status(),
             "mental_health": self.mental_health_index(),
             "drive": self._drive.get_status(),
             "behavior": self._behavior.get_status(),
@@ -2816,6 +2860,9 @@ class LifeService:
             loneliness=self._affect.loneliness.level,
             mood=_mood_valence,
         )
+
+        # === Sanity tick (the interior that integrates and can break) ===
+        self._tick_sanity()
 
         # === Drive tick ===
         self._drive.tick()
@@ -3046,6 +3093,99 @@ class LifeService:
             return self._expression._style.relationship_stage in CLOSE_RELATIONSHIP_STAGES
         except Exception:
             return False
+
+    # ============= Sanity: the interior that integrates and can break =============
+
+    def on_sanity_blow(self, kind: str, severity: float) -> float:
+        """Report a blow to the sanity engine and apply the couplings at once.
+
+        Thin over :meth:`SanitySystem.on_blow`. A host may also call the engine
+        directly through :attr:`sanity`; the couplings then catch up at the
+        next energy tick. Returns the loss applied.
+        """
+        loss = self._sanity.on_blow(kind, severity)
+        self._sync_sanity_couplings()
+        return loss
+
+    def on_sanity_recovery(self, kind: str, amount: float) -> float:
+        """Report a recovery to the sanity engine and apply the couplings at
+        once. Thin over :meth:`SanitySystem.on_recovery`; returns the gain."""
+        gain = self._sanity.on_recovery(kind, amount)
+        self._sync_sanity_couplings()
+        return gain
+
+    def _tick_sanity(self) -> None:
+        """Advance sanity by the world time elapsed since the last tick.
+
+        Hours come from the world clock, the way energy measures elapsed time
+        (:meth:`_world_clock`); the engine itself reads no clock. The stamp is
+        taken at construction and again on reload rather than persisted, so a
+        host's downtime is not charged as lived time -- catch-up is the host's
+        business, and the engine is only told about hours the persona lived.
+
+        ``stressed`` reads affect's stress *level* against
+        ``SANITY_STRESSED_LEVEL``, not the ``stress.sources`` labels: the level
+        is the live quantity (it decays), the labels are a summary the service
+        never clears.
+        """
+        now = self._world_clock()()
+        hours = (now - self._sanity_ticked_at).total_seconds() / 3600
+        self._sanity_ticked_at = now
+        self._sanity.tick(
+            hours,
+            stressed=self._affect.stress.level >= SANITY_STRESSED_LEVEL,
+            concealment_load=self._shadow.state.concealment_load,
+        )
+        self._sync_sanity_couplings()
+
+    def _sync_sanity_couplings(self) -> None:
+        """Apply the sanity -> library couplings when the engine's state word
+        has changed since they were last applied.
+
+        Nothing happens while the word holds -- a persona whose baseline sits
+        in ``strained`` and never moves is byte-identical to one built before
+        this engine existed. On a change, the word-functions are applied
+        (they are idempotent, so repeated changes never double-count):
+
+        * ``strained`` or worse: affect carries a stressor named
+          ``SANITY_STRESS_SOURCE``; ``sound`` clears it.
+        * ``fraying`` or worse: shadow holds ``SANITY_FRAYING_RESTRAINT_PRESSURE``
+          on restraint (inhibition down, intrusive thoughts closer to winning);
+          above ``fraying`` it is released.
+
+        The third is an entry event -- regulation capacity collapses by
+        ``SANITY_BREAKING_REGULATION_COLLAPSE`` once, on the way *into*
+        ``breaking`` from above. A reload never comes through here: it restores
+        the coupled word from the row (see :meth:`_load_sanity`), so the entry
+        event is not fired twice and affect's row keeps its own side.
+        """
+        new = self._sanity.state
+        old = self._sanity_coupled_state
+        if new == old:
+            return
+        rank = SANITY_STATES.index
+
+        if new == "sound":
+            if SANITY_STRESS_SOURCE in self._affect.stress.sources:
+                self._affect.on_stressor_resolved(SANITY_STRESS_SOURCE)
+        else:
+            self._affect.on_stressor_added(SANITY_STRESS_SOURCE)
+
+        self._hold_sanity_restraint(new)
+
+        if rank(old) < rank("breaking") <= rank(new):
+            self._affect.deplete_regulation(SANITY_BREAKING_REGULATION_COLLAPSE, "sanity: breaking")
+
+        self._sanity_coupled_state = new
+
+    def _hold_sanity_restraint(self, word: str) -> None:
+        """Hold (``fraying`` or worse) or release shadow's restraint pull for
+        ``word``. Idempotent: a pull already held at that amount moves nothing,
+        which is what makes it safe after a reload."""
+        rank = SANITY_STATES.index
+        pressure = SANITY_FRAYING_RESTRAINT_PRESSURE if rank(word) >= rank("fraying") else 0.0
+        if self._shadow.restraint_pressure != pressure:
+            self._shadow.set_restraint_pressure(pressure)
 
     def _evaluate_life_triggers(self):
         """Evaluate all engine state and create proactive triggers when conditions are met.
@@ -4412,6 +4552,14 @@ class LifeService:
                 )
             """)
 
+            # Sanity state table (single row) -- full to_dict() stored as JSON
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS life_sanity_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    data TEXT
+                )
+            """)
+
             # Body state table (single row)
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS life_body_state (
@@ -4861,6 +5009,9 @@ class LifeService:
             # Load shadow state
             self._load_shadow(cursor)
 
+            # Load sanity state (after affect and shadow: the couplings read both)
+            self._load_sanity(cursor)
+
             # Load drive state
             self._load_drive(cursor)
 
@@ -4994,6 +5145,7 @@ class LifeService:
         self._save_body()
         self._save_cognitive()
         self._save_shadow()
+        self._save_sanity()
         self._save_drive()
         self._save_social_expansion()
         self._save_behavior()
@@ -5644,6 +5796,39 @@ class LifeService:
             row = cursor.fetchone()
             if row and row["data"]:
                 self._shadow = ShadowSystem.from_dict(json.loads(row["data"]))
+        except sqlite3.OperationalError:
+            pass  # Table doesn't exist yet
+
+    def _save_sanity(self) -> None:
+        """Save sanity state to database (full to_dict() as JSON)."""
+        with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
+            cursor = conn.cursor()
+            data = self._sanity.to_dict()
+            data["coupled_state"] = self._sanity_coupled_state   # glue's, not the engine's
+            data = json.dumps(data)
+            cursor.execute("""
+                INSERT OR REPLACE INTO life_sanity_state (id, data)
+                VALUES (1, ?)
+            """, (data,))
+            conn.commit()
+
+    def _load_sanity(self, cursor) -> None:
+        """Load sanity state from database. Keep the constructed instance on a
+        fresh DB (no row); a stored row resumes number, state, flag and pending
+        events without a draw, plus the word the couplings were last applied
+        for. Affect's and shadow's rows already carry their sides of the
+        couplings; the pull is held again from that word only for a shadow
+        row that predates it (a no-op when the row has it)."""
+        try:
+            cursor.execute("SELECT data FROM life_sanity_state WHERE id = 1")
+            row = cursor.fetchone()
+            if row and row["data"]:
+                data = json.loads(row["data"])
+                self._sanity = SanitySystem.from_dict(data)
+                self._sanity_ticked_at = self._world_clock()()
+                coupled = data.get("coupled_state")
+                self._sanity_coupled_state = coupled if coupled in SANITY_STATES else self._sanity.state
+                self._hold_sanity_restraint(self._sanity_coupled_state)
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
@@ -6316,6 +6501,14 @@ class LifeService:
             substance_tendencies=(getattr(self._definition, 'substance_tendencies', {}) if self._definition else {}) or {},
             core_traits=(getattr(self._definition, 'core_traits', []) if self._definition else []) or [],
         )
+        self._sanity = SanitySystem(
+            struggles=(getattr(self._definition, 'struggles', []) if self._definition else []) or [],
+            character_defects=(getattr(self._definition, 'character_defects', []) if self._definition else []) or [],
+            intrusive_thought_themes=(getattr(self._definition, 'intrusive_thought_themes', []) if self._definition else []) or [],
+            rng=self._sanity_rng,
+        )
+        self._sanity_ticked_at = self._world_clock()()
+        self._sanity_coupled_state = self._sanity.state
         self._drive = DriveSystem(
             core_traits=self._core_traits,
             comfort_zone_seeds=getattr(self._definition, 'comfort_zone_seeds', []) if self._definition else [],
@@ -6478,6 +6671,7 @@ class LifeService:
         self._save_body()
         self._save_cognitive()
         self._save_shadow()
+        self._save_sanity()
         self._save_drive()
         self._save_behavior()
         self._save_memory_time()

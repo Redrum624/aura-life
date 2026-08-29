@@ -26,7 +26,7 @@ without narration, real weather or place lookups.
 
 <p align="center">
   <a href=".github/concept-map.png"><img src=".github/concept-map.png" width="100%"
-     alt="Concept map of aura-life: the host application feeds twelve hooks; LifeScheduler drives five ticks; LifeService orchestrates thirty engine subpackages grouped into body and rhythm, inner weather, intent and action, place and means, others and self, and time and meaning; a shared WorldEnvironment on the left; context, get_status() and shareable experiences read out on the right; SQLite persistence below."></a>
+     alt="Concept map of aura-life: the host application feeds twelve hooks; LifeScheduler drives five ticks; LifeService orchestrates thirty-odd engine subpackages grouped into body and rhythm, inner weather (where sanity, the one interior that can break, sits beside affect and shadow), intent and action, place and means, others and self, and time and meaning; a shared WorldEnvironment on the left; context, get_status() and shareable experiences read out on the right; SQLite persistence below."></a>
 </p>
 
 <p align="center"><sub>
@@ -49,7 +49,7 @@ without narration, real weather or place lookups.
 - **It degrades instead of dying.** Miss a hook and that one feature reports
   "unavailable"; the tick still completes. The unguarded exceptions are counted,
   named, and pinned by a test rather than left for you to find.
-- **The public surface cannot move by accident.** 117 exported names, pinned
+- **The public surface cannot move by accident.** 118 exported names, pinned
   against a committed snapshot; regenerating it is opt-in and shows up in the
   diff.
 - **32,088 lines across 82 modules and 32 subpackages** as extracted — 32,949
@@ -192,7 +192,7 @@ databases.
 
 ## Module index
 
-Thirty-two subpackages. Each owns one slice of the simulation and talks to the
+Thirty-three subpackages. Each owns one slice of the simulation and talks to the
 others only through `LifeService`, which is the orchestrator — engines never call
 each other directly.
 
@@ -223,6 +223,7 @@ each other directly.
 | `persona_evolution` | Slow personality drift from lived experience, bounded by a maximum drift. |
 | `personas` | The persona pipeline: genre randomisation, personality configuration, the profile database and parser, place and appearance generation. |
 | `planner` | The daily plan — generated once a day, followed through, revised on user command. |
+| `sanity` | The one interior number that integrates the others and can break: a per-persona baseline, blows down, recoveries up, drift on the world clock, a graded word (`sound` to `broken`) the rest couples to. |
 | `scheduler` | The tick loop. APScheduler-backed when the extra is installed; `force_all_ticks()` either way. |
 | `shadow` | The darker inner psychology: felt insecurity, temptation and transgression, secrets. |
 | `skills` | Competencies that grow with practice and emit milestone texts when they cross a threshold. |
@@ -242,14 +243,15 @@ Nine modules sit at the top level:
 | `hooks.py` | The host-hook registry. Imports `typing` and nothing else. |
 | `defaults.py` | The one library-supplied hook implementation, `persona_now`. |
 | `internals.py` | An eight-line unstable re-export namespace. |
-| `__init__.py` | The curated facade — the 117 stable names. |
+| `__init__.py` | The curated facade — the 118 stable names. |
 | `_safe_ids.py` | Private. Persona-id validation and containment-checked path joins. |
 
 ## The public surface
 
-`aura_life` exports **117 names** and that is the stable API. 114 of them are
+`aura_life` exports **118 names** and that is the stable API. 114 of them are
 inherited verbatim from the origin project's engine package; `hooks` and
-`HookNotConfigured` were added by the extraction.
+`HookNotConfigured` were added by the extraction, `clear_persona_schedule` in
+0.2.0, and `SanitySystem` -- the interior that can break -- in 0.3.0.
 
 ```python
 from aura_life import LifeService, Weather, Goal, hooks   # stable
@@ -266,7 +268,7 @@ from aura_life.models import *
 from aura_life.context import *
 ```
 
-Measured against the facade, it adds **15 names** beyond the 117 — and **8 of
+Measured against the facade, it adds **15 names** beyond the 118 — and **8 of
 those are leaked stdlib/typing symbols** (`Dict`, `List`, `Optional`, `Enum`,
 `dataclass`, `field`, `datetime`, `json`) that the wildcard imports dragged in.
 The 7 real additions are `BehavioralTendency`, `CalendarEntry`, `ErrandsState`,

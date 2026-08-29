@@ -159,6 +159,10 @@ class ShadowSystem:
         self._shame_baseline: float = SHAME_BASELINE
         self._attention_baseline: float = 0.2
         self._autonomy_baseline: float = 0.5
+        # Sustained outside pull on restraint (see set_restraint_pressure).
+        # Serialized with the row: it is applied to `inhibition` the moment it
+        # is set, so a load must restore it rather than re-apply it.
+        self._restraint_pressure: float = 0.0
         if initial_state is not None:
             self._state = initial_state
             self._capture_baselines()
@@ -313,7 +317,9 @@ class ShadowSystem:
         low_mood = 1.0 - _clamp01(mood)
 
         # --- Inhibition: restraint recovers toward baseline (alcohol wears off) ---
-        inhibition_baseline = _clamp01((s.conscientiousness + (1.0 - s.vice_proneness)) / 2.0)
+        inhibition_baseline = _clamp01(
+            (s.conscientiousness + (1.0 - s.vice_proneness)) / 2.0 - self._restraint_pressure
+        )
         s.inhibition += (inhibition_baseline - s.inhibition) * INHIBITION_RECOVERY
         # Disinhibition factor: low restraint amplifies temptation / attention,
         # high restraint damps them. 1.0 at baseline, >1 when uninhibited.
@@ -360,7 +366,7 @@ class ShadowSystem:
             s.intrusive_theme = ""
         s.intrusive_winning = bool(
             s.intrusive_theme
-            and s.temptation >= INTRUSIVE_TEMPTATION_HI
+            and s.temptation + self._restraint_pressure >= INTRUSIVE_TEMPTATION_HI
             and s.conscientiousness < LOW_CONSCIENTIOUSNESS
         )
 
@@ -604,6 +610,35 @@ class ShadowSystem:
         """Chaos hook: bump conscience-guilt by `amount` (clamped to [0,1])."""
         self._state.guilt = _clamp01(self._state.guilt + amount)
 
+    def set_restraint_pressure(self, amount: float) -> None:
+        """Hold a sustained outside pull on restraint, in [0, 1]; 0 releases it.
+
+        The seam `LifeService` uses when the sanity engine reads `fraying`.
+        A one-shot nudge like `add_unease` would not do here: `tick()` recovers
+        `inhibition` toward its baseline every call and recomputes
+        `intrusive_winning` from scratch, so the pull has to be something the
+        tick consults. While held, it lowers the baseline `inhibition` recovers
+        toward by `amount` and lowers the temptation bar for losing to an
+        intrusive thought by the same amount. The change is applied to
+        `inhibition` immediately as well, both ways, so the drop (and the
+        restore) is visible before the next tick.
+
+        Travels in `to_dict()` / `from_dict()` like the other baselines: the
+        drop is already in the stored `inhibition`, so a load restores the pull
+        without applying it a second time. A host that re-holds the same
+        amount after a load finds it equal and moves nothing.
+        """
+        amount = _clamp01(amount)
+        delta = amount - self._restraint_pressure
+        if delta:
+            self._state.inhibition = _clamp01(self._state.inhibition - delta)
+        self._restraint_pressure = amount
+
+    @property
+    def restraint_pressure(self) -> float:
+        """The pull currently held by `set_restraint_pressure` (0 when none)."""
+        return self._restraint_pressure
+
     def add_secret(self, secret: str) -> None:
         """Record something the persona is now hiding.
 
@@ -757,6 +792,7 @@ class ShadowSystem:
             "concealment_load": s.concealment_load,
             "masking": s.masking,
             "secrets": json.dumps(s.secrets),
+            "restraint_pressure": self._restraint_pressure,
             "last_lie": s.last_lie,
             "guilt": s.guilt,
             "shame": s.shame,
@@ -836,6 +872,7 @@ class ShadowSystem:
             last_update=last_update,
         )
         system = cls(initial_state=state)
+        system._restraint_pressure = _clamp01(float(data.get("restraint_pressure", 0.0)))
         system._intrusive_pool = _list(data.get("intrusive_pool", []))
         # Restore the saved per-persona baselines (fall back to the values
         # _capture_baselines() derived from the restored state for old rows).

@@ -151,6 +151,7 @@ from aura_life.errands import ErrandsSystem
 from aura_life.location import LocationSystem
 from aura_life.transportation import TransportSystem
 from aura_life.shadow import ShadowSystem
+from aura_life.sanity import SanitySystem
 from aura_life.schedule import (
     EventType,
     ScheduledEvent,
@@ -309,6 +310,8 @@ __all__ = [
     # Shadow
     "ShadowSystem",
     "ShadowState",
+    # Sanity
+    "SanitySystem",
     # Intimacy
     "DesireSystem",
     "DesireState",

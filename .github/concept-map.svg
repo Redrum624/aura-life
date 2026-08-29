@@ -113,6 +113,7 @@
 <text x="764" y="797" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">shadow</text>
 <text x="764" y="822" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">drive</text>
 <text x="764" y="847" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">chaos</text>
+<text x="764" y="872" font-family="'Cascadia Mono', 'Consolas', 'SFMono-Regular', 'DejaVu Sans Mono', monospace" font-size="17" font-weight="400" fill="#9AAABB" text-anchor="start" letter-spacing="0">sanity</text>
 <rect x="1066" y="655" width="304" height="244" rx="10" fill="#0D131C" stroke="#212C39" stroke-width="1.5"/>
 <rect x="1066" y="655" width="4" height="244" rx="2" fill="#E8B454"/>
 <text x="1088" y="693" font-family="'Segoe UI', 'Helvetica Neue', Helvetica, Arial, 'DejaVu Sans', sans-serif" font-size="20" font-weight="600" fill="#E8B454" text-anchor="start" letter-spacing="0">Intent &amp; action</text>

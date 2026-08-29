@@ -49,7 +49,93 @@ adapter in someone's app. Two smaller seams ship alongside it, on the same
 argument: a supported way to register a genre, and a way to generate a cast
 whose names do not collide. All three are additive.
 
+**The fourth change is a new engine, and it is the one the library was missing.**
+Eight engines carry interior -- mood, stress and loneliness in `affect`; unease,
+felt safety, doubt, intrusive thought, concealment and masking in `shadow`; focus
+in `cognitive` -- and none of them *integrates* those into a trajectory that can
+break. A persona can be stressed, lonely, afraid and lying all at once,
+indefinitely, and be the same persona tomorrow. `SanitySystem` is the seam that
+ends: one scalar the host's blows push down, its recoveries push up, and world
+time erodes or mends between, read through a closed graded vocabulary. Details
+under *Added*.
+
 ### Added
+
+- **`SanitySystem` -- the one interior number that integrates and can break.**
+  `aura_life.sanity` (exported from the facade beside the other engines) holds
+  one scalar `sanity` in [0, 1] and the state word a consumer couples to:
+  `STATES = ("sound", "strained", "fraying", "breaking", "broken")`, with the
+  thresholds living in exactly one place (`state_for`) so a retune here cannot
+  ripple outward. It starts at a per-persona *baseline* read from the definition
+  -- more `struggles`, `character_defects` and `intrusive_thought_themes` mean a
+  lower start and a higher *intensity* -- rather than at 1.0, so fragility is a
+  lean the persona already carries and not a rule a wizard wrote. Severity is
+  the blow's, intensity is the person's: `on_blow(kind, severity)` costs
+  `severity x BLOW_WEIGHT[kind] x intensity` over a closed `BLOW_KINDS`
+  (`grief`, `witnessed`, `did_harm`, `broke_value`, `rejected`, `neglect`,
+  `concealment`); what a "grief" *is* stays the host's business.
+  `on_recovery(kind, amount)` is the way up over a closed `RECOVERY_KINDS`
+  (`rest`, `warmth`, `relief`, `answered`, `achieved`), scaled by a resilience
+  of `1 / intensity` -- the same burdens that make a blow land harder make rest
+  count for less. `tick(hours, *, stressed, concealment_load)` erodes while a
+  stressor is live or a front is being kept up (scaled by shadow's
+  `concealment_load`, so the mask costs something without the host writing a
+  rule) and mends toward the baseline otherwise; the engine reads no clock and
+  is told how much world time passed. Entering `breaking` queues one event the
+  host drains with `drain_events()`; entering `broken` sets a terminal flag
+  that only a reported recovery lifts. Replayable by construction: the single
+  random draw is a baseline jitter at construction, taken only when an `rng`
+  is injected -- `rng=None` is the default, so an existing seeded consumer's
+  sequence is untouched.
+- **`LifeService` wires it like the other engines.** Built from the definition
+  (a new `sanity_rng=` keyword passes the one-draw rng through; `None` by
+  default), exposed as `LifeService.sanity`, ticked from the energy tick with
+  hours measured on the world clock the way energy measures them, reported in
+  `get_status()["sanity"]` (number and word) and `export_inner_state()`,
+  persisted in its own row (`life_sanity_state`) so a restarted host resumes the
+  same number, word, flag and pending events. `on_sanity_blow()` and
+  `on_sanity_recovery()` report through the service so the couplings apply at
+  once; a host that calls the engine directly is coupled at the next tick.
+- **Three couplings from the word to the library, applied by `LifeService`
+  glue and never inside the engine, on a change of the word.** `strained` or
+  worse: affect carries a stressor named `"sanity"`, cleared when `sound`
+  again. A persona whose baseline already sits below `sound` (most shipped
+  genre personas do) is *not* coupled for merely existing: the couplings fire
+  when the word changes, so a persona that is never hit is byte-identical to
+  one built before this engine existed. `fraying`
+  or worse: shadow holds a restraint pull of `0.2` (inhibition down, the
+  temptation bar for `intrusive_winning` down by the same), released when the
+  word climbs back above. `breaking`: affect's regulation capacity collapses
+  once, on the way in. The amounts are module constants on `life_service`
+  (`SANITY_STRESS_SOURCE`, `SANITY_FRAYING_RESTRAINT_PRESSURE`,
+  `SANITY_BREAKING_REGULATION_COLLAPSE`, `SANITY_STRESSED_LEVEL`); the words
+  are the contract. "Stressed", for the tick, is affect's stress *level* at or
+  above `SANITY_STRESSED_LEVEL` (0.2, the floor of affect's own stress
+  description) -- not the `stress.sources` labels, which the service never
+  resolves (`struggle:*`, `money worries`) and which would otherwise erode
+  every persona with a struggle to `broken` in days without a single blow.
+  The +0.05 the `"sanity"` stressor itself adds sits under that floor, so the
+  state that opens it is not the state that keeps eroding. The word the
+  couplings were last applied for travels in the sanity row, so a reload
+  re-holds shadow's pull without firing the entry event twice.
+- **`ShadowSystem.set_restraint_pressure(amount)`**, the smallest public seam
+  that made the fraying coupling hold: shadow's tick recovers `inhibition`
+  toward its baseline every call and recomputes `intrusive_winning` from
+  scratch, so a one-shot nudge would have been a blip. The pull lowers the
+  baseline the tick recovers toward and is applied to `inhibition` at once,
+  both ways; `restraint_pressure` reads it back. It travels in shadow's row
+  like the other baselines, because the drop is already in the stored
+  `inhibition` and a load that re-applied it would lower restraint twice.
+- **`tests/test_sanity.py`** (54 cases) proves the engine alone; and
+  **`tests/test_sanity_wiring.py`** (18 cases) proves the seams: forty-eight
+  simulated hours through the real energy tick leave an unstressed persona at
+  its baseline and every other engine's status byte-identical to a service with
+  the sanity tick disabled; each coupling by the word; hours on the world clock;
+  a restart that resumes the number and re-applies the couplings without
+  re-firing the entry event.
+- **`SanitySystem` on the facade** -- `aura_life.__all__` goes from 117 names to
+  118, and `tests/api_surface.json` is regenerated deliberately for that one
+  addition; nothing was removed.
 
 - **Personas can be generated as female, male or nonbinary.**
   `aura_life.personas.genre_randomizer` gains `GENDERS`, a `PRONOUNS` token table

@@ -61,8 +61,9 @@ def test_every_exported_name_actually_resolves():
 
 def test_surface_size_is_the_seeded_one():
     # 114 from the origin engine package's __init__.py + hooks + HookNotConfigured = 116 at extraction (0.1.0);
-    # + clear_persona_schedule, the teardown for the schedule cache, added in 0.2.0 = 117.
-    assert len(aura_life.__all__) == 117
+    # + clear_persona_schedule, the teardown for the schedule cache, added in 0.2.0 = 117;
+    # + SanitySystem, the interior that integrates and can break, added in 0.3.0 = 118.
+    assert len(aura_life.__all__) == 118
 
 
 def test_internals_exposes_life_service():
