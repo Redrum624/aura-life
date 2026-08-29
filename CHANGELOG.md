@@ -6,6 +6,242 @@ narrative sections under 0.1.0, *Behaviour* and *Not extracted*, that a
 pure-extraction release needs and Keep a Changelog has no type for — and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - unreleased — personas are no longer all women, and the world clock is injectable
+
+`_generic_concept` returned a hardcoded `"gender": "female"` from three literal
+sites, and that was the small part of the problem. All seven `appearance_template`s
+opened `"{age}-year-old woman ..."`, the module carried 209 she/her occurrences
+and 15 woman/daughter/mother/sister, and every one of the seven name pools was
+female. Deleting the three literals without touching the prose would have produced
+a persona the library calls male and then describes as *"She has sat with ten
+thousand people"* — a worse defect than the one being fixed, because it would look
+fixed. So this release rewrites the corpus, not the constant.
+
+**It is a minor bump rather than a patch, and it does reach existing callers.**
+Nothing public was removed and no signature changed incompatibly — `gender` was
+appended to both builders, so every v0.2.0 call form still binds — but the default
+gender is now *drawn* instead of always being `"female"`, and the rng stream gained
+one draw at the front. A caller replaying a run off a stored seed gets a different
+persona than it did on 0.2.0. Both consequences are spelled out under *Changed*.
+
+**The release carries a second, unrelated change: the world and the energy engine
+no longer hard-code the host wall clock.** `EnergySystem` read `datetime.now()`
+for `hours_awake`, which is right for a companion app that lives as long as the
+person using it and wrong for anything that *simulates* time — the engine could
+not be replayed, stepped, or unit-tested by any consumer without freezing global
+state. It is additive and byte-identical by default: `now` defaults to
+`datetime.now` at every new seam, so a caller that passes nothing gets exactly
+what it got before. Details under *Added* and *Fixed*.
+
+### Added
+
+- **Personas can be generated as female, male or nonbinary.**
+  `aura_life.personas.genre_randomizer` gains `GENDERS`, a `PRONOUNS` token table
+  and `render(text, gender, **extra)`; `GenreSpec` gains `name_pools` (keyed by
+  `GENDERS`) and `build_genre_concept()` / `build_blended_concept()` gain a
+  `gender` argument. `gender=None` draws one uniformly from the supplied rng; an
+  unknown value raises `ValueError` naming the value and `GENDERS`. `PRONOUNS`
+  carries verb-agreement forms (`be` / `have` / `s`) so a pronoun swap cannot
+  produce "They's rebuilding".
+- **A second pinned public surface.** `tests/genre_randomizer_surface.json` and
+  two tests in `tests/test_api_surface.py` pin the genre_randomizer module — its
+  public names, the builders' parameter lists, `GENDERS`, the `PRONOUNS` keys per
+  gender, the `GenreSpec` fields and the registry keys. That module is not
+  re-exported by the facade, so `tests/api_surface.json` (which pins
+  `aura_life.__all__`) never covered it — yet Hollow imports it directly and this
+  file documents its names as public. An unpinned de-facto public surface is how a
+  breaking change ships unnoticed. One of the two tests compares against the
+  regenerable snapshot; the other holds the v0.2.0 names as literals, so
+  regenerating the snapshot cannot silently bless a *removal*.
+- **`tests/test_gender_contract.py`** (65 cases): the back-compat surface, the
+  behaviour change and the draw order, asserted rather than described. It pins the
+  26 concept keys as a literal, proves `GenreSpec.name_pool` still reads as the
+  female pool for all seven genres, proves the gender is the first draw and costs
+  exactly one, and replays a seed in two fresh interpreters under different
+  `PYTHONHASHSEED` values — because in-process equality would not catch a
+  generator that depends on dict iteration order.
+- **An injectable clock, carried by the world.**
+  `aura_life.world.WorldEnvironment` gains a `now` constructor argument (a
+  zero-argument callable returning a naive `datetime`) and a public
+  `WorldEnvironment.now()` that every wall-clock read inside the class now goes
+  through. `aura_life.energy.EnergySystem` gains the same `now` argument, a
+  matching one on `EnergySystem.from_dict()`, and a read-only `EnergySystem.clock`
+  property so a consumer can tell *which* clock is installed rather than infer it
+  from behaviour — the same reason `hooks.provider_for()` exists for the hook
+  registry. `LifeService` wires the two together: it hands `self._world.now` to
+  the energy system at construction, at restore-from-SQLite and in
+  `reset_state()`, so a consumer that injects one world on a simulated clock gets
+  a simulated circadian rhythm across every agent sharing that world, with no
+  per-engine wiring and no monkeypatching of `datetime`.
+  The seam is a **method**, not only a constructor argument, because the consumer
+  that needs it derives time from a tick counter and an epoch rather than holding
+  a callable — it subclasses and overrides `now()`. `LifeService` binds
+  `world.now` late, so an override reaches the energy engine too, and falls back
+  to `datetime.now` when the injected world exposes no callable `now` (a host may
+  hand in a duck-typed environment; an engine that loses its clock entirely is a
+  worse failure than one reading the host's).
+- **`tests/test_energy_clock.py`** (12 cases): the two properties the fix has to
+  be worth — the same simulated clock gives the same energy twice, and the
+  default still reads the wall clock — plus one case per clock read in
+  `EnergySystem` (there were eight), the `from_dict` restore, the world-carries-it
+  wiring through a real `LifeService`, the subclass-overrides-`now()` shape, and
+  the duck-typed-world fallback. The determinism cases pin an **absolute**
+  `hours_awake` as well as an equality, because `datetime.now()` moves in ~16ms
+  steps on Windows and two wall-clock runs of a short script can agree by
+  accident. Reverting either half of the fix (the `tick` clock read, or the
+  `LifeService` wiring) fails 6 of the 12. The last case pins the naivety
+  contract rather than leaving it as prose: an aware clock is self-consistent in
+  memory and raises `TypeError` the moment it meets state restored from SQLite,
+  which is why the migration note below says to use a naive one.
+
+### Changed
+
+- **`concept["gender"]` is drawn, where it used to be the constant `"female"`.**
+  This is the behaviour change, and it is the reason for a minor rather than a
+  patch bump: over 200 seeds on 0.2.0 the value was `{"female"}` for every genre;
+  it is now `{"female", "male", "nonbinary"}`. A caller that never stored the
+  gender because it could not vary, or that wrote female-assuming prose around the
+  concept, must now pass `gender="female"` explicitly to keep its old output.
+  `tests/test_gender_contract.py::test_default_gender_is_drawn_not_hardcoded_female`
+  exists to fail if the old default is ever restored by accident.
+- **The gender is drawn once, first, before any other draw** in both builders, so
+  a seeded rng still replays a run deterministically — but the whole sequence after
+  it has shifted by one draw. The draw order is part of the public contract and is
+  stated in both docstrings. Consumers that hand in a shared world rng (Hollow
+  passes `world.rng` and replays runs off the seed) will not reproduce a pre-0.3.0
+  run from its seed *by default*: a run recorded on 0.2.0 is not replayable on
+  0.3.0 unless the gender is supplied. An explicit `gender=` costs **no draw at
+  all** — so passing `gender="female"` (and burning nothing) is what restores the
+  v0.2.0 stream. Measured over 2,100 personas spanning all seven genres and 300
+  seeds, `gender="female"` reproduces the v0.2.0 selection exactly: same
+  archetype index, name, age, persona type, intensity, interests, theme colour,
+  style theme and behavioural tendencies, with only the rewritten prose differing.
+  Burning a `choice(GENDERS)` first does **not** restore the stream — it shifts it
+  by one draw and reproduces only 493 of those 2,100.
+  `tests/fixtures/persona_parity_golden.json` was regenerated deliberately with
+  `PARITY_WRITE_GOLDEN=1`.
+- `tests/api_surface.json` is **unchanged, and that is correct** — it pins
+  `aura_life.__all__`, and none of the new names are exported from the package
+  facade. It was not regenerated, and nothing was removed from it. The same holds
+  for the clock seam: `EnergySystem` and `WorldEnvironment` are reached by
+  submodule import (`from aura_life.energy import EnergySystem`) and are not in
+  `__all__`, and neither snapshot pins signatures, so adding a trailing keyword
+  argument moves neither file. Both were left alone deliberately; **nothing was
+  removed from either.**
+- **Every wall-clock read in `WorldEnvironment` and `EnergySystem` now goes
+  through the world's clock rather than `datetime.now()` directly.** With no
+  `now=` supplied that clock *is* `datetime.now`, so the behaviour is unchanged
+  for every existing caller — but a subclass overriding `WorldEnvironment.now()`
+  now changes the weather draw's notion of night, the `TimeOfDay` bucket, the
+  season and the ambiance line as well as the energy curve, which is the point.
+- `GenreSpec.name_pool` is retained and still reads as the female pool, and the
+  flat `name_pool=[...]` constructor keyword still works. It stayed a field rather
+  than becoming a property so that the keyword keeps binding; a genre that authors
+  no pool for some gender falls back to the female one instead of raising.
+- **All 126 archetypes across the seven genres were rewritten as pronoun-token
+  prose**, and every genre now carries male and nonbinary name pools of the same
+  length as its existing female pool (which is unchanged, and still in order). The
+  seven `appearance_template`s take `{noun}` in place of the hardcoded "woman".
+  Contractions were expanded rather than tokenised ("She's rebuilding" became
+  "{Subj} {be} rebuilding"), and verbs that `{s}` cannot inflect (`does`,
+  `processes`, `verifies`) were restructured, so no generated sentence reads
+  "They's" or "They has".
+- **24 archetype labels, occupations, traits and relationship titles were
+  neutralised** where the *static* value was itself gendered — these fields are
+  never passed through `render()`, so a token there would leak verbatim. Examples:
+  `estranged daughter coming home` → `estranged child coming home`,
+  `single mother carrying it all` → `single parent carrying it all`,
+  `femme fatale who is tired of the role` → `fatal charmer who is tired of the
+  role`, `club hostess` → `club host`, `girlfriend` → `partner`. Archetype count,
+  order and meaning per genre are unchanged. Every other label, occupation, trait
+  and title is byte-identical.
+- `tests/fixtures/persona_parity_golden.json` was regenerated a second time, for
+  the new prose. The gender, age, persona type and archetype selected by each
+  pinned seed are unchanged — only the rendered text and the name differ, the
+  latter because a male or nonbinary persona now draws from its own pool.
+
+### Fixed
+
+- **Six gendered strings in pools the archetype rewrite did not reach.** They
+  were sampled straight into the concept without passing through `render()`, so
+  they surfaced verbatim on a male or nonbinary persona: `horror.goal_pool`
+  ("To make you hers completely"), `noir.core_values_pool` ("integrity on her own
+  terms"), `noir.shadow.struggles` ("a hidden past she won't name"),
+  `scifi.shadow.struggles` ("fear she doesn't belong"),
+  `sexy.shadow.character_defects` ("uses seduction to get her way") and
+  `sexy.shadow.intrusive_thought_themes` ("picturing exactly what she'd do to
+  them"). The four that carry a real pronoun are now tokenised and the sampled
+  results go through a private `_render_all()` helper; the other two were
+  rewritten without the
+  pronoun. **The module now contains no gendered word outside the `PRONOUNS`
+  table itself** — `grep` for she/her/he/his/woman/girl/daughter/… over
+  `genre_randomizer.py` returns only the five lines that define the table.
+  `tests/test_gender_contract.py` closes the hole permanently: for every genre
+  and every gender it generates personas and fails on any word belonging to
+  another gender, over 1,600 personas spanning all seven genres, all three
+  genders and three blends.
+- **"chronic shame they buries under cruelty."** `_HORROR_STRUGGLES` hardcoded the
+  third-person verb next to a `{subj}` token, so the horror and slasher tiers
+  produced a broken sentence for every nonbinary persona — the exact failure the
+  `{s}` token exists to prevent, in the one struggle string that predates it. It
+  is now `chronic shame {subj} {have} buried under cruelty`, which agrees in all
+  three genders.
+- **Two nonbinary pronoun collisions in `_SEXY_THEME_POOLS`**, where a token
+  referring to the persona sat in a sentence whose other party was already
+  "they"/"them". `replaying the way they looked at {obj}` rendered as *"replaying
+  the way they looked at them"* and `picturing exactly what {subj} would do to
+  them` as *"picturing exactly what they would do to them"* — grammatical, but
+  unreadable, and prose in the female original. They are now `replaying the way
+  someone looked at {obj}` and `picturing exactly what to do to them`, the latter
+  matching its twin in `sexy.shadow.intrusive_thought_themes` byte for byte.
+- **The energy engine measured elapsed time against the host wall clock, so its
+  answer depended on how long the process had been alive.** `EnergySystem.tick()`
+  read `datetime.now()` to derive `hours_awake`, and seven other sites in the
+  class did the same — `sleep()`, the `now_hour` fallbacks in `should_sleep()` /
+  `is_asleep()` / `adjust_for_time()`, `hours_since_wake()`, the initial state and
+  the `from_dict()` restore. `WorldEnvironment` had seven more. Past
+  `MAX_HOURS_AWAKE` the fatigue penalty starts moving energy, so a persona
+  rehydrated from a stored state into a fresh process and one carried by a
+  server that had been up for hours reported different energy from *identical*
+  state. Measured downstream, where energy feeds a score that can end an agent's
+  life: same seed, same epoch, same roster, same directive sequence, differing
+  only in process age — 2 of 8 seeds diverged inside 8 simulated days, and one
+  ended at 3 deaths or 2 depending on nothing else. A run replayed from its own
+  manifest was graded against a run that never happened. Nothing about that is
+  specific to that consumer: an engine that reads the host clock cannot be
+  simulated, replayed or unit-tested by anyone without freezing global state,
+  which is why the fix is here and not in an adapter.
+
+### Migrating from 0.2.0
+
+- Nothing to do to keep *compiling*: no public name was removed, no `GenreSpec`
+  field was removed, and `gender` was appended after `rng` in both builders, so
+  positional calls still mean what they meant.
+- To keep the old *output*, pass `gender="female"` explicitly. That also restores
+  the old name pool, since the female pool is byte-identical to the v0.2.0
+  `name_pool`.
+- That single change keeps the old *seeded stream* too — **do not burn a draw**.
+  An explicit `gender=` consumes nothing from the rng, so the builder's first draw
+  is the persona-type coin exactly as it was on 0.2.0. Discarding a
+  `rng.choice(GENDERS)` first is the one thing that breaks the replay.
+- Downstream storage that defaults a missing gender to `"female"`
+  (`ProfileDatabase` does, at the schema default and at two insert sites) is
+  unaffected: a concept now always carries a resolved `gender`, so that default is
+  only reached by a caller that supplies none.
+- **The clock seam needs nothing done to it.** `now` was appended last to
+  `WorldEnvironment.__init__`, `EnergySystem.__init__` and
+  `EnergySystem.from_dict`, so positional calls still bind, and omitting it
+  installs `datetime.now` — the behaviour every 0.2.0 caller already had. To opt
+  in, pass `WorldEnvironment(now=my_clock)` and share that world with each
+  `LifeService`; the energy engine follows without further wiring. A consumer
+  whose time comes from a counter rather than a callable subclasses
+  `WorldEnvironment` and overrides `now()` instead. Prefer a **naive** clock:
+  an aware one is self-consistent while the state it built stays in memory, but
+  the moment it meets state restored from SQLite — which is naive, as every
+  persisted `datetime` in this library is — `tick()` raises `TypeError: can't
+  subtract offset-naive and offset-aware datetimes`. This is the same naivety
+  contract `persona_now`'s server-local fallback already carries, not a new rule.
+
 ## [0.2.0] - 2026-08-27 — pre-publication hardening
 
 Everything below landed **after** the `v0.1.0` tag and before the repository was
@@ -321,5 +557,6 @@ Carried into the release deliberately; see `README.md` and `DEFERRED.md`.
 - `LifeService.start()` requires the `[scheduler]` extra and is a single-persona
   background-thread design.
 
+[0.3.0]: https://github.com/Redrum624/aura-life/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Redrum624/aura-life/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Redrum624/aura-life/releases/tag/v0.1.0

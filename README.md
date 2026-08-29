@@ -4,7 +4,7 @@
 [![Latest release](.github/badges/latest-badge.svg)](https://github.com/Redrum624/aura-life/releases/latest)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
-![Tests](https://img.shields.io/badge/tests-324%20passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-427%20passing-brightgreen)
 ![Dependencies](https://img.shields.io/badge/runtime%20deps-1%20(Windows%20only)-blue)
 
 > **aura-life** — *a life that keeps running when nobody is watching.*
@@ -153,25 +153,37 @@ world late_night, clear_night, summer - both agents see this one
 ```
 
 The last three lines differ from run to run: `WorldEnvironment` starts from the
-wall clock, weather is random, and goals are generated. What is stable is the
+wall clock by default (see point 2 below for how to give it a different one),
+weather is random, and goals are generated. What is stable is the
 shape — both agents advance, both keep their own database, and both read the same
 world.
 
-Four things in that snippet are load-bearing and easy to get wrong:
+Five things in that snippet are load-bearing and easy to get wrong:
 
 1. **`world_environment=` makes the world shared, and shared means yours.**
    `LifeService` skips its own `self._world.tick()` when it was handed a world, so
    nothing advances until *you* call `world.tick()`. Omit the argument and each
    service builds and ticks a private world instead.
-2. **`db_path=` is effectively required.** With no host configured there is
+2. **The world carries the clock, and everything that measures elapsed time reads
+   it.** `WorldEnvironment(now=...)` takes any zero-argument callable returning a
+   naive `datetime` — it defaults to `datetime.now`, so the line above is the wall
+   clock as it always was. `LifeService` hands `world.now` to `EnergySystem`, so a
+   world on a simulated clock produces a simulated circadian rhythm across every
+   agent sharing it, with no per-engine wiring and no monkeypatching of
+   `datetime`. A consumer whose time comes from a tick counter rather than a
+   callable subclasses `WorldEnvironment` and overrides `now()`; the override
+   still reaches energy. Without this, `hours_awake` measures how long *your
+   process* has been alive, which makes the engine unreplayable and untestable —
+   see `tests/test_energy_clock.py`.
+3. **`db_path=` is effectively required.** With no host configured there is
    nothing to resolve a path from, and the constructor raises `ValueError` rather
    than guessing. With a host configured you may omit it and get
    `data_dir/<persona_id>/life.db`.
-3. **`agent._scheduler.force_all_ticks()` runs the five internal ticks**
+4. **`agent._scheduler.force_all_ticks()` runs the five internal ticks**
    (`world`, `energy`, `plan`, `activity`, `goal`) once each, synchronously. This
    reaches through a private attribute because there is no public equivalent —
    see [Limitations](#limitations).
-4. **Pass everything by keyword.** `LifeService.__init__` takes 19 positional
+5. **Pass everything by keyword.** `LifeService.__init__` takes 19 positional
    parameters; `persona_id` is the ninth.
 
 `tests/test_multi_instance.py` is the executable version of this quickstart, with
