@@ -1,0 +1,119 @@
+{
+  "module": "aura_life.personas.genre_randomizer",
+  "public_names": [
+    "Archetype",
+    "Callable",
+    "Dict",
+    "GENDERS",
+    "GENRE_REGISTRY",
+    "GenreSpec",
+    "List",
+    "Optional",
+    "PRONOUNS",
+    "SHADOW_SCALE",
+    "ShadowSeedSpec",
+    "Tuple",
+    "annotations",
+    "build_blended_concept",
+    "build_genre_concept",
+    "dataclass",
+    "field",
+    "render",
+    "select_blend_genres"
+  ],
+  "signatures": {
+    "build_genre_concept": [
+      "genre",
+      "rng=None",
+      "gender=None"
+    ],
+    "build_blended_concept": [
+      "genres",
+      "rng=None",
+      "gender=None"
+    ],
+    "select_blend_genres": [
+      "genres"
+    ],
+    "render": [
+      "text",
+      "gender",
+      "**extra"
+    ]
+  },
+  "GENDERS": [
+    "female",
+    "male",
+    "nonbinary"
+  ],
+  "PRONOUNS_keys": {
+    "female": [
+      "Subj",
+      "be",
+      "have",
+      "noun",
+      "obj",
+      "poss",
+      "poss_pron",
+      "refl",
+      "s",
+      "subj"
+    ],
+    "male": [
+      "Subj",
+      "be",
+      "have",
+      "noun",
+      "obj",
+      "poss",
+      "poss_pron",
+      "refl",
+      "s",
+      "subj"
+    ],
+    "nonbinary": [
+      "Subj",
+      "be",
+      "have",
+      "noun",
+      "obj",
+      "poss",
+      "poss_pron",
+      "refl",
+      "s",
+      "subj"
+    ]
+  },
+  "GenreSpec_fields": [
+    "ai_archetypes",
+    "appearance_template",
+    "builder",
+    "core_descriptors",
+    "core_values_pool",
+    "display_label",
+    "goal_pool",
+    "human_archetypes",
+    "intensity_ladder",
+    "interests_pool",
+    "key",
+    "name_pool",
+    "name_pools",
+    "relationship_style",
+    "shadow",
+    "shadow_level",
+    "style_theme_pool",
+    "theme_colors",
+    "tone_directive",
+    "voice_style",
+    "weight_by_pool_size"
+  ],
+  "GENRE_REGISTRY_keys": [
+    "adventure",
+    "drama",
+    "horror",
+    "noir",
+    "romance",
+    "scifi",
+    "sexy"
+  ]
+}

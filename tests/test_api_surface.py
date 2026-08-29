@@ -5,6 +5,12 @@ Also proves that aura_life.life_service's module-level absolute self-imports
 break under partial-initialization, regardless of which import order a
 consumer uses. That must be demonstrated in a fresh interpreter (subprocess),
 not assumed or inferred from other tests having already imported aura_life.
+
+The last section pins a SECOND surface: aura_life.personas.genre_randomizer.
+That module is not re-exported by the facade and so api_surface.json never
+covered it -- yet it is imported directly by downstream consumers (Hollow's
+hollow/sim/agents.py) and its names are documented in CHANGELOG.md as public.
+An unpinned de-facto public surface is how a breaking change ships unnoticed.
 """
 import json
 import os
@@ -17,7 +23,7 @@ import aura_life
 SNAPSHOT = pathlib.Path(__file__).parent / "api_surface.json"
 
 
-def _snapshot(got: list) -> list:
+def _snapshot(got, path: pathlib.Path = SNAPSHOT):
     """Load the snapshot for comparison — or fail loudly if it is missing.
 
     A MISSING SNAPSHOT IS A DEFECT, NOT A FRESH START. If it were regenerated
@@ -28,17 +34,17 @@ def _snapshot(got: list) -> list:
     exact value "1" opts in -- API_SURFACE_WRITE_SNAPSHOT=0 does not.
     (Same convention as PARITY_WRITE_GOLDEN in tests/test_persona_parity.py.)
     """
-    if not SNAPSHOT.exists():
+    if not path.exists():
         if os.environ.get("API_SURFACE_WRITE_SNAPSHOT") != "1":
             raise AssertionError(
-                f"API surface snapshot is missing: {SNAPSHOT}\n"
+                f"API surface snapshot is missing: {path}\n"
                 "This is a DEFECT, not a fresh start -- the snapshot is committed and should "
                 "always be present.\n"
-                "Restore it from git (git checkout -- tests/api_surface.json).\n"
+                f"Restore it from git (git checkout -- tests/{path.name}).\n"
                 "To regenerate it deliberately, re-run with API_SURFACE_WRITE_SNAPSHOT=1."
             )
-        SNAPSHOT.write_text(json.dumps(got, indent=2))
-    return json.loads(SNAPSHOT.read_text())
+        path.write_text(json.dumps(got, indent=2))
+    return json.loads(path.read_text())
 
 
 def test_public_surface_is_stable():
@@ -108,3 +114,89 @@ def test_partial_init_import_order_submodule_first():
     )
     assert result.returncode == 0, result.stderr
     assert "OK" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# Second pinned surface: aura_life.personas.genre_randomizer
+# ---------------------------------------------------------------------------
+
+GENRE_SNAPSHOT = pathlib.Path(__file__).parent / "genre_randomizer_surface.json"
+
+
+def _param_spec(fn) -> list:
+    """Parameter names, with `name=<default repr>` where a default exists.
+
+    Deliberately NOT str(inspect.signature(fn)): the module uses
+    `from __future__ import annotations`, so signature rendering quotes the
+    annotations and the exact text drifts between Python versions. Parameter
+    names and defaults are the part callers actually bind against.
+    """
+    import inspect
+    prefix = {inspect.Parameter.VAR_POSITIONAL: "*", inspect.Parameter.VAR_KEYWORD: "**"}
+    out = []
+    for p in inspect.signature(fn).parameters.values():
+        name = prefix.get(p.kind, "") + p.name
+        out.append(name if p.default is inspect.Parameter.empty else f"{name}={p.default!r}")
+    return out
+
+
+def _genre_surface() -> dict:
+    from aura_life.personas import genre_randomizer as gr
+    return {
+        "module": "aura_life.personas.genre_randomizer",
+        "public_names": sorted(n for n in dir(gr) if not n.startswith("_")),
+        "signatures": {
+            name: _param_spec(getattr(gr, name))
+            for name in ("build_genre_concept", "build_blended_concept",
+                         "select_blend_genres", "render")
+        },
+        "GENDERS": list(gr.GENDERS),
+        "PRONOUNS_keys": {g: sorted(gr.PRONOUNS[g]) for g in gr.GENDERS},
+        "GenreSpec_fields": sorted(gr.GenreSpec.__dataclass_fields__),
+        "GENRE_REGISTRY_keys": sorted(gr.GENRE_REGISTRY),
+    }
+
+
+def test_genre_randomizer_surface_is_stable():
+    """Fails when the genre_randomizer surface changes.
+
+    A change here is not automatically wrong -- but it must be deliberate:
+    regenerate with API_SURFACE_WRITE_SNAPSHOT=1 and say what moved in the
+    CHANGELOG. Removing a name from `public_names`, a field from
+    `GenreSpec_fields`, or a leading parameter from `signatures` is a BREAKING
+    change and needs a major/minor bump, not a patch.
+    """
+    got = _genre_surface()
+    assert got == _snapshot(got, GENRE_SNAPSHOT)
+
+
+def test_genre_randomizer_surface_is_additive_over_v0_2_0():
+    """The 0.2.0 surface, written out explicitly, must still be a subset.
+
+    This is the anti-regression half: the snapshot above would happily bless a
+    removal once someone regenerates it. These literals are what shipped in the
+    v0.2.0 tag and may never shrink without a deliberate breaking release.
+    """
+    got = _genre_surface()
+    v0_2_0_names = {
+        "Archetype", "GENRE_REGISTRY", "GenreSpec", "SHADOW_SCALE", "ShadowSeedSpec",
+        "build_blended_concept", "build_genre_concept", "select_blend_genres",
+    }
+    missing = sorted(v0_2_0_names - set(got["public_names"]))
+    assert missing == [], f"public names removed since v0.2.0: {missing}"
+
+    v0_2_0_fields = {
+        "ai_archetypes", "appearance_template", "builder", "core_descriptors",
+        "core_values_pool", "display_label", "goal_pool", "human_archetypes",
+        "intensity_ladder", "interests_pool", "key", "name_pool", "relationship_style",
+        "shadow", "shadow_level", "style_theme_pool", "theme_colors", "tone_directive",
+        "voice_style", "weight_by_pool_size",
+    }
+    gone = sorted(v0_2_0_fields - set(got["GenreSpec_fields"]))
+    assert gone == [], f"GenreSpec fields removed since v0.2.0: {gone}"
+
+    # Leading parameters are positional for existing callers; they may only be
+    # appended to.  v0.2.0 shipped build_genre_concept(genre, rng=None) and
+    # build_blended_concept(genres, rng=None).
+    assert got["signatures"]["build_genre_concept"][:2] == ["genre", "rng=None"]
+    assert got["signatures"]["build_blended_concept"][:2] == ["genres", "rng=None"]
