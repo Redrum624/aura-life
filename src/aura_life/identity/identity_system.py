@@ -282,7 +282,8 @@ class IdentitySystem:
                  core_traits: Optional[List[str]] = None,
                  struggles: Optional[List[str]] = None,
                  character_defects: Optional[List[str]] = None,
-                 behavioral_tendencies: Optional[Dict[str, float]] = None):
+                 behavioral_tendencies: Optional[Dict[str, float]] = None,
+                 rng=None):
         self._facets: Dict[str, IdentityFacet] = {}
         self._perceptions: Dict[str, PersonPerception] = {}
         self._trust_multiplier = self._calc_trust_multiplier(core_traits or [])
@@ -296,6 +297,7 @@ class IdentitySystem:
         self._struggles = struggles or []
         self._character_defects = character_defects or []
         self._pending_struggle_effects: List[str] = []
+        self._rng = rng if rng is not None else random
 
         # Behavioral tendencies — all 9 at baseline 0.1, profile overrides dominant ones
         bt = behavioral_tendencies or {}
@@ -405,7 +407,7 @@ class IdentitySystem:
         """Struggles occasionally surface — stored for LifeService routing."""
         self._pending_struggle_effects = []
         for struggle in self._struggles:
-            if random.random() < STRUGGLE_STRESS_CHANCE:
+            if self._rng.random() < STRUGGLE_STRESS_CHANCE:
                 self._pending_struggle_effects.append(struggle)
 
     def get_pending_struggle_effects(self) -> List[str]:
@@ -417,7 +419,7 @@ class IdentitySystem:
     def _tick_defects(self):
         """Defects occasionally cause self-esteem drain."""
         for defect in self._character_defects:
-            if random.random() < DEFECT_ESTEEM_DRAIN_CHANCE:
+            if self._rng.random() < DEFECT_ESTEEM_DRAIN_CHANCE:
                 self.update_self_esteem(f"defect:{defect}", -DEFECT_ESTEEM_DRAIN_AMOUNT)
 
     # ============= Behavioral Tendencies =============
@@ -461,7 +463,7 @@ class IdentitySystem:
             t.current = max(0.0, min(1.0, t.current))
 
             # Surfacing check
-            if t.current >= TENDENCY_SURFACE_THRESHOLD and random.random() < TENDENCY_SURFACE_CHANCE:
+            if t.current >= TENDENCY_SURFACE_THRESHOLD and self._rng.random() < TENDENCY_SURFACE_CHANCE:
                 t.last_surfaced = datetime.now()
                 self._active_tendency = t.name
 

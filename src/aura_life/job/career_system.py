@@ -48,8 +48,10 @@ class CareerSystem:
         initial_state: Optional[CareerState] = None,
         occupation: str = "",
         monthly_salary: Optional[float] = None,
+        rng=None,
     ):
         self._state = initial_state or CareerState()
+        self._rng = rng if rng is not None else random
         if occupation and not self._state.occupation:
             self._state.occupation = occupation
         if monthly_salary is not None:
@@ -105,7 +107,7 @@ class CareerSystem:
             self._state.last_workday = now
             self._state.days_worked += 1
 
-            target = random.uniform(0.2, 0.95)
+            target = self._rng.uniform(0.2, 0.95)
             self._state.workload += (target - self._state.workload) * WORKLOAD_DRIFT * 5
 
             # Satisfaction drifts toward a baseline shaped by workload (too much
@@ -113,11 +115,11 @@ class CareerSystem:
             sat_baseline = 0.75 - max(0.0, self._state.workload - 0.6) * 0.8
             self._state.satisfaction += (sat_baseline - self._state.satisfaction) * SATISFACTION_DRIFT * 5
 
-            if random.random() < WORK_EVENT_CHANCE:
-                if self._state.satisfaction >= 0.5 and random.random() < self._state.satisfaction:
-                    self._state.recent_work_event = random.choice(POSITIVE_EVENTS)
+            if self._rng.random() < WORK_EVENT_CHANCE:
+                if self._state.satisfaction >= 0.5 and self._rng.random() < self._state.satisfaction:
+                    self._state.recent_work_event = self._rng.choice(POSITIVE_EVENTS)
                 else:
-                    self._state.recent_work_event = random.choice(NEGATIVE_EVENTS)
+                    self._state.recent_work_event = self._rng.choice(NEGATIVE_EVENTS)
 
         self._clamp()
 
@@ -189,7 +191,7 @@ class CareerSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, occupation: str = "") -> "CareerSystem":
+    def from_dict(cls, data: dict, occupation: str = "", rng=None) -> "CareerSystem":
         def _dt(v):
             return datetime.fromisoformat(v) if v else None
 
@@ -228,4 +230,4 @@ class CareerSystem:
             last_workday=_dt(data.get("last_workday")),
             recent_work_event=data.get("recent_work_event"),
         )
-        return cls(initial_state=state, occupation=occupation)
+        return cls(initial_state=state, occupation=occupation, rng=rng)

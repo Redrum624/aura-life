@@ -99,8 +99,10 @@ class CognitiveSystem:
     """Tracks attention, rumination, inner monologue, dreams, and opinions."""
 
     def __init__(self, core_traits: Optional[List[str]] = None,
-                 intrusive_thought_themes: Optional[List[str]] = None):
+                 intrusive_thought_themes: Optional[List[str]] = None,
+                 rng=None):
         self._focus = FocusState()
+        self._rng = rng if rng is not None else random
         self._ruminations: List[RuminationLoop] = []
         self._monologue = InnerMonologueEntry()
         self._last_dream: Optional[DreamFragment] = None
@@ -188,7 +190,7 @@ class CognitiveSystem:
         for r in self._ruminations:
             r.intensity = max(0.0, r.intensity - 0.005 * self._cognitive_multiplier)
             # Occasional replay
-            if random.random() < 0.1:
+            if self._rng.random() < 0.1:
                 r.replay_count += 1
                 r.intensity = min(1.0, r.intensity + 0.02)
         # Remove faded ones
@@ -198,13 +200,13 @@ class CognitiveSystem:
 
     def _generate_monologue(self, current_activity: str):
         """Generate a passing thought (30% chance per tick)."""
-        if random.random() > 0.3:
+        if self._rng.random() > 0.3:
             return
 
         # Intrusive thought chance (before normal monologue)
-        if self._intrusive_themes and random.random() < INTRUSIVE_THOUGHT_CHANCE / 0.3:
-            theme = random.choice(self._intrusive_themes)
-            template = random.choice(INTRUSIVE_TEMPLATES)
+        if self._intrusive_themes and self._rng.random() < INTRUSIVE_THOUGHT_CHANCE / 0.3:
+            theme = self._rng.choice(self._intrusive_themes)
+            template = self._rng.choice(INTRUSIVE_TEMPLATES)
             self._monologue = InnerMonologueEntry(
                 thought=template.format(theme=theme),
                 source="intrusive",
@@ -212,18 +214,18 @@ class CognitiveSystem:
             )
             return
 
-        if self._ruminations and random.random() < 0.4:
+        if self._ruminations and self._rng.random() < 0.4:
             source = "rumination"
         elif current_activity:
             source = "activity"
-        elif random.random() < 0.3:
+        elif self._rng.random() < 0.3:
             source = "environment"
         else:
             source = "idle"
 
         templates = MONOLOGUE_TEMPLATES.get(source, MONOLOGUE_TEMPLATES["idle"])
         self._monologue = InnerMonologueEntry(
-            thought=random.choice(templates),
+            thought=self._rng.choice(templates),
             source=source,
             timestamp=datetime.now(),
         )
@@ -429,9 +431,10 @@ class CognitiveSystem:
 
     @classmethod
     def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None,
-                  intrusive_thought_themes: Optional[List[str]] = None) -> "CognitiveSystem":
+                  intrusive_thought_themes: Optional[List[str]] = None,
+                  rng=None) -> "CognitiveSystem":
         """Deserialize from DB."""
-        system = cls(core_traits=core_traits, intrusive_thought_themes=intrusive_thought_themes)
+        system = cls(core_traits=core_traits, intrusive_thought_themes=intrusive_thought_themes, rng=rng)
         if not data:
             return system
         system._focus.quality = data.get("focus_quality", 0.7)

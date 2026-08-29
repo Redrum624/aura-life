@@ -61,12 +61,18 @@ class FinanceSystem:
         self,
         initial_state: Optional[FinancialState] = None,
         core_traits: Optional[List[str]] = None,
+        rng=None,
+        now: Optional[datetime] = None,
     ):
         self._state = initial_state or FinancialState()
+        self._rng = rng if rng is not None else random
         self._apply_trait_habits(core_traits or [])
         # Establish a baseline so income/expenses fire on the NEXT month boundary,
-        # not immediately on the first tick.
-        now = datetime.now()
+        # not immediately on the first tick. ``now`` is the clock the ticks will
+        # be measured on -- a host that ticks on an injected world clock passes
+        # it here too, or the baseline sits on the host's month and the first
+        # tick pays a month that never passed. ``None`` reads the wall clock.
+        now = now or datetime.now()
         if self._state.last_payday is None:
             self._state.last_payday = now
         if self._state.last_expense_run is None:
@@ -132,13 +138,13 @@ class FinanceSystem:
                     self._state.savings = round(self._state.savings + sweep, 2)
 
         chance = DISCRETIONARY_BASE_CHANCE * (0.4 + self._state.spending_habit * 1.2)
-        if random.random() < chance:
+        if self._rng.random() < chance:
             frac = DISCRETIONARY_MIN_FRACTION + (
                 DISCRETIONARY_MAX_FRACTION - DISCRETIONARY_MIN_FRACTION
             ) * self._state.spending_habit
             amount = round(self._state.monthly_income * frac, 2)
             if self.can_afford(amount):
-                self._spend(amount, random.choice(PURCHASES))
+                self._spend(amount, self._rng.choice(PURCHASES))
 
         self._recompute_feeling()
 
@@ -249,7 +255,8 @@ class FinanceSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None) -> "FinanceSystem":
+    def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None,
+                  rng=None, now: Optional[datetime] = None) -> "FinanceSystem":
         def _dt(v):
             return datetime.fromisoformat(v) if v else None
 
@@ -282,4 +289,4 @@ class FinanceSystem:
             last_expense_run=_dt(data.get("last_expense_run")),
             recent_purchases=list(purchases),
         )
-        return cls(initial_state=state, core_traits=core_traits)
+        return cls(initial_state=state, core_traits=core_traits, rng=rng, now=now)

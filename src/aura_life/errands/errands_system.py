@@ -38,8 +38,9 @@ DO_ERRAND_ACTIVITIES = (
 class ErrandsSystem:
     """The persona's to-do backlog as a ticking engine."""
 
-    def __init__(self, initial_state: Optional[ErrandsState] = None):
+    def __init__(self, initial_state: Optional[ErrandsState] = None, rng=None):
         self._state = initial_state or ErrandsState()
+        self._rng = rng if rng is not None else random
 
     @property
     def state(self) -> ErrandsState:
@@ -57,11 +58,11 @@ class ErrandsSystem:
         """Occasionally add an errand; slip the oldest pending to overdue when the
         backlog grows. ``now`` may be backdated for catch-up."""
         total = len(self._state.pending) + len(self._state.overdue)
-        if total < MAX_TOTAL and random.random() < ADD_CHANCE:
+        if total < MAX_TOTAL and self._rng.random() < ADD_CHANCE:
             choices = [e for e in ERRAND_CATALOG
                        if e not in self._state.pending and e not in self._state.overdue]
             if choices:
-                self._state.pending.append(random.choice(choices))
+                self._state.pending.append(self._rng.choice(choices))
                 self._state.last_added = now or datetime.now()
 
         # Backlog pressure: oldest pending slips to overdue.
@@ -119,7 +120,7 @@ class ErrandsSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "ErrandsSystem":
+    def from_dict(cls, data: dict, rng=None) -> "ErrandsSystem":
         def _list(key):
             v = data.get(key) or "[]"
             if isinstance(v, str):
@@ -145,4 +146,4 @@ class ErrandsSystem:
             completed_count=_i("completed_count", 0),
             last_added=_dt(data.get("last_added")),
         )
-        return cls(initial_state=state)
+        return cls(initial_state=state, rng=rng)

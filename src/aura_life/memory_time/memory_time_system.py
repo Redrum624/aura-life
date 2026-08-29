@@ -66,8 +66,9 @@ WEEKDAY_MOODS = {
 class MemoryTimeSystem:
     """Tracks time perception, nostalgia, seasonal feeling, life narrative."""
 
-    def __init__(self):
+    def __init__(self, rng=None):
         self._time_perception = TimePerceptionState()
+        self._rng = rng if rng is not None else random
         self._seasonal = SeasonalConsciousnessState()
         self._nostalgia_log: List[NostalgiaEvent] = []
         self._life_chapters: List[LifeChapter] = []
@@ -176,22 +177,22 @@ class MemoryTimeSystem:
         trigger_info = NOSTALGIA_ACTIVITIES.get(activity)
         if not trigger_info:
             # Small chance from season transition
-            if season and random.random() < 0.02:
+            if season and self._rng.random() < 0.02:
                 trigger_info = ("season", 0.10)
             else:
                 return None
 
         trigger_type, chance = trigger_info
-        if random.random() > chance:
+        if self._rng.random() > chance:
             return None
 
-        memory = random.choice(NOSTALGIA_MEMORIES)
-        bittersweet = random.uniform(0.3, 0.8)
+        memory = self._rng.choice(NOSTALGIA_MEMORIES)
+        bittersweet = self._rng.uniform(0.3, 0.8)
 
         event = NostalgiaEvent(
             trigger=trigger_type,
             memory_reference=memory,
-            intensity=random.uniform(0.2, 0.6),
+            intensity=self._rng.uniform(0.2, 0.6),
             bittersweet=bittersweet,
             timestamp=datetime.now(),
         )
@@ -463,9 +464,9 @@ class MemoryTimeSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "MemoryTimeSystem":
+    def from_dict(cls, data: dict, rng=None) -> "MemoryTimeSystem":
         """Deserialize from DB."""
-        system = cls()
+        system = cls(rng=rng)
         if not data:
             return system
 

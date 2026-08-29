@@ -54,8 +54,9 @@ class LifeEventSystem:
     milestones, chaos serendipity, etc.), not on a tick schedule.
     """
 
-    def __init__(self):
+    def __init__(self, rng=None):
         self._events: List[LifeEvent] = []
+        self._rng = rng if rng is not None else random
 
     # ============= Public API =============
 
@@ -76,7 +77,7 @@ class LifeEventSystem:
         # Optionally templatize the title
         templates = LIFE_EVENT_TEMPLATES.get(event_type, [])
         if templates and "{context}" in templates[0]:
-            title = random.choice(templates).format(context=title)
+            title = self._rng.choice(templates).format(context=title)
 
         event = LifeEvent(
             event_type=event_type,
@@ -200,9 +201,9 @@ class LifeEventSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "LifeEventSystem":
+    def from_dict(cls, data: dict, rng=None) -> "LifeEventSystem":
         """Deserialize from DB."""
-        system = cls()
+        system = cls(rng=rng)
         for event_data in data.get("events", []):
             system._events.append(LifeEvent.from_dict(event_data))
         return system

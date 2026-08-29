@@ -113,8 +113,10 @@ class DriveSystem:
     """Tracks curiosity, avoidance, and comfort zone boundaries."""
 
     def __init__(self, core_traits: Optional[List[str]] = None,
-                 comfort_zone_seeds: Optional[List[str]] = None):
+                 comfort_zone_seeds: Optional[List[str]] = None,
+                 rng=None):
         self._curiosities: List[CuriosityQuestion] = []
+        self._rng = rng if rng is not None else random
         self._avoidances: List[AvoidanceItem] = []
         self._comfort_zones: Dict[str, ComfortZoneBoundary] = {}
         self._drive_multiplier = self._calc_drive_multiplier(core_traits or [])
@@ -223,9 +225,9 @@ class DriveSystem:
 
     def roll_avoidance(self):
         """Small chance (3%) per tick to generate an avoidance item."""
-        if random.random() > 0.03 or len(self._avoidances) >= MAX_AVOIDANCE:
+        if self._rng.random() > 0.03 or len(self._avoidances) >= MAX_AVOIDANCE:
             return
-        seed = random.choice(AVOIDANCE_SEEDS)
+        seed = self._rng.choice(AVOIDANCE_SEEDS)
         for a in self._avoidances:
             if a.description == seed["description"]:
                 return
@@ -389,9 +391,10 @@ class DriveSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None) -> "DriveSystem":
+    def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None,
+                  rng=None) -> "DriveSystem":
         """Deserialize from DB."""
-        system = cls(core_traits=core_traits)
+        system = cls(core_traits=core_traits, rng=rng)
         if not data:
             return system
         # Curiosities

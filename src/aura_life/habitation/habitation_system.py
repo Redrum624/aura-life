@@ -31,8 +31,10 @@ CLEAN_ACTIVITIES = ("cleaning", "tidying", "tidy", "chores", "organizing", "decl
 class HabitationSystem:
     """The persona's living space as a ticking engine."""
 
-    def __init__(self, initial_state: Optional[RoomState] = None, home_type: str = ""):
+    def __init__(self, initial_state: Optional[RoomState] = None, home_type: str = "",
+                 rng=None):
         self._state = initial_state or RoomState()
+        self._rng = rng if rng is not None else random
         if home_type and self._state.home_type == "apartment":
             self._state.home_type = home_type
         self._recompute_comfort()
@@ -50,7 +52,7 @@ class HabitationSystem:
         self._state.tidiness = max(0.0, self._state.tidiness - TIDINESS_DECAY)
 
         if time_of_day in (TimeOfDay.EVENING, TimeOfDay.NIGHT):
-            if not self._state.candle_lit and random.random() < CANDLE_CHANCE:
+            if not self._state.candle_lit and self._rng.random() < CANDLE_CHANCE:
                 self._state.candle_lit = True
         else:
             self._state.candle_lit = False
@@ -118,7 +120,7 @@ class HabitationSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, home_type: str = "") -> "HabitationSystem":
+    def from_dict(cls, data: dict, home_type: str = "", rng=None) -> "HabitationSystem":
         def _f(key, default):
             v = data.get(key, default)
             try:
@@ -134,4 +136,4 @@ class HabitationSystem:
             home_type=data.get("home_type") or "apartment",
             comfort=_f("comfort", 0.7),
         )
-        return cls(initial_state=state, home_type=home_type)
+        return cls(initial_state=state, home_type=home_type, rng=rng)

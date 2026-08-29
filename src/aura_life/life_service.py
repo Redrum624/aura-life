@@ -399,6 +399,7 @@ class LifeService:
         follow_up_provider: Optional[Callable[[str], object]] = None,
         datastore: Optional[object] = None,
         sanity_rng=None,
+        rng=None,
     ):
         """
         Initialize the life service.
@@ -434,6 +435,22 @@ class LifeService:
                 :class:`~aura_life.sanity.SanitySystem`). ``None`` -- the
                 default -- takes no draw at all, so a host that already seeds
                 its own rng and passes nothing keeps its sequence untouched.
+                When ``rng`` is given and this is not, it defaults to ``rng``:
+                one injected source then replays the whole persona, jitter
+                included. Pass both to keep them apart.
+            rng: Optional ``random.Random`` for every draw on the energy-tick
+                path (identity's struggles, defects and tendencies; desire,
+                habitation, cognitive, drive, career, finance, errands,
+                memory-time and life-event draws; the service's own
+                struggle-to-rumination roll, shareable priority and
+                life-trigger pick). ``None`` -- the default -- leaves every
+                draw on the module-level ``random`` exactly as before, so an
+                existing consumer is byte-identical. Given, no draw on that
+                path touches module ``random``, so a host that ticks two
+                services from two equal-seeded rngs gets two identical runs.
+                Draws off the tick path (persona generation, the daily
+                planner, activities, chaos, the world's weather) are not
+                routed here.
         """
         self._db_path = self._resolve_db_path(db_path, persona_id)
         self._emotion_engine = emotion_engine
@@ -467,6 +484,14 @@ class LifeService:
         self._shared_world = world_environment is not None
         # Extract core_traits once for all engines
         self._core_traits = getattr(definition, 'core_traits', []) if definition else []
+        # The tick-path rng. ``_rng`` is what the host gave (None or a Random)
+        # and is threaded into every engine that draws on the energy tick;
+        # ``_random`` is what this class itself draws from (module ``random``
+        # when nothing was injected, so the default is byte-identical).
+        self._rng = rng
+        self._random = rng if rng is not None else random
+        if sanity_rng is None:
+            sanity_rng = rng
 
         self._energy = EnergySystem(
             sleep_schedule=sleep_schedule,
@@ -475,7 +500,7 @@ class LifeService:
         )
         self._activity_engine = ActivityEngine()
         self._goal_engine = GoalEngine()
-        self._desire_system = DesireSystem(core_traits=self._core_traits)
+        self._desire_system = DesireSystem(core_traits=self._core_traits, rng=self._rng)
 
         # New subsystems — seeded from the persona profile where applicable.
         _defn = self._definition
@@ -497,16 +522,17 @@ class LifeService:
         self._sustenance = SustenanceSystem()
         self._basic_needs = self._sustenance.state  # back-compat alias (same object)
         self._habitation = HabitationSystem(
-            home_type=getattr(_defn, 'home_type', '') if _defn else ''
+            home_type=getattr(_defn, 'home_type', '') if _defn else '',
+            rng=self._rng,
         )
         self._room_state = self._habitation.state  # back-compat alias (same object)
-        self._finance = FinanceSystem(core_traits=self._core_traits)
+        self._finance = FinanceSystem(core_traits=self._core_traits, rng=self._rng, now=self._world_clock()())
         if _defn and getattr(_defn, 'spending_habit', None) is not None:
             self._finance.state.spending_habit = _defn.spending_habit
         self._financial = self._finance.state  # back-compat alias (same state object)
         _occupation = self._occupation or (getattr(_defn, 'occupation', '') if _defn else '')
         _salary = getattr(_defn, 'monthly_salary', None) if _defn else None
-        self._career = CareerSystem(occupation=_occupation, monthly_salary=_salary)
+        self._career = CareerSystem(occupation=_occupation, monthly_salary=_salary, rng=self._rng)
         # Align the Job engine's schedule with the planner's occupation type so
         # "on shift" matches when the planner schedules work.
         self._apply_occupation_schedule(self._career, _occupation)
@@ -516,7 +542,7 @@ class LifeService:
         self._media = self._init_media_state()
         self._skills_system = SkillsSystem()
         self._skills: Dict[str, SkillProgress] = self._skills_system.skills  # alias
-        self._errands = ErrandsSystem()
+        self._errands = ErrandsSystem(rng=self._rng)
         npcs = self._build_npcs(self._social_circle_defs)
         self._social = SocialSystem(npcs=npcs)
         self._identity = IdentitySystem(
@@ -526,6 +552,7 @@ class LifeService:
             struggles=getattr(definition, 'struggles', []) if definition else [],
             character_defects=getattr(definition, 'character_defects', []) if definition else [],
             behavioral_tendencies=getattr(definition, 'behavioral_tendencies', {}) if definition else {},
+            rng=self._rng,
         )
         self._affect = AffectSystem(
             core_traits=self._core_traits,
@@ -538,6 +565,7 @@ class LifeService:
         self._cognitive = CognitiveSystem(
             core_traits=self._core_traits,
             intrusive_thought_themes=getattr(definition, 'intrusive_thought_themes', []) if definition else [],
+            rng=self._rng,
         )
         self._shadow = ShadowSystem(
             behavioral_tendencies=(getattr(definition, 'behavioral_tendencies', {}) if definition else {}) or {},
@@ -563,9 +591,10 @@ class LifeService:
         self._drive = DriveSystem(
             core_traits=self._core_traits,
             comfort_zone_seeds=getattr(self._definition, 'comfort_zone_seeds', []) if self._definition else [],
+            rng=self._rng,
         )
         self._behavior = BehaviorSystem()
-        self._memory_time = MemoryTimeSystem()
+        self._memory_time = MemoryTimeSystem(rng=self._rng)
         self._expression = ExpressionSystem()
         self._continuity = ContinuitySystem()
         self._character_evolution = CharacterEvolution(
@@ -573,7 +602,7 @@ class LifeService:
             core_traits=getattr(self._definition, 'core_traits', []) if self._definition else [],
         )
         self._chaos = ChaosEngine()
-        self._life_events = LifeEventSystem()
+        self._life_events = LifeEventSystem(rng=self._rng)
         self._pipeline = None  # Set externally via set_pipeline()
         self._transit: Optional[TransitState] = None  # Active transit overlay
         self._transport = TransportSystem()           # Travel estimation + mode
@@ -2755,7 +2784,7 @@ class LifeService:
         # Route struggle effects to affect/cognitive
         for struggle in self._identity.get_pending_struggle_effects():
             self._affect.on_stressor_added(f"struggle:{struggle}")
-            if random.random() < 0.5:
+            if self._random.random() < 0.5:
                 self._cognitive.on_conflict(struggle)
 
         # === Physical-life engines (humans only — an AI doesn't eat or keep a home) ===
@@ -2881,20 +2910,29 @@ class LifeService:
             self._affect.on_stressor_added(f"overdue: {obligation}")
 
         # === Career / Finance / Errands (humans only) ===
+        # On the world clock, the way the catch-up path already ticks them
+        # (``now=timestamp``): ``CareerSystem.tick`` registers a workday off
+        # ``now``'s date and hour and only then draws, ``FinanceSystem.tick``
+        # credits and debits on ``now``'s month, and with those draws on an
+        # injected ``rng`` a bare ``tick()`` made the host wall clock decide
+        # how many values the stream gave up -- a run and its replay, hours
+        # apart, drew different counts. Without an injected world clock this
+        # is ``datetime.now()`` exactly as before (see :meth:`_world_clock`).
         if not self._is_ai:
-            self._career.tick()
+            _world_now = self._world_clock()()
+            self._career.tick(now=_world_now)
             if self._career.monthly_salary > 0:
                 self._finance.state.monthly_income = self._career.monthly_salary
             if self._career.work_stress() >= 0.5:
                 if "work stress" not in list(self._affect._stress.sources):
                     self._affect.on_stressor_added("work stress")
 
-            self._finance.tick()
+            self._finance.tick(now=_world_now)
             if self._finance.financial_stress() >= 0.4:
                 if "money worries" not in list(self._affect._stress.sources):
                     self._affect.on_stressor_added("money worries")
 
-            self._errands.tick()
+            self._errands.tick(now=_world_now)
             if self._errands.overdue_count >= 3:
                 if "errands piling up" not in list(self._affect._stress.sources):
                     self._affect.on_stressor_added("errands piling up")
@@ -3408,8 +3446,7 @@ class LifeService:
                 question_candidates.sort(key=lambda x: x[0], reverse=True)
                 top = question_candidates[:3]
                 weights = [u ** 2 for u, _, _ in top]
-                import random as _rand
-                chosen = _rand.choices(top, weights=weights, k=1)[0]
+                chosen = self._random.choices(top, weights=weights, k=1)[0]
                 urgency, topic, hint = chosen
                 candidates.append(("life_question", urgency, topic[:60], hint))
         except Exception:
@@ -3515,8 +3552,7 @@ class LifeService:
         candidates.sort(key=lambda x: x[1], reverse=True)
         top = candidates[:3]
         weights = [u ** 2 for _, u, _, _ in top]
-        import random as _rand
-        chosen = _rand.choices(top, weights=weights, k=1)[0]
+        chosen = self._random.choices(top, weights=weights, k=1)[0]
         trigger_type_str, urgency, topic, hint = chosen
 
         # Map candidate string to the follow-up type's member NAME. The host
@@ -4895,7 +4931,7 @@ class LifeService:
             cursor.execute("SELECT * FROM life_desire_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._desire_system = DesireSystem.from_dict(dict(row), core_traits=self._core_traits)
+                self._desire_system = DesireSystem.from_dict(dict(row), core_traits=self._core_traits, rng=self._rng)
             else:
                 # Insert default
                 cursor.execute("""
@@ -4954,14 +4990,14 @@ class LifeService:
             cursor.execute("SELECT * FROM life_room_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._habitation = HabitationSystem.from_dict(dict(row))
+                self._habitation = HabitationSystem.from_dict(dict(row), rng=self._rng)
                 self._room_state = self._habitation.state  # keep the alias
 
             # Load financial state
             cursor.execute("SELECT * FROM life_financial_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._finance = FinanceSystem.from_dict(dict(row), core_traits=self._core_traits)
+                self._finance = FinanceSystem.from_dict(dict(row), core_traits=self._core_traits, rng=self._rng, now=self._world_clock()())
                 self._financial = self._finance.state  # keep the alias pointing at loaded state
 
             # Load career state
@@ -4969,7 +5005,7 @@ class LifeService:
             row = cursor.fetchone()
             if row:
                 _occupation = self._occupation or (getattr(self._definition, 'occupation', '') if self._definition else '')
-                self._career = CareerSystem.from_dict(dict(row), occupation=_occupation)
+                self._career = CareerSystem.from_dict(dict(row), occupation=_occupation, rng=self._rng)
                 if self._career.monthly_salary > 0:
                     self._finance.state.monthly_income = self._career.monthly_salary
 
@@ -4977,7 +5013,7 @@ class LifeService:
             cursor.execute("SELECT * FROM life_errands_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._errands = ErrandsSystem.from_dict(dict(row))
+                self._errands = ErrandsSystem.from_dict(dict(row), rng=self._rng)
 
             # Load skills
             cursor.execute("SELECT * FROM life_skills")
@@ -5384,7 +5420,7 @@ class LifeService:
         experience = ShareableExperience(
             content=text,
             context=context,
-            priority=0.4 + random.random() * 0.3,
+            priority=0.4 + self._random.random() * 0.3,
             created_at=datetime.now(),
         )
 
@@ -5773,6 +5809,7 @@ class LifeService:
                 self._cognitive = CognitiveSystem.from_dict(
                     dict(row), core_traits=self._core_traits,
                     intrusive_thought_themes=getattr(self._definition, 'intrusive_thought_themes', []) if self._definition else [],
+                    rng=self._rng,
                 )
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
@@ -5850,7 +5887,7 @@ class LifeService:
             cursor.execute("SELECT * FROM life_drive_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._drive = DriveSystem.from_dict(dict(row), core_traits=self._core_traits)
+                self._drive = DriveSystem.from_dict(dict(row), core_traits=self._core_traits, rng=self._rng)
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
@@ -5931,7 +5968,7 @@ class LifeService:
             cursor.execute("SELECT * FROM life_memory_time_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._memory_time = MemoryTimeSystem.from_dict(dict(row))
+                self._memory_time = MemoryTimeSystem.from_dict(dict(row), rng=self._rng)
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
@@ -6415,7 +6452,7 @@ class LifeService:
         self._energy = EnergySystem(core_traits=self._core_traits, now=self._world_clock())
 
         # Reset desire system
-        self._desire_system = DesireSystem(core_traits=self._core_traits)
+        self._desire_system = DesireSystem(core_traits=self._core_traits, rng=self._rng)
 
         # Clear recent activities (keep in DB for history)
         self._recent_activities = []
@@ -6455,23 +6492,24 @@ class LifeService:
         self._sustenance = SustenanceSystem()
         self._basic_needs = self._sustenance.state  # back-compat alias (same object)
         self._habitation = HabitationSystem(
-            home_type=getattr(_defn, 'home_type', '') if _defn else ''
+            home_type=getattr(_defn, 'home_type', '') if _defn else '',
+            rng=self._rng,
         )
         self._room_state = self._habitation.state  # back-compat alias (same object)
-        self._finance = FinanceSystem(core_traits=self._core_traits)
+        self._finance = FinanceSystem(core_traits=self._core_traits, rng=self._rng, now=self._world_clock()())
         if _defn and getattr(_defn, 'spending_habit', None) is not None:
             self._finance.state.spending_habit = _defn.spending_habit
         self._financial = self._finance.state  # back-compat alias (same state object)
         _occupation = self._occupation or (getattr(_defn, 'occupation', '') if _defn else '')
         _salary = getattr(_defn, 'monthly_salary', None) if _defn else None
-        self._career = CareerSystem(occupation=_occupation, monthly_salary=_salary)
+        self._career = CareerSystem(occupation=_occupation, monthly_salary=_salary, rng=self._rng)
         self._apply_occupation_schedule(self._career, _occupation)
         if self._career.monthly_salary > 0:
             self._finance.state.monthly_income = self._career.monthly_salary
         self._media = self._init_media_state()
         self._skills_system = SkillsSystem()
         self._skills = self._skills_system.skills  # alias
-        self._errands = ErrandsSystem()
+        self._errands = ErrandsSystem(rng=self._rng)
         self._identity = IdentitySystem(
             npcs=self._build_npcs(self._social_circle_defs), user_info=self._user_info,
             core_traits=self._core_traits,
@@ -6480,6 +6518,7 @@ class LifeService:
             struggles=getattr(self._definition, 'struggles', []) if self._definition else [],
             character_defects=getattr(self._definition, 'character_defects', []) if self._definition else [],
             behavioral_tendencies=getattr(self._definition, 'behavioral_tendencies', {}) if self._definition else {},
+            rng=self._rng,
         )
         self._affect = AffectSystem(
             core_traits=self._core_traits,
@@ -6492,6 +6531,7 @@ class LifeService:
         self._cognitive = CognitiveSystem(
             core_traits=self._core_traits,
             intrusive_thought_themes=getattr(self._definition, 'intrusive_thought_themes', []) if self._definition else [],
+            rng=self._rng,
         )
         self._shadow = ShadowSystem(
             behavioral_tendencies=(getattr(self._definition, 'behavioral_tendencies', {}) if self._definition else {}) or {},
@@ -6512,9 +6552,10 @@ class LifeService:
         self._drive = DriveSystem(
             core_traits=self._core_traits,
             comfort_zone_seeds=getattr(self._definition, 'comfort_zone_seeds', []) if self._definition else [],
+            rng=self._rng,
         )
         self._behavior = BehaviorSystem()
-        self._memory_time = MemoryTimeSystem()
+        self._memory_time = MemoryTimeSystem(rng=self._rng)
         self._expression = ExpressionSystem()
         self._continuity = ContinuitySystem()
         self._character_evolution = CharacterEvolution(

@@ -59,6 +59,25 @@ ends: one scalar the host's blows push down, its recoveries push up, and world
 time erodes or mends between, read through a closed graded vocabulary. Details
 under *Added*.
 
+**The fifth change is the one the fourth exposed: the energy tick now takes an
+rng.** Every draw on `LifeService._on_energy_tick` -- identity's struggle,
+defect and tendency rolls, desire's arousal drift, cognitive's monologue,
+drive's avoidance roll, career, finance, errands, memory-time's nostalgia, the
+life-event title, and the service's own coin between a surfaced struggle and a
+rumination -- came from the module-level `random`. That is invisible to a
+companion app, which never replays anything, and fatal to a consumer that does:
+a host that seeds one `random.Random` per persona and drives two loops from the
+same seed still watches them diverge, because the library keeps drawing from a
+stream the host does not own, and nothing the host can seed reaches it short of
+reseeding the global before every tick. Before `SanitySystem` nothing a host
+*decided on* read those numbers, so the drift stayed in the digest text. Now
+the sanity tick reads affect's stress level as `stressed`, a struggle surfacing
+on one loop and not the other is a different state word from that hour on, and
+the run is not reproducible by any consumer. A library tick that draws from
+module `random` cannot be replayed, stepped or unit-tested against a fixed
+outcome by anyone but the library itself. `LifeService(rng=...)` closes it,
+additively and byte-identically by default; details under *Added*.
+
 ### Added
 
 - **`SanitySystem` -- the one interior number that integrates and can break.**
@@ -136,6 +155,38 @@ under *Added*.
 - **`SanitySystem` on the facade** -- `aura_life.__all__` goes from 117 names to
   118, and `tests/api_surface.json` is regenerated deliberately for that one
   addition; nothing was removed.
+- **`LifeService(rng=None)` -- every draw on the energy-tick path comes from
+  the injected `random.Random` when one is given.** `None`, the default, leaves
+  every draw on the module-level `random` exactly as before, so an existing
+  consumer, the golden parity fixture and the sanity wiring tests are
+  byte-identical. Given, no draw on that path touches module `random`: two
+  services built from one definition and two equal-seeded rngs, ticked on one
+  scripted world clock, end 200 simulated hours later with every engine's
+  status and both rng states identical. The rng is threaded into the engines
+  that draw on the tick, each of which gains an additive `rng=None` keyword on
+  its constructor and, where it has one, its `from_dict` (the reload path
+  rebuilds engines from rows and would otherwise lose the seam):
+  `IdentitySystem` (struggle, defect and tendency rolls), `DesireSystem`
+  (five arousal draws in `tick`), `HabitationSystem` (the candle),
+  `CognitiveSystem` (rumination replay and the monologue), `DriveSystem`
+  (`roll_avoidance`), `CareerSystem`, `FinanceSystem`, `ErrandsSystem`,
+  `MemoryTimeSystem` (`_check_nostalgia`), `LifeEventSystem` (the templated
+  title). The service's own three draws on the path -- the struggle-to-
+  rumination coin, the shareable priority, the life-trigger pick -- go through
+  the same source. Draws *off* the energy tick are deliberately not routed:
+  persona generation already takes `rng`; the daily planner, activities,
+  chaos, the body's sleep and daily-health rolls, and the world's weather still
+  read the module. `sanity_rng` keeps its own meaning (the one construction
+  draw) but now defaults to `rng` when only `rng` is given, so one injected
+  source replays the whole persona, jitter included; pass both to keep them
+  apart. `aura_life.__all__` is unchanged; `tests/api_surface.json` is not
+  touched.
+- **`tests/test_tick_rng.py`** (5 cases): the 200-hour two-service replay; a
+  sealed tick that asserts module `random`'s state never moves across
+  `_on_energy_tick` while an rng is injected (the whole audit as one
+  assertion); the seam surviving `reset_state()`; `rng=None` still reading the
+  module (two runs under one module seed agree); and the `sanity_rng`
+  defaulting rule.
 
 - **Personas can be generated as female, male or nonbinary.**
   `aura_life.personas.genre_randomizer` gains `GENDERS`, a `PRONOUNS` token table
@@ -340,6 +391,33 @@ under *Added*.
 
 ### Fixed
 
+- **The energy tick's career, finance and errands engines tick on the world
+  clock, not the host's.** `_on_energy_tick` called `self._career.tick()`,
+  `self._finance.tick()` and `self._errands.tick()` bare, so each read
+  `datetime.now()` -- while the catch-up path two thousand lines below already
+  passed `now=timestamp`. `CareerSystem.tick` registers a workday off `now`'s
+  date and hour and only then draws (`uniform`, up to two `random`, a `choice`),
+  so with those draws on an injected `rng` the host wall clock decided how many
+  values the stream gave up: a service ticked on a scripted world clock drew
+  nothing from the career while the host sat before the shift start and four
+  values a day once it moved past it. A run and its replay, hours apart on the
+  host, consumed different counts from one seed -- the exact defect `rng=` was
+  added to close, reopened by the clock. Measured in Hollow before the fix: two
+  same-seed runs, one with the host clock frozen and one dragged an hour per
+  simulated hour, diverged on day 0 as far as the weather; after it, identical
+  over two days at seeds 5 and 11 and over ten days and twelve agents at
+  seeds 5 and 20260827. All three ticks now take
+  `now=self._world_clock()()`, which is `datetime.now` when no world clock is
+  injected, so a consumer that injects nothing is byte-identical (210
+  personas, 48 ticks each, `rng=None`, compared against the previous tree).
+  `FinanceSystem` gains an additive `now=None` on its constructor and
+  `from_dict` for the same reason: its "fire on the *next* month boundary"
+  baseline was stamped from the host clock, and a tick measured on an injected
+  world clock against a host-stamped baseline paid a month that never passed
+  on the first hour. `tests/test_tick_rng.py` gains the pin: two services on
+  one scripted world clock and two equal rngs, the host clock frozen for one
+  and dragged an hour per simulated hour for the other, end at one rng state
+  with one career; it fails with the bare ticks restored.
 - **Six gendered strings in pools the archetype rewrite did not reach.** They
   were sampled straight into the concept without passing through `render()`, so
   they surfaced verbatim on a male or nonbinary persona: `horror.goal_pool`

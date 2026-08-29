@@ -292,9 +292,11 @@ class DesireSystem:
     """
 
     def __init__(self, initial_state: Optional[DesireState] = None,
-                 core_traits: Optional[List[str]] = None):
+                 core_traits: Optional[List[str]] = None,
+                 rng=None):
         """Initialize desire system."""
         self._state = initial_state or DesireState()
+        self._rng = rng if rng is not None else random
         self._intimate_activities = {a.name: a for a in INTIMATE_ACTIVITIES}
         self._recent_intimate_activities: List[str] = []
         self._growth_multiplier = self._calc_growth_multiplier(core_traits or [])
@@ -345,24 +347,24 @@ class DesireSystem:
         m = self._growth_multiplier
         if time_of_day in (TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT):
             # Strongest drive at night
-            if random.random() < 0.35:
+            if self._rng.random() < 0.35:
                 self._state.arousal = min(1.0, self._state.arousal + 0.04 * m)
         elif time_of_day == TimeOfDay.EVENING:
             # Evening warmth
-            if random.random() < 0.25:
+            if self._rng.random() < 0.25:
                 self._state.arousal = min(1.0, self._state.arousal + 0.03 * m)
         elif time_of_day == TimeOfDay.AFTERNOON:
             # Subtle daytime drift
-            if random.random() < 0.1:
+            if self._rng.random() < 0.1:
                 self._state.arousal = min(1.0, self._state.arousal + 0.02 * m)
 
         # Weather effects (rain can be sensual)
         if weather and weather.value in ("rainy", "stormy"):
-            if random.random() < 0.2:
+            if self._rng.random() < 0.2:
                 self._state.arousal = min(1.0, self._state.arousal + 0.02 * m)
 
         # Low satisfaction slowly builds desire
-        if self._state.satisfaction < 0.3 and random.random() < 0.15:
+        if self._state.satisfaction < 0.3 and self._rng.random() < 0.15:
             self._state.arousal = min(1.0, self._state.arousal + 0.02 * m)
 
         # Frustration from prolonged arousal without release
@@ -691,7 +693,8 @@ class DesireSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None) -> "DesireSystem":
+    def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None,
+                  rng=None) -> "DesireSystem":
         """Create from dict."""
         state = DesireState(
             arousal=data.get("arousal", 0.0),
@@ -702,4 +705,4 @@ class DesireSystem:
             openness_with_user=data.get("openness_with_user", 0.3),
             shyness=data.get("shyness", 0.6),
         )
-        return cls(initial_state=state, core_traits=core_traits)
+        return cls(initial_state=state, core_traits=core_traits, rng=rng)
