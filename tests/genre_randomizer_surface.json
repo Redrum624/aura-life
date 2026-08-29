@@ -15,11 +15,14 @@
     "Tuple",
     "annotations",
     "build_blended_concept",
+    "build_cast",
     "build_genre_concept",
     "dataclass",
     "field",
+    "register_genre",
     "render",
-    "select_blend_genres"
+    "select_blend_genres",
+    "unregister_genre"
   ],
   "signatures": {
     "build_genre_concept": [

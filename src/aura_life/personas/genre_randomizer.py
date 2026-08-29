@@ -6,6 +6,7 @@ verbatim (intensity ladder + heavy Shadow seeding) via a builder override."""
 
 from __future__ import annotations
 
+import copy as _copy
 import random as _random
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
@@ -98,7 +99,9 @@ class GenreSpec:
     shadow_level: str                 # light | light_moderate | moderate | heavy
     shadow: ShadowSeedSpec
     tone_directive: str
-    builder: Optional[Callable[["GenreSpec", "object", str], dict]] = None
+    # (spec, rng, gender, name=None) -> concept. `name` pre-assigns the name
+    # and skips that one draw; build_cast relies on it (see _build_concept).
+    builder: Optional[Callable[..., dict]] = None
     intensity_ladder: Optional[List[str]] = None
     # When True, the human/AI coin is weighted by archetype-pool size instead of
     # a flat 50/50 — so a genre with a small AI pool generates AI personas rarely.
@@ -121,7 +124,9 @@ class GenreSpec:
 SHADOW_SCALE = {"light": 0.18, "light_moderate": 0.32, "moderate": 0.46, "heavy": 1.0}
 
 
-def _generic_concept(spec: GenreSpec, rng, gender: Optional[str] = None) -> dict:
+def _generic_concept(
+    spec: GenreSpec, rng, gender: Optional[str] = None, name: Optional[str] = None
+) -> dict:
     gender = _resolve_gender(gender, rng)          # first draw — see build_genre_concept
     if spec.weight_by_pool_size and spec.human_archetypes and spec.ai_archetypes:
         persona_type = rng.choices(
@@ -132,7 +137,7 @@ def _generic_concept(spec: GenreSpec, rng, gender: Optional[str] = None) -> dict
         persona_type = rng.choice(["human", "ai"])
     archetypes = spec.human_archetypes if persona_type == "human" else spec.ai_archetypes
     label, occupation, raw_rel, archetype_traits, rel_title = rng.choice(archetypes)
-    name = rng.choice(spec.name_pools[gender])
+    name = rng.choice(spec.name_pools[gender]) if name is None else name
     age = rng.randint(22, 44)
     rel_with_user = render(raw_rel, gender)
     scale = SHADOW_SCALE[spec.shadow_level]
@@ -214,9 +219,19 @@ def build_genre_concept(genre: str, rng=None, gender: Optional[str] = None) -> d
     rng = rng or _random
     spec = GENRE_REGISTRY[genre]
     gender = _resolve_gender(gender, rng)
-    if spec.builder is not None:
+    return _build_concept(spec, rng, gender)
+
+
+def _build_concept(spec: GenreSpec, rng, gender: str, name: Optional[str] = None) -> dict:
+    """Run the genre's builder. `name` pre-assigns the name and skips that one
+    draw — the seam build_cast uses so a member goes through the exact code
+    path build_genre_concept does. None keeps the builder's own rng.choice,
+    and a legacy 3-arg builder is still called with 3 args."""
+    if spec.builder is None:
+        return _generic_concept(spec, rng, gender, name)
+    if name is None:
         return spec.builder(spec, rng, gender)
-    return _generic_concept(spec, rng, gender)
+    return spec.builder(spec, rng, gender, name=name)
 
 
 def _dedupe_keep_order(seq):
@@ -307,6 +322,110 @@ def build_blended_concept(genres: List[str], rng=None, gender: Optional[str] = N
     return base
 
 
+def _spec_errors(spec: GenreSpec) -> List[str]:
+    """Every piece the builders would otherwise trip on mid-build, named."""
+    errs: List[str] = []
+    if not isinstance(spec.key, str) or not spec.key:
+        errs.append("key must be a non-empty str")
+    for attr in ("human_archetypes", "ai_archetypes"):
+        rows = getattr(spec, attr)
+        if not rows:
+            errs.append(f"{attr} is empty (the human/ai coin can land on it)")
+        elif any(len(r) != 5 for r in rows):
+            errs.append(f"{attr} has a row that is not a 5-tuple "
+                        "(label, occupation, relationship, traits, title)")
+    for g in GENDERS:
+        if not spec.name_pools.get(g):
+            errs.append(f"name_pools[{g!r}] is empty and there is no female pool to fall back on")
+    if not spec.appearance_template:
+        errs.append("appearance_template is empty")
+    if spec.shadow_level not in SHADOW_SCALE:
+        errs.append(f"shadow_level {spec.shadow_level!r} is not one of {sorted(SHADOW_SCALE)}")
+    if not isinstance(spec.shadow, ShadowSeedSpec):
+        errs.append(f"shadow must be a ShadowSeedSpec, got {type(spec.shadow).__name__}")
+    for attr in ("theme_colors", "goal_pool", "style_theme_pool"):
+        if not getattr(spec, attr):
+            errs.append(f"{attr} is empty (rng.choice on it raises IndexError)")
+    return errs
+
+
+def register_genre(spec: GenreSpec, *, replace: bool = False) -> None:
+    """Add a deep copy of `spec` to GENRE_REGISTRY under `spec.key`. A key
+    that is already registered is refused unless replace=True — a shipped
+    genre must never be overwritten by accident. The copy is what makes a
+    spec derived from a shipped one (dataclasses.replace shares every list
+    and the ShadowSeedSpec) safe: mutating either object afterwards touches
+    neither the registry nor the genre it was cloned from. Raises ValueError
+    naming every piece build_genre_concept / build_cast would otherwise fail
+    on deep inside a builder (empty archetypes, a gender with no names, no
+    appearance template, an unknown shadow_level, an empty choice pool)."""
+    if not isinstance(spec, GenreSpec):
+        raise TypeError(f"register_genre expects a GenreSpec, got {type(spec).__name__}")
+    if spec.key in GENRE_REGISTRY and not replace:
+        raise ValueError(
+            f"Genre {spec.key!r} is already registered; pass replace=True to overwrite it"
+        )
+    errs = _spec_errors(spec)
+    if errs:
+        raise ValueError(f"GenreSpec {spec.key!r} is not buildable: " + "; ".join(errs))
+    GENRE_REGISTRY[spec.key] = _copy.deepcopy(spec)
+
+
+def unregister_genre(key: str) -> bool:
+    """Drop `key` from GENRE_REGISTRY. True if it was registered."""
+    return GENRE_REGISTRY.pop(key, None) is not None
+
+
+def _cast_genders(n: int, rng, gender: Optional[str], balance: bool) -> List[str]:
+    if gender is not None:
+        return [_resolve_gender(gender, rng)] * n
+    if not balance:
+        return [_resolve_gender(None, rng) for _ in range(n)]
+    base, extra = divmod(n, len(GENDERS))
+    genders = [g for g in GENDERS for _ in range(base)] + rng.sample(GENDERS, extra)
+    rng.shuffle(genders)
+    return genders
+
+
+def build_cast(
+    genre: str, n: int, rng=None, gender: Optional[str] = None, balance: bool = True
+) -> List[dict]:
+    """Build `n` persona concepts for `genre` with DISTINCT names.
+
+    Names are drawn without replacement inside each gender's pool (and never
+    reused across pools), so a cast never seats two Audreys; asking for more
+    than a pool holds raises ValueError naming the genre, the gender and both
+    counts. With gender=None and balance=True the genders are dealt as evenly
+    as `n` allows (12 -> 4/4/4, the remainder to rng-picked genders) in an
+    rng-shuffled order; balance=False draws every member's gender
+    independently, as n calls to build_genre_concept would. Each member runs
+    through the same builder as build_genre_concept with its name pre-assigned
+    — nothing is patched into the dict afterwards. A custom builder must
+    accept `name=None`. Draw order: genders, then names per gender in GENDERS
+    order, then each member in cast order; the same seed replays the same
+    cast byte for byte. build_genre_concept's own draw sequence is untouched.
+    Raises KeyError on an unknown genre."""
+    rng = rng or _random
+    spec = GENRE_REGISTRY[genre]
+    if n < 0:
+        raise ValueError(f"n must be >= 0, got {n}")
+    genders = _cast_genders(n, rng, gender, balance)
+    picks: Dict[str, List[str]] = {}
+    taken: set = set()
+    for g in GENDERS:
+        need = genders.count(g)
+        pool = [nm for nm in _dedupe_keep_order(spec.name_pools[g]) if nm not in taken]
+        if need > len(pool):
+            raise ValueError(
+                f"Genre {genre!r} has {len(pool)} distinct {g} names available "
+                f"but a cast of {n} needs {need}"
+            )
+        picks[g] = rng.sample(pool, need)
+        taken.update(picks[g])
+    queues = {g: iter(v) for g, v in picks.items()}
+    return [_build_concept(spec, rng, g, next(queues[g])) for g in genders]
+
+
 # ---------------------------------------------------------------------------
 # Horror genre — verbatim port of _freaky_concept() from routers/persona.py
 # ---------------------------------------------------------------------------
@@ -352,7 +471,9 @@ _HORROR_STRUGGLES = {
 }
 
 
-def _build_horror_concept(spec: GenreSpec, rng, gender: Optional[str] = None) -> dict:
+def _build_horror_concept(
+    spec: GenreSpec, rng, gender: Optional[str] = None, name: Optional[str] = None
+) -> dict:
     """Port of _freaky_concept() body — keeps exact randomization logic."""
     gender = _resolve_gender(gender, rng)          # first draw — see build_genre_concept
     intensity = rng.choice(spec.intensity_ladder)
@@ -360,7 +481,7 @@ def _build_horror_concept(spec: GenreSpec, rng, gender: Optional[str] = None) ->
     persona_type = rng.choice(["human", "ai"])
     archetypes = spec.human_archetypes if persona_type == "human" else spec.ai_archetypes
     label, occupation, raw_rel, archetype_traits, rel_title = rng.choice(archetypes)
-    name = rng.choice(spec.name_pools[gender])
+    name = rng.choice(spec.name_pools[gender]) if name is None else name
     rel_with_user = render(raw_rel, gender)
 
     core_traits = list(archetype_traits) + rng.sample(spec.core_descriptors, 3)
@@ -472,7 +593,9 @@ _SEXY_STRUGGLES = {
 }
 
 
-def _build_sexy_concept(spec: GenreSpec, rng, gender: Optional[str] = None) -> dict:
+def _build_sexy_concept(
+    spec: GenreSpec, rng, gender: Optional[str] = None, name: Optional[str] = None
+) -> dict:
     """Sexy builder — rolls a tier off the ladder; shadow scales with the tier."""
     gender = _resolve_gender(gender, rng)          # first draw — see build_genre_concept
     intensity = rng.choice(spec.intensity_ladder)
@@ -480,7 +603,7 @@ def _build_sexy_concept(spec: GenreSpec, rng, gender: Optional[str] = None) -> d
     persona_type = rng.choice(["human", "ai"])
     archetypes = spec.human_archetypes if persona_type == "human" else spec.ai_archetypes
     label, occupation, raw_rel, archetype_traits, rel_title = rng.choice(archetypes)
-    name = rng.choice(spec.name_pools[gender])
+    name = rng.choice(spec.name_pools[gender]) if name is None else name
     rel_with_user = render(raw_rel, gender)
 
     core_traits = list(archetype_traits) + rng.sample(spec.core_descriptors, 3)

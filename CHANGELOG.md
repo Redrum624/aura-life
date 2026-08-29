@@ -6,7 +6,7 @@ narrative sections under 0.1.0, *Behaviour* and *Not extracted*, that a
 pure-extraction release needs and Keep a Changelog has no type for — and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - unreleased — personas are no longer all women, and the world clock is injectable
+## [0.3.0] - unreleased — personas are no longer all women, the world clock is injectable, and the generator's output finally fits its consumer
 
 `_generic_concept` returned a hardcoded `"gender": "female"` from three literal
 sites, and that was the small part of the problem. All seven `appearance_template`s
@@ -32,6 +32,22 @@ not be replayed, stepped, or unit-tested by any consumer without freezing global
 state. It is additive and byte-identical by default: `now` defaults to
 `datetime.now` at every new seam, so a caller that passes nothing gets exactly
 what it got before. Details under *Added* and *Fixed*.
+
+**The third change closes a gap between two halves of this same package.**
+`build_genre_concept()` emits a 26-key dict; `LifeService(definition=...)` wants
+a `PersonalityDefinition`. Seventeen of those keys are fields of that dataclass
+and nine are not (`age`, `archetype`, `description`, `gender`, `genre`, `goal`,
+`intensity`, `style_theme`, `tone_directive`), so `PersonalityDefinition(**concept)`
+raises `TypeError` — and no converter existed anywhere in the package. The path
+of least resistance, handing the raw dict over as `definition`, is worse than
+the error: it *works*. Every read of the definition in `life_service.py` is
+`getattr(definition, name, default)`, a dict answers none of them, and every
+engine starts from its empty default with no exception and no log line. That is
+a defect a consumer meets the first time it wires the generator to the service,
+which is why the fix is a method on the library's own dataclass and not an
+adapter in someone's app. Two smaller seams ship alongside it, on the same
+argument: a supported way to register a genre, and a way to generate a cast
+whose names do not collide. All three are additive.
 
 ### Added
 
@@ -93,6 +109,71 @@ what it got before. Details under *Added* and *Fixed*.
   contract rather than leaving it as prose: an aware clock is self-consistent in
   memory and raises `TypeError` the moment it meets state restored from SQLite,
   which is why the migration note below says to use a naive one.
+- **`PersonalityDefinition.from_concept(concept, **overrides)`** — the bridge
+  from a generated concept to a `LifeService` definition. It keeps the keys that
+  are fields, applies `overrides` last, and refuses an override that names no
+  field. Three of the non-field keys are not dropped but **carried the way the
+  profile loaders carry them**, because a definition built from a concept has
+  to look like one built from `profile.db` to every reader downstream:
+  `profile_db.load_profile` maps `age` to `age_range=str(age)` and puts
+  `gender` and `age` into `appearance_details`, and `place_generation` reads
+  `age_range` while the image path reads `appearance_details` — a converter
+  that dropped them would hand those readers an empty string and no gender. The
+  generator emits `theme_color` as `"#RRGGBB"`; the field is an ARGB `int` and
+  both loaders parse the string before the definition exists, so `from_concept`
+  runs the same parse (`#RRGGBB` / `#AARRGGBB`) and raises `TypeError` on
+  anything else rather than inventing a default colour. The six remaining keys
+  (`archetype`, `description`, `genre`, `goal`, `intensity`, `style_theme`,
+  `tone_directive`) have no field and are dropped. Container fields are
+  **shape-checked, not coerced**: a `str` where a `List[str]` belongs would
+  iterate per character into the identity engine, so that raises `TypeError`
+  naming the key; an `Optional` container accepts `None`.
+  `tests/test_from_concept.py` (32 cases) converts every genre × gender and a
+  blend, pins the override, wrong-shape, colour and age/gender behaviour, and —
+  the one that matters — builds a real `LifeService` from a converted concept
+  and asserts `core_traits`, the identity values, struggles, character defects,
+  the intrusive thought pool and the `_is_ai` gate arrived, with the raw dict as
+  the negative control: same concept, every one of those empty.
+- **`register_genre(spec, *, replace=False)` and `unregister_genre(key)`.**
+  `GENRE_REGISTRY` was a module-level dict a consumer could only extend by
+  assigning into it, which means a spec missing a piece failed later, inside a
+  builder, as an `IndexError` from `rng.choice` on an empty pool or a `KeyError`
+  from `SHADOW_SCALE`. `register_genre` checks the spec up front and raises one
+  `ValueError` naming everything that would fail (empty archetypes, a row that is
+  not a 5-tuple, a gender with no names, no appearance template, an unknown
+  `shadow_level`, a `shadow` that is not a `ShadowSeedSpec`, an empty
+  `theme_colors` / `goal_pool` / `style_theme_pool`), and refuses to overwrite
+  a registered key — a shipped genre must never be clobbered by accident —
+  unless `replace=True` is passed. What goes into the registry is a **deep copy**
+  of the spec: the natural way to author a genre is
+  `dataclasses.replace(GENRE_REGISTRY["romance"], key="western", ...)`, and
+  that shares every list and the `ShadowSeedSpec` with romance, so appending to
+  the new genre's struggles would have edited a shipped genre in place. After
+  registration neither the caller's object nor the shipped genre can be reached
+  through the other. `unregister_genre` returns whether the key was there.
+- **`build_cast(genre, n, rng=None, gender=None, balance=True)`** — `n` concepts
+  with **distinct names**. Each builder draws `rng.choice(name_pool)`
+  independently, so a consumer generating several personas gets collisions:
+  measured over 300 seeds, 249 of 300 twelve-persona romance runs seated the
+  same name twice, and some three times. A generator that cannot produce a
+  distinct cast is incomplete, so this is the generator's problem to solve.
+  Names are sampled without replacement inside each gender's pool and never
+  reused across pools; asking for more than a pool holds raises `ValueError`
+  naming the genre, the gender and both counts. With `gender=None` the cast is
+  dealt as evenly as `n` allows (12 → 4/4/4, the remainder to rng-picked
+  genders) in an rng-shuffled order; `balance=False` draws every member's gender
+  independently, exactly as `n` calls to `build_genre_concept` would. Each member
+  runs through the **same builder** as `build_genre_concept` with its name
+  pre-assigned — nothing is patched into the dict afterwards — via a new
+  trailing `name=None` keyword on the three builders. `build_genre_concept`
+  itself still passes `name=None`, so its draw sequence is byte-identical and
+  `tests/fixtures/persona_parity_golden.json` did not move.
+  `tests/test_cast.py` (46 cases) pins the distinctness per genre, the 4/4/4
+  split, the `balance=False` parity with sequential `build_genre_concept` calls,
+  the over-pool message, determinism from a seed, that no prose field ever
+  embeds the name (so a future template change cannot silently undo the seam),
+  the register / unregister round-trip with its eleven refusal cases, and that
+  a registered spec cannot corrupt the genre it was cloned from.
 
 ### Changed
 
@@ -128,6 +209,17 @@ what it got before. Details under *Added* and *Fixed*.
   `__all__`, and neither snapshot pins signatures, so adding a trailing keyword
   argument moves neither file. Both were left alone deliberately; **nothing was
   removed from either.**
+- **`tests/genre_randomizer_surface.json` gained exactly three names —
+  `build_cast`, `register_genre`, `unregister_genre` — and lost none.** It was
+  regenerated deliberately with `API_SURFACE_WRITE_SNAPSHOT=1`; the `signatures`
+  block, `GENDERS`, the `PRONOUNS` keys, the `GenreSpec` fields and the registry
+  keys are unchanged. `tests/api_surface.json` is still byte-identical to 0.2.0:
+  `from_concept` is a method on a class that is not in `aura_life.__all__`.
+- **`GenreSpec.builder` is now annotated `Callable[..., dict]`** and a custom
+  builder is expected to accept a trailing `name=None`. A legacy three-argument
+  builder still works for `build_genre_concept` — it is called with three
+  arguments whenever no name is pre-assigned — but `build_cast` needs the fourth,
+  and says so.
 - **Every wall-clock read in `WorldEnvironment` and `EnergySystem` now goes
   through the world's clock rather than `datetime.now()` directly.** With no
   `now=` supplied that clock *is* `datetime.now`, so the behaviour is unchanged
@@ -241,6 +333,20 @@ what it got before. Details under *Added* and *Fixed*.
   persisted `datetime` in this library is — `tick()` raises `TypeError: can't
   subtract offset-naive and offset-aware datetimes`. This is the same naivety
   contract `persona_now`'s server-local fallback already carries, not a new rule.
+- **If you pass a generated concept straight to `LifeService(definition=...)`,
+  stop: it was never working.** Replace it with
+  `LifeService(definition=PersonalityDefinition.from_concept(concept), ...)`.
+  The service will look different afterwards — traits, values, struggles and the
+  rest were silently empty before — which is the fix, not a regression. The
+  definition you get back has `theme_color` as an ARGB `int`, `age_range` as
+  the generated age and `appearance_details` holding `gender` and `age`, the
+  same shape `load_profile` returns; nothing reads the `"#RRGGBB"` string off a
+  definition, so nothing should notice.
+- **A custom `GenreSpec.builder` needs a trailing `name=None` parameter only if
+  you call `build_cast` on that genre.** `build_genre_concept` still calls a
+  three-argument builder with three arguments. Registering through
+  `register_genre` instead of assigning into `GENRE_REGISTRY` is recommended but
+  not required; the dict is still there.
 
 ## [0.2.0] - 2026-08-27 — pre-publication hardening
 

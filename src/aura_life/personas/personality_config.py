@@ -6,8 +6,11 @@ All persona data comes from profile files in profiles/presets/ or profiles/custo
 """
 
 import logging
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+import re
+from dataclasses import dataclass, field, fields as _dc_fields
+from typing import (
+    Any, Dict, List, Mapping, Optional, Tuple, Union, get_args, get_origin, get_type_hints,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -100,6 +103,91 @@ class PersonalityDefinition:
     cultural_summary: str = ""
     appearance_origin: str = "local"       # local | adopted | immigrant | expat
     languages: List[str] = field(default_factory=lambda: list(get_default_languages()))
+
+    @classmethod
+    def from_concept(cls, concept: Mapping[str, Any], **overrides) -> "PersonalityDefinition":
+        """Build a definition from a generator concept (`build_genre_concept`,
+        `build_blended_concept`). Field keys are kept. `age` and `gender` are
+        carried the way the profile loaders carry them — `age_range=str(age)`,
+        `appearance_details={"gender": …, "age": …}` — and a hex-string
+        `theme_color` is parsed to the ARGB int the field holds, exactly as
+        `profile_db.load_profile` does. The rest (archetype, genre, goal, …) is
+        dropped; `overrides` win last.
+
+        This is the bridge between the generator and `LifeService(definition=...)`:
+        handing the raw dict over *looks* fine — every engine reads the definition
+        with getattr(), a dict answers none of it, and the character silently
+        never arrives. Container fields are shape-checked, never coerced: a str
+        where a list of str belongs would iterate per character. The TypeError
+        names the key."""
+        names = {f.name for f in _dc_fields(cls)}
+        unknown = sorted(set(overrides) - names)
+        if unknown:
+            raise TypeError(f"from_concept(): unknown field(s) {unknown}")
+        kwargs = {k: v for k, v in concept.items() if k in names}
+        details = dict(concept.get("appearance_details") or {})
+        if concept.get("gender"):
+            details.setdefault("gender", concept["gender"])
+        if concept.get("age") is not None:
+            details.setdefault("age", str(concept["age"]))
+            kwargs.setdefault("age_range", str(concept["age"]))
+        if details:
+            kwargs["appearance_details"] = details
+        kwargs.update(overrides)
+        if isinstance(kwargs.get("theme_color"), str):
+            kwargs["theme_color"] = _argb("theme_color", kwargs["theme_color"])
+        hints = get_type_hints(cls)
+        for key, value in kwargs.items():
+            _check_shape(key, value, hints[key])
+        return cls(**kwargs)
+
+
+_HEX_COLOR = re.compile(r"#([0-9A-Fa-f]{8})|#([0-9A-Fa-f]{6})")
+
+
+def _argb(key: str, value: str) -> int:
+    """'#RRGGBB' / '#AARRGGBB' (anywhere in the string, as the profile loaders
+    accept) -> ARGB int. No default colour is invented: anything else raises."""
+    m = _HEX_COLOR.search(value)
+    if m is None:
+        raise TypeError(
+            f"from_concept(): {key} must be an ARGB int or a '#RRGGBB' / '#AARRGGBB' str, got {value!r}"
+        )
+    return int(m.group(1) or "FF" + m.group(2), 16)
+
+
+def _is(value: Any, hint: Any) -> bool:
+    if hint is Any:
+        return True
+    origin = get_origin(hint)
+    if origin is not None:
+        return isinstance(value, origin)
+    if hint is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    return isinstance(value, hint)
+
+
+def _check_shape(key: str, value: Any, hint: Any) -> None:
+    """Raise TypeError naming `key` when a list/dict-typed field holds the wrong
+    shape. Scalars pass through: profiles store e.g. theme_color as a hex str
+    and the loaders parse it downstream."""
+    origin = get_origin(hint)
+    if origin is Union:
+        if value is None:
+            return
+        inner = [a for a in get_args(hint) if a is not type(None)]
+        return _check_shape(key, value, inner[0] if len(inner) == 1 else Any)
+    if origin is list:
+        elem = (get_args(hint) or (Any,))[0]
+        ok = isinstance(value, list) and all(_is(x, elem) for x in value)
+    elif origin is dict:
+        args = get_args(hint)
+        val_t = args[1] if len(args) == 2 else Any
+        ok = isinstance(value, dict) and all(_is(v, val_t) for v in value.values())
+    else:
+        return
+    if not ok:
+        raise TypeError(f"from_concept(): {key} must be {hint}, got {type(value).__name__}: {value!r}")
 
 
 # ---------------------------------------------------------------------------

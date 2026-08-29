@@ -460,7 +460,7 @@ the origin application on purpose — see `CHANGELOG.md`.
 ## Tests
 
 ```bash
-python -m pytest tests -q          # 324 tests across 22 modules, no network
+python -m pytest tests -q          # 505 tests across 26 modules, no network
 ```
 
 The suite must be run in an environment with **no host application on
