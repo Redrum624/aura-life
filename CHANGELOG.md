@@ -6,7 +6,7 @@ narrative sections under 0.1.0, *Behaviour* and *Not extracted*, that a
 pure-extraction release needs and Keep a Changelog has no type for — and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.3.0] - unreleased — personas are no longer all women, the world clock is injectable, and the generator's output finally fits its consumer
+## [0.3.0] - 2026-09-03 — personas are no longer all women, the world clock is injectable, and the generator's output finally fits its consumer
 
 `_generic_concept` returned a hardcoded `"gender": "female"` from three literal
 sites, and that was the small part of the problem. All seven `appearance_template`s

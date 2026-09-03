@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aura-life"
-version = "0.2.0"
+version = "0.3.0"
 description = "Agent life-simulation engine: mood, energy, goals, identity, planning, and daily life for autonomous personas"
 readme = "README.md"
 requires-python = ">=3.11"

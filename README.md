@@ -60,8 +60,13 @@ without narration, real weather or place lookups.
 
 ## Install
 
-The repository is public at `github.com/Redrum624/aura-life`. **There is no PyPI
-package**; install from a checkout, as an editable path dependency:
+```bash
+python -m pip install aura-life
+python -m pip install "aura-life[scheduler]"    # ...or with the optional extra
+```
+
+To work on it, or to have a sibling project depend on a checkout in place, install
+it editable instead:
 
 ```bash
 git clone https://github.com/Redrum624/aura-life.git
