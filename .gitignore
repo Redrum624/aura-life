@@ -14,3 +14,6 @@ dist/
 
 # go-public run state (see /public-repo skill)
 public-repo/
+
+# uv lockfile: not committed for a library; CI resolves from pyproject.toml
+uv.lock

@@ -10,12 +10,24 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE", "NOTICE"]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: OS Independent",
+  "Intended Audience :: Developers",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
   "tzdata; sys_platform == 'win32'",   # zoneinfo has no system tz database on Windows
 ]
 
 [project.optional-dependencies]
 scheduler = ["apscheduler>=3.11"]       # LifeScheduler degrades to a no-op without it (life_scheduler.py:11-16)
+
+[project.urls]
+Homepage = "https://github.com/Redrum624/aura-life"
+Source = "https://github.com/Redrum624/aura-life"
+Issues = "https://github.com/Redrum624/aura-life/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
