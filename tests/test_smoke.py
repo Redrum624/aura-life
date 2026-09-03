@@ -9,4 +9,6 @@ def test_version_has_one_source():
     maintained separately; setuptools now reads the attribute, so they cannot drift."""
     from importlib.metadata import version
 
+    import aura_life
+
     assert aura_life.__version__ == version("aura-life")
