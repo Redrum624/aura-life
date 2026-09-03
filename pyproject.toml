@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "aura-life"
-version = "0.3.0"
+dynamic = ["version"]        # single source: aura_life.__version__ (read statically by setuptools)
 description = "Agent life-simulation engine: mood, energy, goals, identity, planning, and daily life for autonomous personas"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,6 +31,9 @@ Issues = "https://github.com/Redrum624/aura-life/issues"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.dynamic]
+version = {attr = "aura_life.__version__"}
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -14,7 +14,7 @@ This is the library's curated public surface -- everything listed in
 ``aura_life.internals`` (unstable; may change in a minor release).
 """
 
-__version__ = "0.1.0"
+__version__ = "0.3.1"
 
 from aura_life.life_service import LifeService
 from aura_life.models import (

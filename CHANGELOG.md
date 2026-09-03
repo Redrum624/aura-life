@@ -6,6 +6,16 @@ narrative sections under 0.1.0, *Behaviour* and *Not extracted*, that a
 pure-extraction release needs and Keep a Changelog has no type for — and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-09-03 — the version has one source
+
+### Fixed
+
+- `aura_life.__version__` reported `0.1.0` in the 0.3.0 wheel while the distribution
+  metadata said 0.3.0: the attribute and `pyproject.toml` were maintained separately and
+  only one of them was bumped. The version now lives in the attribute alone and
+  setuptools reads it (`dynamic = ["version"]`), so the two cannot drift; a smoke test
+  asserts they agree.
+
 ## [0.3.0] - 2026-09-03 — personas are no longer all women, the world clock is injectable, and the generator's output finally fits its consumer
 
 `_generic_concept` returned a hardcoded `"gender": "female"` from three literal
@@ -827,6 +837,7 @@ Carried into the release deliberately; see `README.md` and `DEFERRED.md`.
 - `LifeService.start()` requires the `[scheduler]` extra and is a single-persona
   background-thread design.
 
+[0.3.1]: https://github.com/Redrum624/aura-life/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Redrum624/aura-life/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Redrum624/aura-life/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Redrum624/aura-life/releases/tag/v0.1.0
