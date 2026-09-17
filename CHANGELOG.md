@@ -6,6 +6,76 @@ narrative sections under 0.1.0, *Behaviour* and *Not extracted*, that a
 pure-extraction release needs and Keep a Changelog has no type for — and this
 project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **Work stress, `on_shift` and the career status blocks answer on the world
+  clock, not the host's.** 0.3.0 made the world clock injectable and moved
+  `CareerSystem.tick` onto it, but one line later `_on_energy_tick` asked
+  `self._career.work_stress()` with no instant, so `is_working_now` fell back to
+  `datetime.now()`. On a host weekday inside shift hours work stress read the
+  whole workload, crossed 0.5 and added the `"work stress"` stressor to affect --
+  a stressor that raises the stress level sanity reads -- so a host that
+  simulates time (a replay, a test) had its personas' stress decided by the hour
+  the process ran. Measured in Hollow: one seed's ten-day, twelve-agent replay
+  digest was `39aada4c915e` with the host clock frozen at 13:30 on a Wednesday
+  or a Friday and `d6134fa0102c` at 22:45, 08:00 and 02:00 or at 13:00 on a
+  Saturday; freezing one module at a time, only `aura_life.job.career_system`
+  moved it. The same fallback answered `on_shift` in
+  `CareerSystem.export_state` and `on_shift` and `work_stress` in
+  `CareerSystem.get_status`, reached from `LifeService.get_status()`,
+  `LifeService.export_outer_state()` and the context builder's work line. Both
+  methods gain an additive `now=None`, forwarded to `is_working_now` and
+  `work_stress`, and every call site passes the world instant: the energy tick
+  passes the `_world_now` the career just ticked on, `get_status()` and
+  `export_outer_state()` pass `self._world_clock()()`, and
+  `LifeContextBuilder._build_career_section` reaches the clock through its
+  `life_service` -- its only route to it; a builder built without a service asks
+  with no instant, as before. After the fix Hollow's digest is identical, per
+  seed, for seeds 1, 2 and 3 with the host clock frozen on a Monday at 09:30, a
+  Wednesday at 13:30 and 23:59, a Friday at 16:59, a Saturday at 13:30 and a
+  Sunday at 02:00, and with the host clock left running.
+- **The energy tick's continuity cycles and weekly rhythm follow the world clock
+  too.** Found by auditing every host-clock read reachable from the entry points
+  a simulating host drives (`_on_energy_tick`, `get_status`, `on_sanity_blow`,
+  `on_sanity_recovery`, `sanity`, `energy.sleep`, `stop`): two more of them
+  decided something rather than stamping it. `_on_energy_tick` gated the daily,
+  weekly and monthly cycles (anniversaries, growth snapshots, character
+  evolution, life chapters) on `datetime.now()` minus stamps that
+  `ContinuitySystem` and `CharacterEvolution` also took from the host, so on a
+  simulated clock every cycle fired once, on the first tick, and again only after
+  a real day, week or month of process life; and
+  `MemoryTimeSystem._detect_weekly_rhythm` read
+  the host's weekday and month, so "Monday heaviness" arrived on the host's
+  Mondays. `ContinuitySystem.daily_tick`, `weekly_tick` and `monthly_tick`,
+  `CharacterEvolution.monthly_evolution`, `MemoryTimeSystem.tick` and
+  `MemoryTimeSystem.add_life_chapter` gain an additive `now=None`, and the tick
+  passes one `self._world_clock()()` to the gate and to all of them -- so a
+  simulating host now sees the cycles fire once per simulated day, week and
+  month. The calendar scan inside the daily cycle stays on the host clock on
+  purpose: it reads entries a host added in real time and feeds follow-up
+  triggers whose cooldowns `_evaluate_life_triggers` stamps on the host clock.
+  The host-clock reads left on those paths either only stamp a value nothing
+  compares (affect's `mood.since` and `last_relief`, shadow's `last_update`,
+  cognitive's rumination and monologue stamps, drive's avoidance `created_at`,
+  identity's `formed_at` and `last_surfaced`, a shareable's `created_at`) or
+  compare against state that only a companion host's entry points write
+  (`on_user_message`, the activity, goal and plan ticks, `add_calendar_entry`,
+  a `follow_up_provider`).
+- **A host that injects no clock is unchanged**, because `_world_clock()` is
+  `datetime.now` without one. Checked byte for byte against the previous tree
+  over 16 scenarios -- four frozen host instants, two seeds, an injected `rng`
+  and module `random`, 48 ticks each -- comparing `get_status()`, both state
+  exports, the work line, the continuity, evolution and memory-time rows and the
+  rng state. `tests/test_career_clock.py` and `tests/test_world_clock_routes.py`
+  are the pins: each engine method answers from the instant it is given with the
+  host clock frozen to the opposite case, and two services on one injected
+  clock, one seed and one rng -- every routed module's host clock at Wednesday
+  13:30 for one and Saturday 02:00 for the other -- end with the same stress
+  sources, career block, sanity and rng state. Nine of their fifteen tests fail
+  on the previous tree; the six that pass there are the no-clock guards.
+
 ## [0.3.1] - 2026-09-03 — the version has one source
 
 ### Fixed

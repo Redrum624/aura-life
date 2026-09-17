@@ -798,9 +798,16 @@ class LifeContextBuilder:
         return "**Your finances:** " + ", ".join(lines) + "."
 
     def _build_career_section(self) -> str:
-        """Build a work section — only when something is notable."""
+        """Build a work section — only when something is notable.
+
+        "At work right now" is answered on the service's world clock
+        (``LifeService._world_clock``), reached through ``life_service`` -- the
+        builder's only route to it. A builder with no service asks the career
+        engine with no instant, which is the host's wall clock as before.
+        """
         try:
-            st = self._career.export_state()
+            now = self._life_service._world_clock()() if self._life_service is not None else None
+            st = self._career.export_state(now=now)
         except Exception:
             return ""
         if not st.get("employed"):

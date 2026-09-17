@@ -72,10 +72,14 @@ class CharacterEvolution:
 
     def monthly_evolution(self, identity_facets: Dict[str, float],
                            relationship_trust: float,
-                           avg_mood: str) -> Dict[str, float]:
-        """Apply slow personality drift. Returns dict of changes made."""
+                           avg_mood: str,
+                           now: Optional[datetime] = None) -> Dict[str, float]:
+        """Apply slow personality drift. Returns dict of changes made.
+
+        ``now`` dates the drift record and stamps the last evolution; the host's
+        wall clock when omitted. ``LifeService`` passes its world clock."""
         changes = {}
-        now = datetime.now()
+        now = now or datetime.now()
 
         # Calculate drift direction from activity patterns
         warmth_score = sum(

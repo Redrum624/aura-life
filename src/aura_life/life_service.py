@@ -1624,7 +1624,7 @@ class LifeService:
                     "home_type": self._room_state.home_type,
                 },
                 "finance": self._finance.export_state(),
-                "career": self._career.export_state(),
+                "career": self._career.export_state(now=self._world_clock()()),
                 "errands": self._errands.export_state(),
                 "places": self._location.export_state(),
                 "transport": self._transport.export_state(self._transit),
@@ -2699,7 +2699,7 @@ class LifeService:
                     "home_type": self._room_state.home_type,
                 },
                 "finance": self._finance.get_status(),
-                "career": self._career.get_status(),
+                "career": self._career.get_status(now=self._world_clock()()),
                 "errands": self._errands.get_status(),
                 "places": self._location.get_status(),
                 "transport": self._transport.get_status(self._transit),
@@ -2918,12 +2918,15 @@ class LifeService:
         # how many values the stream gave up -- a run and its replay, hours
         # apart, drew different counts. Without an injected world clock this
         # is ``datetime.now()`` exactly as before (see :meth:`_world_clock`).
+        # Work stress is asked on the same instant: a bare ``work_stress()``
+        # answered ``on_shift`` from the host's weekday and hour, so the hour
+        # the process ran decided whether "work stress" reached affect.
         if not self._is_ai:
             _world_now = self._world_clock()()
             self._career.tick(now=_world_now)
             if self._career.monthly_salary > 0:
                 self._finance.state.monthly_income = self._career.monthly_salary
-            if self._career.work_stress() >= 0.5:
+            if self._career.work_stress(now=_world_now) >= 0.5:
                 if "work stress" not in list(self._affect._stress.sources):
                     self._affect.on_stressor_added("work stress")
 
@@ -2948,10 +2951,18 @@ class LifeService:
         self._expression.tick()
 
         # === Continuity tick (daily/weekly cycles) ===
-        now = datetime.now()
+        # On the world clock, gate and stamps alike: the cycles compare ``now``
+        # with the stamps the engines took last time, so both sides have to be
+        # the same clock. On the host clock a simulated run fired every cycle
+        # once, on its first tick, and again only after a real day (week,
+        # month) of process life. The calendar scan below stays on the host
+        # clock: it reads entries a host added in real time and feeds follow-up
+        # triggers whose cooldowns ``_evaluate_life_triggers`` stamps on the
+        # host clock.
+        now = self._world_clock()()
         if (not self._continuity._last_daily_tick or
                 (now - self._continuity._last_daily_tick).total_seconds() > 86400):
-            continuity_events = self._continuity.daily_tick()
+            continuity_events = self._continuity.daily_tick(now=now)
             for evt in continuity_events:
                 if evt.startswith("anniversary:"):
                     self._affect.on_emotion_event("nostalgic", 0.3)
@@ -2965,7 +2976,7 @@ class LifeService:
             skill_levels = {name: sp.level for name, sp in self._skills.items()}
             identity_facets = {f.name: f.strength for f in self._identity.get_top_facets(5)}
             trust = self._identity.get_user_perception().trust_level
-            self._continuity.weekly_tick(skill_levels, identity_facets, trust)
+            self._continuity.weekly_tick(skill_levels, identity_facets, trust, now=now)
         # Monthly character evolution (every 30 days)
         if (not self._character_evolution._last_evolution or
                 (now - self._character_evolution._last_evolution).total_seconds() > 2592000):
@@ -2976,6 +2987,7 @@ class LifeService:
                 identity_facets=identity_facets,
                 relationship_trust=trust,
                 avg_mood=mood_str_evo,
+                now=now,
             )
             if drift_changes:
                 logger.info(f"Character evolution drift: {drift_changes}")
@@ -3001,6 +3013,7 @@ class LifeService:
                 goals_completed=completed,
                 goals_abandoned=abandoned,
                 identity_shifts=identity_shifts_month,
+                now=now,
             )
             if chapter:
                 # Also add to MemoryTime's life chapters
@@ -3009,6 +3022,7 @@ class LifeService:
                     summary=chapter.summary,
                     turning_points=chapter.turning_points,
                     dominant_emotions=chapter.dominant_emotions,
+                    now=now,
                 )
                 self._save_continuity()
         # Check milestones
@@ -3041,6 +3055,7 @@ class LifeService:
             mood=mood_str,
             season=season_str,
             time_of_day=tod_str,
+            now=now,  # the continuity block's world instant, same tick
         )
         if nostalgia_event:
             self._affect.on_emotion_event("nostalgic", nostalgia_event.intensity)

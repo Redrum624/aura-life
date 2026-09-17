@@ -79,12 +79,17 @@ class MemoryTimeSystem:
     # ============= Tick =============
 
     def tick(self, current_activity: str, mood: str, season: str,
-             time_of_day: str) -> Optional[NostalgiaEvent]:
-        """Per-tick update. Returns nostalgia event if triggered."""
+             time_of_day: str, now: Optional[datetime] = None) -> Optional[NostalgiaEvent]:
+        """Per-tick update. Returns nostalgia event if triggered.
+
+        ``now`` is the instant the tick happens at: the weekly rhythm reads its
+        weekday and month, and the time-perception and nostalgia stamps take
+        it. The host's wall clock when omitted; ``LifeService`` passes its
+        world clock."""
         self._tick_count += 1
 
         # Time perception update
-        self._update_time_perception(current_activity, mood)
+        self._update_time_perception(current_activity, mood, now)
 
         # Seasonal consciousness
         self._update_seasonal(season)
@@ -92,17 +97,17 @@ class MemoryTimeSystem:
         # Nostalgia check (~every other tick to reduce frequency)
         nostalgia = None
         if self._tick_count % 2 == 0:
-            nostalgia = self._check_nostalgia(current_activity, season)
+            nostalgia = self._check_nostalgia(current_activity, season, now)
 
         # Detect weekly rhythm (every 20 ticks)
         if self._tick_count % 20 == 0:
-            self._detect_weekly_rhythm()
+            self._detect_weekly_rhythm(now)
 
         return nostalgia
 
     # ============= Time Perception =============
 
-    def _update_time_perception(self, activity: str, mood: str):
+    def _update_time_perception(self, activity: str, mood: str, now: Optional[datetime] = None):
         """Update subjective time speed based on activity and mood."""
         speed = 0.5  # baseline
 
@@ -135,7 +140,7 @@ class MemoryTimeSystem:
             self._time_perception.subjective_speed * 0.7 + speed * 0.3
         )
         self._time_perception.subjective_speed = max(0.0, min(1.0, self._time_perception.subjective_speed))
-        self._time_perception.last_assessment = datetime.now()
+        self._time_perception.last_assessment = now or datetime.now()
 
     # ============= Seasonal Consciousness =============
 
@@ -172,7 +177,8 @@ class MemoryTimeSystem:
 
     # ============= Nostalgia =============
 
-    def _check_nostalgia(self, activity: str, season: str) -> Optional[NostalgiaEvent]:
+    def _check_nostalgia(self, activity: str, season: str,
+                         now: Optional[datetime] = None) -> Optional[NostalgiaEvent]:
         """Check if current activity/season triggers nostalgia."""
         trigger_info = NOSTALGIA_ACTIVITIES.get(activity)
         if not trigger_info:
@@ -194,7 +200,7 @@ class MemoryTimeSystem:
             memory_reference=memory,
             intensity=self._rng.uniform(0.2, 0.6),
             bittersweet=bittersweet,
-            timestamp=datetime.now(),
+            timestamp=now or datetime.now(),
         )
         self._nostalgia_log.append(event)
         # Keep last 20
@@ -211,18 +217,23 @@ class MemoryTimeSystem:
 
     def add_life_chapter(self, title: str, summary: str,
                          turning_points: Optional[List[str]] = None,
-                         dominant_emotions: Optional[List[str]] = None):
-        """Add a life chapter (typically from LLM synthesis)."""
+                         dominant_emotions: Optional[List[str]] = None,
+                         now: Optional[datetime] = None):
+        """Add a life chapter (typically from LLM synthesis).
+
+        ``now`` opens the new chapter and closes the previous one; the host's
+        wall clock when omitted."""
+        now = now or datetime.now()
         chapter = LifeChapter(
             title=title,
-            period_start=datetime.now(),
+            period_start=now,
             summary=summary,
             turning_points=turning_points or [],
             dominant_emotions=dominant_emotions or [],
         )
         # Close previous chapter
         if self._life_chapters:
-            self._life_chapters[-1].period_end = datetime.now()
+            self._life_chapters[-1].period_end = now
         self._life_chapters.append(chapter)
         # Keep last 10
         if len(self._life_chapters) > 10:
@@ -234,9 +245,11 @@ class MemoryTimeSystem:
 
     # ============= Temporal Rhythms =============
 
-    def _detect_weekly_rhythm(self):
-        """Detect weekly patterns from day-of-week moods and seasonal transitions."""
-        now = datetime.now()
+    def _detect_weekly_rhythm(self, now: Optional[datetime] = None):
+        """Detect weekly patterns from day-of-week moods and seasonal transitions.
+
+        The weekday and month are ``now``'s -- the host's wall clock when omitted."""
+        now = now or datetime.now()
         weekday = now.weekday()
 
         # Day-of-week patterns

@@ -179,7 +179,11 @@ Five things in that snippet are load-bearing and easy to get wrong:
    callable subclasses `WorldEnvironment` and overrides `now()`; the override
    still reaches energy. Without this, `hours_awake` measures how long *your
    process* has been alive, which makes the engine unreplayable and untestable —
-   see `tests/test_energy_clock.py`.
+   see `tests/test_energy_clock.py`. The same clock answers whether the persona
+   is on shift (the energy tick's work stress, the career block of
+   `get_status()` and of the state export) and drives the energy tick's daily,
+   weekly and monthly continuity cycles and its weekly rhythm — see
+   `tests/test_career_clock.py` and `tests/test_world_clock_routes.py`.
 3. **`db_path=` is effectively required.** With no host configured there is
    nothing to resolve a path from, and the constructor raises `ValueError` rather
    than guessing. With a host configured you may omit it and get

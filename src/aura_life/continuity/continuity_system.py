@@ -65,9 +65,13 @@ class ContinuitySystem:
 
     # ============= Daily Tick =============
 
-    def daily_tick(self) -> List[str]:
-        """Run daily continuity checks. Returns list of notable events."""
-        now = datetime.now()
+    def daily_tick(self, now: Optional[datetime] = None) -> List[str]:
+        """Run daily continuity checks. Returns list of notable events.
+
+        ``now`` is the instant the day is checked for (anniversaries match its
+        date, and it is stamped as the last daily tick); the host's wall clock
+        when omitted. ``LifeService`` passes its world clock."""
+        now = now or datetime.now()
         events = []
 
         # Check anniversaries
@@ -84,9 +88,13 @@ class ContinuitySystem:
 
     def weekly_tick(self, skill_levels: Dict[str, float],
                     identity_facets: Dict[str, float],
-                    relationship_trust: float) -> Optional[GrowthSnapshot]:
-        """Run weekly growth snapshot. Returns snapshot if notable changes detected."""
-        now = datetime.now()
+                    relationship_trust: float,
+                    now: Optional[datetime] = None) -> Optional[GrowthSnapshot]:
+        """Run weekly growth snapshot. Returns snapshot if notable changes detected.
+
+        ``now`` dates the snapshot and the last weekly tick; the host's wall
+        clock when omitted."""
+        now = now or datetime.now()
 
         snapshot = GrowthSnapshot(
             date=now,
@@ -131,14 +139,19 @@ class ContinuitySystem:
     def monthly_tick(self, activity_summary: Dict[str, int],
                      dominant_mood: str, avg_energy: float,
                      goals_completed: List[str], goals_abandoned: List[str],
-                     identity_shifts: List[str]) -> Optional[LifeChapter]:
+                     identity_shifts: List[str],
+                     now: Optional[datetime] = None) -> Optional[LifeChapter]:
         """Synthesize a life chapter from the past month's accumulated data.
 
         Called once per month. Generates a narrative chapter title and summary
         from growth snapshots, milestones, activities, and emotional arcs.
         Returns the chapter or None if too little data.
+
+        ``now`` is the instant the month is synthesized at (it bounds "recent",
+        dates the chapter and stamps the last monthly tick); the host's wall
+        clock when omitted.
         """
-        now = datetime.now()
+        now = now or datetime.now()
 
         # Need at least some data to synthesize
         if not self._growth_snapshots and not activity_summary and not self._milestones:

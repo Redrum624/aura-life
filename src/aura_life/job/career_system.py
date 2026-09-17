@@ -148,22 +148,27 @@ class CareerSystem:
     # Export / status / persistence
     # ------------------------------------------------------------------
 
-    def export_state(self) -> dict:
+    def export_state(self, now: Optional[datetime] = None) -> dict:
+        """``now`` is the instant ``on_shift`` is answered for (the host's wall
+        clock when omitted); ``LifeService`` passes its world clock."""
         return {
             "occupation": self._state.occupation,
             "employed": self._state.employed,
-            "on_shift": self.is_working_now(),
+            "on_shift": self.is_working_now(now),
             "workload": round(self._state.workload, 2),
             "satisfaction": round(self._state.satisfaction, 2),
             "recent_work_event": self._state.recent_work_event,
         }
 
-    def get_status(self) -> dict:
+    def get_status(self, now: Optional[datetime] = None) -> dict:
+        """``now`` is the instant ``on_shift`` and ``work_stress`` are answered
+        for (the host's wall clock when omitted); ``LifeService`` passes its
+        world clock."""
         return {
             "occupation": self._state.occupation,
             "employer": self._state.employer,
             "employed": self._state.employed,
-            "on_shift": self.is_working_now(),
+            "on_shift": self.is_working_now(now),
             "work_days": list(self._state.work_days),
             "shift": f"{self._state.shift_start_hour:02d}:00-{self._state.shift_end_hour:02d}:00",
             "monthly_salary": self._state.monthly_salary,
@@ -171,7 +176,7 @@ class CareerSystem:
             "satisfaction": round(self._state.satisfaction, 2),
             "days_worked": self._state.days_worked,
             "recent_work_event": self._state.recent_work_event,
-            "work_stress": self.work_stress(),
+            "work_stress": self.work_stress(now),
         }
 
     def to_dict(self) -> dict:
