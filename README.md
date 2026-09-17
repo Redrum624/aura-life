@@ -182,9 +182,11 @@ Five things in that snippet are load-bearing and easy to get wrong:
    see `tests/test_energy_clock.py`. The same clock answers whether the persona
    is on shift (the energy tick's work stress, the career block of
    `get_status()` and of the state export), drives the energy tick's daily,
-   weekly and monthly continuity cycles and its weekly rhythm, and decides
-   whether a plan from `add_conversation_plan` is for an hour already passed —
-   see `tests/test_career_clock.py`, `tests/test_world_clock_routes.py` and
+   weekly and monthly continuity cycles and its weekly rhythm, decides whether
+   a plan from `add_conversation_plan` is for an hour already passed, and decides
+   which slots are still ahead when `apply_schedule_override`,
+   `schedule_meeting_arrival` or a transit arrival rewrites the day — see
+   `tests/test_career_clock.py`, `tests/test_world_clock_routes.py` and
    `tests/test_planner_clock.py`.
 3. **`db_path=` is effectively required.** With no host configured there is
    nothing to resolve a path from, and the constructor raises `ValueError` rather

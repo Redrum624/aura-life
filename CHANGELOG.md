@@ -63,32 +63,62 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and `last_surfaced`, a shareable's `created_at`), or compare it only on a
   `follow_up_provider` or companion path (`on_user_message`, the activity, goal
   and plan ticks, `add_calendar_entry`).
-- **A plan agreed in conversation is judged against the world's hour, not the
-  host's.** `DailyPlanner.set_planned_activity` skips a slot whose hour has
-  already passed today, and it read that hour from `datetime.now()` even inside
-  a service on an injected world clock, so `LifeService.add_conversation_plan`
-  dropped a `21:00` plan whenever the process ran between 22:00 and 23:59,
-  whatever hour the world was at -- which is why
-  `tests/test_multi_instance.py`'s 21:00 sentinel failed every night.
-  `set_planned_activity` gains an additive `now=None` and
-  `add_conversation_plan` passes `self._world_clock()()`, which for a host with
-  no injected clock is the same wall-clock hour as before. The multi-instance
-  test now runs its shared world on a clock its rounds advance, so it no longer
-  depends on when the suite runs. `tests/test_planner_clock.py` is the pin: with
-  the planner module's host clock frozen at 22:45, a world at 09:00 keeps a
-  21:00 plan and drops an 08:00 one, while a service with no injected clock
-  still drops 21:00 and keeps 23:00.
+- **A plan agreed in conversation and the three schedule overrides are judged
+  against the world's hour, not the host's.** `DailyPlanner.set_planned_activity`
+  skips a slot whose hour has already passed today, and it read that hour from
+  `datetime.now()` even inside a service on an injected world clock, so
+  `LifeService.add_conversation_plan` dropped a `21:00` plan whenever the
+  process ran between 22:00 and 23:59, whatever hour the world was at -- which
+  is why `tests/test_multi_instance.py`'s 21:00 sentinel failed every night.
+  `cancel_work_today`, `stay_at_current_location` and `schedule_rendezvous` had
+  the same guard: they rewrite only the slots from the current hour on, so
+  `apply_schedule_override` ("skip work", "stay here"),
+  `schedule_meeting_arrival` and the arrival step of `advance_transit_phase`
+  rewrote the slots ahead of the host's hour. All four planner methods gain an
+  additive `now=None`, and those four service methods pass the world instant.
+  They ask `getattr(self, "_world_clock", None)` first, because a host may call
+  them bound to a duck-typed stand-in rather than a `LifeService` -- aura tests
+  `add_conversation_plan` on an object with only `_daily_planner`,
+  `_location_registry`, `_register_user_location` and `_save_plan` -- and a
+  stand-in with no `_world_clock` passes no instant, so it keeps the host-clock
+  behaviour. For a service with no injected clock the instant is the same
+  wall-clock hour as before. The rest of the planner still reads the host
+  clock: `needs_new_plan` and `generate_daily_plan` (which day and weekday a
+  plan is for, and its stamps), the plan tick's silent `revise_upcoming`,
+  `export_state`'s current and next slot, the desire stamps and expiry, and
+  `DailyPlan.get_current_slot` and `get_next_slot` -- so "go to ..."
+  (`override_current_location`) still picks the host's current and next slot,
+  and "stay here" still takes the location of the host's current slot. The
+  transit state machine's own stamps stay on the host clock too. Hollow reaches
+  none of these. The multi-instance test now runs its shared world on a clock
+  its rounds advance, so it no longer depends on when the suite runs.
+  `tests/test_planner_clock.py` is the pin: with the planner module's host clock
+  frozen at 22:45 and a world at 09:00, a 21:00 plan is kept and an 08:00 one
+  dropped, and each override rewrites the 21:00 slot and leaves 08:00 alone;
+  a service with no injected clock and a stand-in with no `_world_clock` still
+  drop the 21:00 plan and leave the 21:00 slot alone.
 - **A host that injects no clock is unchanged on the wall clock**, because
-  `_world_clock()` is `datetime.now` without one. A host that steers time by
-  patching a module's `datetime` instead -- a test freezing
+  `_world_clock()` is `datetime.now` without one, and a duck-typed service with
+  no `_world_clock` asks the planner and the context builder with no instant,
+  which is the host clock as before. A host that steers time by patching a
+  module's `datetime` instead -- a test freezing
   `aura_life.job.career_system.datetime`, say -- no longer steers work stress,
-  the career status blocks, the continuity and memory-time cycles or the
-  conversation-plan check, because those now ask the world's clock: inject a
-  world clock instead. Checked byte for byte against the previous tree
-  over 16 scenarios -- four frozen host instants, two seeds, an injected `rng`
-  and module `random`, 48 ticks each -- comparing `get_status()`, both state
-  exports, the work line, the continuity, evolution and memory-time rows and the
-  rng state. `tests/test_career_clock.py` and `tests/test_world_clock_routes.py`
+  the career status blocks, the continuity and memory-time cycles, the
+  conversation-plan check or which slots the three schedule overrides rewrite on
+  a `LifeService`, because those now ask the world's clock: inject a world clock
+  instead. Two byte-for-byte checks against 0.3.1's source back this, each only
+  for the paths it measured. The first, run on the career and continuity change
+  alone, covered 16 scenarios -- four frozen host instants, two seeds, an
+  injected `rng` and module `random`, 48 energy ticks each -- comparing
+  `get_status()`, both state exports, the work line, the continuity, evolution
+  and memory-time rows and the rng state. The second, run with the planner
+  changes in, covered the planner's guarded routes in 28 scenarios -- seven
+  frozen host instants, a service with no injected clock and a duck-typed
+  stand-in, each step on a fresh fixed plan and all steps in a row -- running
+  conversation plans around the host hour, "skip work", "stay here", a meeting
+  arrival and a transit arrival, and comparing the plan after every step and the
+  module `random` state. Plan generation was not compared.
+  `tests/test_career_clock.py` and `tests/test_world_clock_routes.py`
   are the pins: each engine method answers from the instant it is given with the
   host clock frozen to the opposite case, and two services on one injected
   clock, one seed and one rng -- every routed module's host clock at Wednesday

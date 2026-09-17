@@ -1763,11 +1763,16 @@ class LifeService:
         Apply a schedule override from conversation (e.g. user said 'skip work').
 
         Parses the action string and delegates to the appropriate planner method.
+        Which slots are still ahead is judged on the world clock; a duck-typed
+        service with no ``_world_clock`` passes no instant, which is the host's
+        wall clock.
         """
         action_lower = action.strip().lower()
 
         if any(w in action_lower for w in ["cancel work", "call off", "skip work", "no work", "day off"]):
-            self._daily_planner.cancel_work_today()
+            clock = getattr(self, "_world_clock", None)
+            now = clock()() if callable(clock) else None
+            self._daily_planner.cancel_work_today(now=now)
 
         elif action_lower.startswith("go to ") or action_lower.startswith("move to "):
             location = action_lower.split("to ", 1)[1].strip()
@@ -1779,7 +1784,9 @@ class LifeService:
             self._daily_planner.override_current_location(location)
 
         elif any(w in action_lower for w in ["stay home", "stay here", "stay in"]):
-            self._daily_planner.stay_at_current_location()
+            clock = getattr(self, "_world_clock", None)
+            now = clock()() if callable(clock) else None
+            self._daily_planner.stay_at_current_location(now=now)
 
         else:
             # Generic location move: try to extract a location name
@@ -1796,7 +1803,9 @@ class LifeService:
     def schedule_meeting_arrival(self, location: str) -> None:
         """Update activity, schedule and world location when the persona arrives for a planned meeting."""
         self._world.move_to(location)
-        self._daily_planner.schedule_rendezvous(location)
+        clock = getattr(self, "_world_clock", None)
+        now = clock()() if callable(clock) else None
+        self._daily_planner.schedule_rendezvous(location, now=now)
         self._save_plan()
         logger.info(f"Meeting arrival applied: now at {location}")
 
@@ -1818,6 +1827,12 @@ class LifeService:
 
         Minutes are accepted/validated for format leniency, but the planner's
         slot granularity is hourly — "19:30" and "19:00" both commit to hour 19.
+
+        "Already passed" is judged on the world clock. The method only needs
+        ``_daily_planner``, ``_location_registry``, ``_register_user_location``
+        and ``_save_plan``, and a host may bind it to a duck-typed stand-in with
+        just those: with no ``_world_clock`` it passes no instant, which is the
+        host's wall clock.
         """
         text = (raw or "").strip()
         m = re.match(r'^(\d{1,2}):(\d{2})\b\s*(.*)$', text)
@@ -1856,12 +1871,14 @@ class LifeService:
                 except Exception as e:
                     logger.debug(f"add_conversation_plan: could not register location {location!r}: {e}")
 
+        clock = getattr(self, "_world_clock", None)
+        now = clock()() if callable(clock) else None
         self._daily_planner.set_planned_activity(
             hour=hour,
             activity_name=what,
             location=location,
             reason="agreed with user",
-            now=self._world_clock()(),  # "already passed" is the world's hour, not the host's
+            now=now,  # "already passed" is the world's hour, not the host's
         )
         self._save_plan()
         logger.info(f"Conversation plan added: {hour:02d}:{minute:02d} -> hour {hour:02d} — {what}" + (f" @ {location}" if location else ""))
@@ -1962,7 +1979,9 @@ class LifeService:
             self._transit.phase = TransitPhase.ARRIVED
             self._transit.arrived_at = now
             self._world.move_to(self._transit.destination)
-            self._daily_planner.schedule_rendezvous(self._transit.destination)
+            clock = getattr(self, "_world_clock", None)
+            world_now = clock()() if callable(clock) else None
+            self._daily_planner.schedule_rendezvous(self._transit.destination, now=world_now)
             self._save_plan()
             logger.info(f"Transit phase → ARRIVED: at {self._transit.destination}")
 

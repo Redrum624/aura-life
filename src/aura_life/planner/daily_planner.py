@@ -1143,12 +1143,16 @@ class DailyPlanner:
 
     # ============= Schedule Override Methods =============
 
-    def cancel_work_today(self) -> None:
-        """Replace remaining work/class/study/commute slots with 'relaxing' at home."""
+    def cancel_work_today(self, now: Optional[datetime] = None) -> None:
+        """Replace remaining work/class/study/commute slots with 'relaxing' at home.
+
+        "Remaining" is judged against ``now``'s hour (the host's wall clock when
+        omitted); ``LifeService`` passes its world clock.
+        """
         if not self._current_plan:
             return
         work_activities = {"working", "attending classes", "studying", "commuting"}
-        now_hour = datetime.now().hour
+        now_hour = (now if now is not None else datetime.now()).hour
         for slot in self._current_plan.slots:
             if slot.hour >= now_hour and not slot.completed and slot.activity_name in work_activities:
                 slot.activity_name = "relaxing"
@@ -1170,28 +1174,36 @@ class DailyPlanner:
         self._note_revision(f"Moved to {location}")
         logger.info(f"Schedule override: moved to {location}")
 
-    def stay_at_current_location(self) -> None:
-        """Set all remaining slots to the current location."""
+    def stay_at_current_location(self, now: Optional[datetime] = None) -> None:
+        """Set all remaining slots to the current location.
+
+        "Remaining" is judged against ``now``'s hour (the host's wall clock when
+        omitted); ``LifeService`` passes its world clock. The current location
+        still comes from :meth:`DailyPlan.get_current_slot`, which reads the
+        host's clock.
+        """
         if not self._current_plan:
             return
         current = self._current_plan.get_current_slot()
         current_loc = current.location if current else "home"
-        now_hour = datetime.now().hour
+        now_hour = (now if now is not None else datetime.now()).hour
         for slot in self._current_plan.slots:
             if slot.hour >= now_hour and not slot.completed:
                 slot.location = current_loc
         self._note_revision(f"Staying at {current_loc}")
         logger.info(f"Schedule override: staying at {current_loc}")
 
-    def schedule_rendezvous(self, location: str) -> None:
+    def schedule_rendezvous(self, location: str, now: Optional[datetime] = None) -> None:
         """Update the current and next slot(s) to reflect a planned meeting arrival.
 
         Sets activity to 'meeting up' and location to the destination for the
-        current slot and the next uncompleted slot.
+        current slot and the next uncompleted slot. Only slots from ``now``'s hour
+        on count (the host's wall clock when omitted); ``LifeService`` passes its
+        world clock.
         """
         if not self._current_plan:
             return
-        now_hour = datetime.now().hour
+        now_hour = (now if now is not None else datetime.now()).hour
         updated = 0
         for slot in self._current_plan.slots:
             if slot.hour >= now_hour and not slot.completed and updated < 2:
