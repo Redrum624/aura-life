@@ -85,8 +85,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   wall-clock hour as before. The rest of the planner still reads the host
   clock: `needs_new_plan` and `generate_daily_plan` (which day and weekday a
   plan is for, and its stamps), the plan tick's silent `revise_upcoming`,
-  `export_state`'s current and next slot, the desire stamps and expiry, and
-  `DailyPlan.get_current_slot` and `get_next_slot` -- so "go to ..."
+  `export_state`'s current slot, next slot and remaining count, the desire
+  stamps and expiry, and `DailyPlan.get_current_slot`, `get_next_slot` and
+  `get_remaining_slots` -- so "go to ..."
   (`override_current_location`) still picks the host's current and next slot,
   and "stay here" still takes the location of the host's current slot. The
   transit state machine's own stamps stay on the host clock too. Hollow reaches
