@@ -1861,6 +1861,7 @@ class LifeService:
             activity_name=what,
             location=location,
             reason="agreed with user",
+            now=self._world_clock()(),  # "already passed" is the world's hour, not the host's
         )
         self._save_plan()
         logger.info(f"Conversation plan added: {hour:02d}:{minute:02d} -> hour {hour:02d} — {what}" + (f" @ {location}" if location else ""))

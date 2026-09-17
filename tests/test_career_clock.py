@@ -233,6 +233,16 @@ def test_the_export_and_the_context_builder_read_the_world_clock(monkeypatch, tm
     assert "you're at work right now" in svc._context_builder._build_career_section()
 
 
+def test_a_context_builder_whose_service_has_no_world_clock_keeps_the_work_line(monkeypatch, tmp_path):
+    """A duck-typed ``life_service`` without ``_world_clock`` falls back to the
+    host's wall clock instead of losing the work section."""
+    _freeze_host(monkeypatch, HOST_WEDNESDAY)
+    svc = _service(tmp_path, "ducktyped", WorldEnvironment(now=lambda: WORLD_OFF_SHIFT))
+    svc._context_builder._life_service = object()
+
+    assert "you're at work right now" in svc._context_builder._build_career_section()
+
+
 @pytest.mark.parametrize(
     "host, on_shift",
     [(HOST_WEDNESDAY, True), (HOST_SATURDAY_NIGHT, False)],

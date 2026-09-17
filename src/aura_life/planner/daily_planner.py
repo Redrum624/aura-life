@@ -1208,6 +1208,7 @@ class DailyPlanner:
         activity_name: str,
         location: str = "",
         reason: str = "agreed with user",
+        now: Optional[datetime] = None,
     ) -> None:
         """Upsert a FUTURE slot in today's plan from a conversation commitment.
 
@@ -1218,7 +1219,9 @@ class DailyPlanner:
 
         A slot whose hour has already passed today is moot — we skip it rather
         than rewriting history. (Same hour as "now" is allowed: it's still the
-        active window.)
+        active window.) ``now`` is the instant "already passed" is judged
+        against (the host's wall clock when omitted); ``LifeService`` passes
+        its world clock.
         """
         if not self._current_plan:
             logger.warning("set_planned_activity: no current plan; ignoring")
@@ -1226,7 +1229,8 @@ class DailyPlanner:
         if not (0 <= hour <= 23):
             logger.warning(f"set_planned_activity: hour {hour} out of range; ignoring")
             return
-        if hour < datetime.now().hour:
+        current_hour = (now if now is not None else datetime.now()).hour
+        if hour < current_hour:
             logger.info(f"set_planned_activity: hour {hour:02d}:00 already passed; ignoring")
             return
 

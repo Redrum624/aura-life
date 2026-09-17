@@ -34,6 +34,7 @@ import copy
 import logging
 import sqlite3
 import sys
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -50,6 +51,25 @@ AGENT_COUNT = 3
 #: a plan generation, goal evaluation, activity selection) while keeping the
 #: whole module under a couple of seconds.
 ROUNDS = 10
+
+#: Where the shared world's clock starts. The rounds advance it one hour each, so
+#: it ends at 18:00, before the 21:00 sentinel below. On the wall clock the
+#: planner judged that sentinel's hour against the host, and from 22:00 to 23:59
+#: dropped it as already passed.
+WORLD_START = datetime(2031, 3, 10, 8, 0)
+
+
+class _SharedClock:
+    """The caller-owned clock the shared world runs on: it moves only when the rounds move it."""
+
+    def __init__(self, start: datetime):
+        self.instant = start
+
+    def __call__(self) -> datetime:
+        return self.instant
+
+    def advance(self, hours: float) -> None:
+        self.instant += timedelta(hours=hours)
 
 
 def _make(tmp_path, pid, world):
@@ -134,7 +154,8 @@ def test_the_test_process_has_no_host_in_it():
 # ----------------------------------------------------------------------
 
 def test_three_agents_share_one_world_without_cross_contamination(tmp_path, caplog):
-    world = WorldEnvironment()
+    clock = _SharedClock(WORLD_START)
+    world = WorldEnvironment(now=clock)
     agents = [_make(tmp_path, f"agent{i}", world) for i in range(AGENT_COUNT)]
 
     # All three hold the *same* world object, and nothing else is shared.
@@ -145,6 +166,7 @@ def test_three_agents_share_one_world_without_cross_contamination(tmp_path, capl
 
     caplog.set_level(logging.WARNING)
     for _ in range(ROUNDS):
+        clock.advance(hours=1)
         world.tick()  # the caller owns the shared clock; LifeService will not tick it
         for a in agents:
             a._scheduler.force_all_ticks()
@@ -172,10 +194,11 @@ def test_three_agents_share_one_world_without_cross_contamination(tmp_path, capl
     # -- 4. The shared world advanced, and all three agents observe the same one.
     assert before[0]["world"] != after[0]["world"], "the shared world did not advance"
     # Identity, not value equality. `after` holds three SEQUENTIAL get_status()
-    # reads, and WorldEnvironment derives time_of_day/weather from the wall
-    # clock -- so a boundary crossed between the first read and the third makes
-    # the three snapshots differ for a reason that has nothing to do with
-    # sharing. Comparing the values failed roughly one run in four.
+    # reads, and WorldEnvironment derives time_of_day/weather from its clock --
+    # on the wall clock this test used before WORLD_START, a boundary crossed
+    # between the first read and the third made the three snapshots differ for
+    # a reason that has nothing to do with sharing. Comparing the values failed
+    # roughly one run in four.
     # "All three observe the same world" is exactly object identity, and that
     # cannot race.
     assert all(a._world is world for a in agents), (

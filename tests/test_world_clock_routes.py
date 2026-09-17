@@ -175,15 +175,18 @@ def test_the_daily_cycle_fires_on_simulated_days_while_the_host_clock_stands_sti
     assert status["continuity"]["last_weekly_tick"] == first.isoformat()
     assert status["continuity"]["last_monthly_tick"] == first.isoformat()
     assert status["character_evolution"]["last_evolution"] == first.isoformat()
+    assert svc._memory_time._time_perception.last_assessment == first
 
     clock.advance(23)
     svc._on_energy_tick()
     assert svc._continuity._last_daily_tick == first  # not a day yet
+    assert svc._memory_time._time_perception.last_assessment == clock.instant  # every tick
 
     clock.advance(2)
     svc._on_energy_tick()
     assert svc._continuity._last_daily_tick == clock.instant
     assert svc._continuity._last_weekly_tick == first
+    assert svc._memory_time._time_perception.last_assessment == clock.instant
 
 
 def test_a_service_with_no_injected_clock_runs_the_cycles_on_the_wall_clock(monkeypatch, tmp_path):

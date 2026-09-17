@@ -802,11 +802,13 @@ class LifeContextBuilder:
 
         "At work right now" is answered on the service's world clock
         (``LifeService._world_clock``), reached through ``life_service`` -- the
-        builder's only route to it. A builder with no service asks the career
-        engine with no instant, which is the host's wall clock as before.
+        builder's only route to it. A builder with no service, or with a
+        duck-typed service that has no ``_world_clock``, asks the career engine
+        with no instant, which is the host's wall clock as before.
         """
         try:
-            now = self._life_service._world_clock()() if self._life_service is not None else None
+            clock = getattr(self._life_service, "_world_clock", None)
+            now = clock()() if callable(clock) else None
             st = self._career.export_state(now=now)
         except Exception:
             return ""

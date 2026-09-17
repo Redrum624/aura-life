@@ -12,7 +12,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 - **Work stress, `on_shift` and the career status blocks answer on the world
   clock, not the host's.** 0.3.0 made the world clock injectable and moved
-  `CareerSystem.tick` onto it, but one line later `_on_energy_tick` asked
+  `CareerSystem.tick` onto it, but a few lines later `_on_energy_tick` asked
   `self._career.work_stress()` with no instant, so `is_working_now` fell back to
   `datetime.now()`. On a host weekday inside shift hours work stress read the
   whole workload, crossed 0.5 and added the `"work stress"` stressor to affect --
@@ -31,8 +31,9 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   passes the `_world_now` the career just ticked on, `get_status()` and
   `export_outer_state()` pass `self._world_clock()()`, and
   `LifeContextBuilder._build_career_section` reaches the clock through its
-  `life_service` -- its only route to it; a builder built without a service asks
-  with no instant, as before. After the fix Hollow's digest is identical, per
+  `life_service` -- its only route to it; a builder built without a service, or
+  on a duck-typed service with no `_world_clock`, asks with no instant, as
+  before. After the fix Hollow's digest is identical, per
   seed, for seeds 1, 2 and 3 with the host clock frozen on a Monday at 09:30, a
   Wednesday at 13:30 and 23:59, a Friday at 16:59, a Saturday at 13:30 and a
   Sunday at 02:00, and with the host clock left running.
@@ -56,15 +57,34 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   month. The calendar scan inside the daily cycle stays on the host clock on
   purpose: it reads entries a host added in real time and feeds follow-up
   triggers whose cooldowns `_evaluate_life_triggers` stamps on the host clock.
-  The host-clock reads left on those paths either only stamp a value nothing
-  compares (affect's `mood.since` and `last_relief`, shadow's `last_update`,
-  cognitive's rumination and monologue stamps, drive's avoidance `created_at`,
-  identity's `formed_at` and `last_surfaced`, a shareable's `created_at`) or
-  compare against state that only a companion host's entry points write
-  (`on_user_message`, the activity, goal and plan ticks, `add_calendar_entry`,
-  a `follow_up_provider`).
-- **A host that injects no clock is unchanged**, because `_world_clock()` is
-  `datetime.now` without one. Checked byte for byte against the previous tree
+  The host-clock reads left on those paths either only stamp a value (affect's
+  `mood.since` and `last_relief`, shadow's `last_update`, cognitive's rumination
+  and monologue stamps, drive's avoidance `created_at`, identity's `formed_at`
+  and `last_surfaced`, a shareable's `created_at`), or compare it only on a
+  `follow_up_provider` or companion path (`on_user_message`, the activity, goal
+  and plan ticks, `add_calendar_entry`).
+- **A plan agreed in conversation is judged against the world's hour, not the
+  host's.** `DailyPlanner.set_planned_activity` skips a slot whose hour has
+  already passed today, and it read that hour from `datetime.now()` even inside
+  a service on an injected world clock, so `LifeService.add_conversation_plan`
+  dropped a `21:00` plan whenever the process ran between 22:00 and 23:59,
+  whatever hour the world was at -- which is why
+  `tests/test_multi_instance.py`'s 21:00 sentinel failed every night.
+  `set_planned_activity` gains an additive `now=None` and
+  `add_conversation_plan` passes `self._world_clock()()`, which for a host with
+  no injected clock is the same wall-clock hour as before. The multi-instance
+  test now runs its shared world on a clock its rounds advance, so it no longer
+  depends on when the suite runs. `tests/test_planner_clock.py` is the pin: with
+  the planner module's host clock frozen at 22:45, a world at 09:00 keeps a
+  21:00 plan and drops an 08:00 one, while a service with no injected clock
+  still drops 21:00 and keeps 23:00.
+- **A host that injects no clock is unchanged on the wall clock**, because
+  `_world_clock()` is `datetime.now` without one. A host that steers time by
+  patching a module's `datetime` instead -- a test freezing
+  `aura_life.job.career_system.datetime`, say -- no longer steers work stress,
+  the career status blocks, the continuity and memory-time cycles or the
+  conversation-plan check, because those now ask the world's clock: inject a
+  world clock instead. Checked byte for byte against the previous tree
   over 16 scenarios -- four frozen host instants, two seeds, an injected `rng`
   and module `random`, 48 ticks each -- comparing `get_status()`, both state
   exports, the work line, the continuity, evolution and memory-time rows and the
@@ -73,8 +93,10 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   host clock frozen to the opposite case, and two services on one injected
   clock, one seed and one rng -- every routed module's host clock at Wednesday
   13:30 for one and Saturday 02:00 for the other -- end with the same stress
-  sources, career block, sanity and rng state. Nine of their fifteen tests fail
-  on the previous tree; the six that pass there are the no-clock guards.
+  sources, career block, sanity and rng state. Nine of their sixteen tests fail
+  on the previous tree; the seven that pass there are the no-clock guards and
+  the check that a context builder whose service has no `_world_clock` keeps
+  its work line.
 
 ## [0.3.1] - 2026-09-03 — the version has one source
 
@@ -907,6 +929,7 @@ Carried into the release deliberately; see `README.md` and `DEFERRED.md`.
 - `LifeService.start()` requires the `[scheduler]` extra and is a single-persona
   background-thread design.
 
+[Unreleased]: https://github.com/Redrum624/aura-life/compare/v0.3.1...HEAD
 [0.3.1]: https://github.com/Redrum624/aura-life/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/Redrum624/aura-life/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Redrum624/aura-life/compare/v0.1.0...v0.2.0
