@@ -43,7 +43,7 @@ from .energy import EnergySystem
 from .activities import ActivityEngine
 from .goals import GoalEngine
 from .planner import DailyPlanner
-from .planner.daily_planner import PHYSICAL_ACTIVITIES
+from .planner.daily_planner import PHYSICAL_ACTIVITIES, SOCIAL_PLAN_REASON_PREFIX
 from aura_life.conversation_session import ConversationSession
 from aura_life.planner.daily_planner import is_important_activity
 from .scheduler import LifeScheduler
@@ -1930,6 +1930,14 @@ class LifeService:
         if at < now.replace(minute=0, second=0, microsecond=0):
             raise ValueError(f"{at.isoformat()} is already past on the world clock")
         duration_min = int(duration_min)
+        end = at + timedelta(minutes=duration_min)
+        for o in self._social.obligations:
+            if not (o.duration_min and o.deadline):
+                continue
+            if o.description == what and o.deadline == at and o.people == names:
+                continue  # the same plan again: add_plan keeps it once
+            if at < o.deadline + timedelta(minutes=o.duration_min) and o.deadline < end:
+                raise ValueError(f"{at.isoformat()} overlaps the plan {o.description!r} at {o.deadline.isoformat()}")
 
         self._social.add_plan(names, what, at, duration_min)
         self._apply_social_plans(now)
@@ -1952,7 +1960,7 @@ class LifeService:
         for o in self._social.obligations:
             if not (o.duration_min and o.deadline):
                 continue
-            reason = "plan with " + ", ".join(o.people)
+            reason = SOCIAL_PLAN_REASON_PREFIX + ", ".join(o.people)
             end = o.deadline + timedelta(minutes=o.duration_min)
             hour_start = o.deadline.replace(minute=0, second=0, microsecond=0)
             while hour_start < end:

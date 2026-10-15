@@ -222,6 +222,9 @@ DESIRE_TEMPLATES: List[Dict] = [
 # ============= Routine Activities =============
 # Fixed daily routines that anchor the schedule around the sleep cycle.
 
+# The reason LifeService gives a slot it fills from a social plan ("plan with Maya, Leo").
+SOCIAL_PLAN_REASON_PREFIX = "plan with "
+
 ROUTINE_ACTIVITIES = {
     "waking up",
     "having breakfast",
@@ -1007,6 +1010,9 @@ class DailyPlanner:
 
         for slot in self._current_plan.slots:
             if slot.completed or slot.hour <= now.hour:
+                continue
+            # A promise to people (LifeService.add_social_plan) is kept whatever her mood or the weather.
+            if (slot.reason or "").startswith(SOCIAL_PLAN_REASON_PREFIX):
                 continue
 
             # Low energy: swap high-cost activities for rest (skip routine anchors)

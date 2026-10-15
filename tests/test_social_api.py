@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from aura_life.life_service import LifeService
-from aura_life.models import SocialEvent
+from aura_life.models import SocialEvent, Weather
 from aura_life.personas.personality_config import PersonalityDefinition
 from aura_life.world import WorldEnvironment
 
@@ -340,3 +340,24 @@ def test_a_plan_and_a_debt_with_the_same_words_do_not_collide(tmp_path):
     svc._social.fulfill_obligation("brunch")  # clears the debt only
     assert [o.person for o in svc._social.obligations] == ["Maya"]
     assert svc.get_upcoming_social_plans(24)[0]["what"] == "brunch"
+
+
+def test_an_overlapping_plan_is_rejected_and_the_same_plan_again_is_a_no_op(tmp_path):
+    svc = _service(tmp_path)
+    svc._on_plan_tick()
+    svc.add_social_plan(["Maya"], "climbing", WORLD_NOW.replace(hour=19), 90)
+    with pytest.raises(ValueError):
+        svc.add_social_plan(["Leo"], "ramen", WORLD_NOW.replace(hour=20), 60)  # 20:00 is inside 19:00-20:30
+    svc.add_social_plan(["Maya"], "climbing", WORLD_NOW.replace(hour=19), 90)  # identical: kept once, no error
+    assert len(svc.get_upcoming_social_plans(24)) == 1
+    svc.add_social_plan(["Leo"], "ramen", WORLD_NOW.replace(hour=20, minute=30), 60)  # starts as climbing ends
+    assert len(svc.get_upcoming_social_plans(24)) == 2
+
+
+def test_a_low_mood_or_low_energy_revision_keeps_a_promise_to_people(tmp_path):
+    svc = _service(tmp_path)
+    svc._on_plan_tick()
+    svc.add_social_plan(["Maya"], "climbing", WORLD_NOW.replace(hour=19), 60)
+    planner = svc._daily_planner
+    planner.revise_upcoming(energy_level=0.1, mood="sad", mood_intensity=0.9, weather=Weather.RAINY)
+    assert planner.current_plan.get_slot_for_hour(19).activity_name == "climbing"
