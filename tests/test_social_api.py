@@ -10,6 +10,7 @@ API (``get_social_circle``), the write/read pair for commitments
 keys that carry both.
 """
 
+import importlib
 import json
 import random
 from datetime import datetime, timedelta
@@ -31,8 +32,27 @@ CIRCLE = [
 ]
 
 
+#: One mutable instant: the world's clock and, frozen into the planner, the host's.
+#: The planner dates and judges its daily plan on the host clock (it is not on the
+#: world clock yet), so the tests pin both to the same moment.
+_CLOCK = {"now": WORLD_NOW}
+
+
+@pytest.fixture(autouse=True)
+def _world_and_host_agree(monkeypatch):
+    _CLOCK["now"] = WORLD_NOW
+
+    class Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return _CLOCK["now"]
+
+    monkeypatch.setattr(importlib.import_module("aura_life.planner.daily_planner"), "datetime", Frozen)
+
+
 def _service(tmp_path, pid="social", circle=CIRCLE, now=WORLD_NOW) -> LifeService:
-    clock = {"now": now}
+    clock = _CLOCK
+    clock["now"] = now
     svc = LifeService(
         db_path=str(tmp_path / f"{pid}.db"),
         persona_id=pid,
@@ -227,3 +247,96 @@ def test_export_state_social_is_json_primitives(tmp_path):
     svc.add_social_plan(["Maya"], "tea", WORLD_NOW.replace(hour=15), 60)
 
     json.dumps(svc.export_outer_state()["social"])
+
+
+# ----------------------------------------------------------------------
+# 5. Plans are re-applied when the daily plan is (re)generated
+# ----------------------------------------------------------------------
+
+def _next_day(svc):
+    _CLOCK["now"] = (WORLD_NOW + timedelta(days=1)).replace(hour=0, minute=5)
+    svc._on_plan_tick()  # the planner sees a new date and generates the day's plan
+
+
+def test_a_plan_for_tomorrow_gets_its_slot_when_tomorrows_plan_is_generated(tmp_path):
+    svc = _service(tmp_path)
+    svc._on_plan_tick()
+    tomorrow = (WORLD_NOW + timedelta(days=1)).replace(hour=19)
+    svc.add_social_plan(["Maya"], "climbing", tomorrow, 60)
+
+    _next_day(svc)
+
+    slot = svc._daily_planner.current_plan.get_slot_for_hour(19)
+    assert slot is not None and slot.activity_name == "climbing"
+
+
+def test_a_plan_added_before_any_daily_plan_exists_is_applied_when_one_is_made(tmp_path):
+    svc = _service(tmp_path)
+    assert svc._daily_planner.current_plan is None
+    svc.add_social_plan(["Maya"], "climbing", WORLD_NOW.replace(hour=19), 60)
+
+    svc._on_plan_tick()
+
+    assert svc._daily_planner.current_plan.get_slot_for_hour(19).activity_name == "climbing"
+
+
+def test_a_plan_across_midnight_puts_its_after_midnight_hours_in_the_next_days_plan(tmp_path):
+    svc = _service(tmp_path)
+    svc._on_plan_tick()
+    svc.add_social_plan(["Maya"], "movie night", WORLD_NOW.replace(hour=23), 120)
+
+    assert svc._daily_planner.current_plan.get_slot_for_hour(23).activity_name == "movie night"
+    _next_day(svc)
+
+    assert svc._daily_planner.current_plan.get_slot_for_hour(0).activity_name == "movie night"
+
+
+def test_reapplying_a_plan_does_not_reopen_a_finished_slot(tmp_path):
+    svc = _service(tmp_path)
+    svc._on_plan_tick()
+    svc.add_social_plan(["Maya"], "climbing", WORLD_NOW.replace(hour=10), 60)
+    svc._daily_planner.current_plan.get_slot_for_hour(10).completed = True
+
+    svc._on_plan_tick()
+
+    assert svc._daily_planner.current_plan.get_slot_for_hour(10).completed is True
+
+
+def test_a_plan_is_placed_by_the_daily_plans_own_date_not_the_world_date(tmp_path):
+    svc = _service(tmp_path)
+    svc._on_plan_tick()
+    svc._daily_planner.current_plan.date = "2031-03-11"  # the planner is a day ahead of the world
+    svc.add_social_plan(["Maya"], "climbing", WORLD_NOW.replace(hour=19), 60)
+
+    assert svc._daily_planner.current_plan.get_slot_for_hour(19).activity_name != "climbing"
+    svc.add_social_plan(["Leo"], "chess", (WORLD_NOW + timedelta(days=1)).replace(hour=20), 60)
+    assert svc._daily_planner.current_plan.get_slot_for_hour(20).activity_name == "chess"
+
+
+# ----------------------------------------------------------------------
+# 6. Pruning, and plans versus debts sharing a description
+# ----------------------------------------------------------------------
+
+def test_a_plan_is_forgotten_a_day_after_it_ends_on_the_world_clock(tmp_path):
+    svc = _service(tmp_path)
+    svc.add_social_plan(["Maya"], "brunch", WORLD_NOW.replace(hour=10), 60)  # ends 11:00
+
+    _CLOCK["now"] = WORLD_NOW.replace(hour=10) + timedelta(hours=1 + 23)  # 23 h after it ended
+    svc._on_energy_tick()
+    assert any(o.duration_min for o in svc._social.obligations)
+
+    _CLOCK["now"] = WORLD_NOW.replace(hour=10) + timedelta(hours=1 + 25)  # 25 h after
+    svc._on_energy_tick()
+    assert not any(o.duration_min for o in svc._social.obligations)
+
+
+def test_a_plan_and_a_debt_with_the_same_words_do_not_collide(tmp_path):
+    svc = _service(tmp_path)
+    svc.add_social_plan(["Maya"], "brunch", WORLD_NOW.replace(hour=10), 60)
+
+    svc._social.add_obligation("brunch", "Leo")  # not blocked by the plan
+    assert [o.person for o in svc._social.obligations if o.description == "brunch"] == ["Maya", "Leo"]
+
+    svc._social.fulfill_obligation("brunch")  # clears the debt only
+    assert [o.person for o in svc._social.obligations] == ["Maya"]
+    assert svc.get_upcoming_social_plans(24)[0]["what"] == "brunch"

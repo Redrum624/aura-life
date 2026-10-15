@@ -20,7 +20,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   path as the `[PLAN: ...]` tag; `get_upcoming_social_plans(within_hours)` reads
   them back as `{people, what, at, duration_min}`. Everything is judged on the
   world clock and persists through the existing social-expansion save and load
-  (`SocialObligation` gains `people` and `duration_min`; a plan is never overdue
+  (a plan's slots are re-applied whenever a daily plan is generated, so tomorrow's plan and the after-midnight part of a late one get theirs; the day is the daily plan's own date, as the planner dates it on the host clock; `SocialObligation` gains `people` and `duration_min`; a plan is never overdue
   and the five-obligation cap never drops one). `export_outer_state()["social"]`
   gains `people` (her five closest, as `name`/`rel`/`close`/`trend`) and `plans`
   (the next 24 h, as `who`/`what`/`at`/`min`); the existing keys are unchanged.
@@ -31,6 +31,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   lookup iterated `SocialSystem._npcs`, a `Dict[str, NPC]`, so every social
   event raised `'str' object has no attribute 'name'` and skipped the rest of
   the tick (445 times in one owner log).
+- **A social plan and a debt with the same words no longer collide.** `add_obligation` and `fulfill_obligation` ignore plans.
 
 - **Work stress, `on_shift` and the career status blocks answer on the world
   clock, not the host's.** 0.3.0 made the world clock injectable and moved

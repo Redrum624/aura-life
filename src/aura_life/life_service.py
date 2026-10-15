@@ -1902,7 +1902,7 @@ class LifeService:
         today's daily plan through the same path the ``[PLAN: ...]`` tag uses, so
         the activity engine has her out at that time. The planner's granularity is
         hourly: the plan fills each hour it touches. A plan for another day is
-        recorded but takes no slot today.
+        recorded and gets its slot when that day's plan is generated.
 
         ``at`` is a naive datetime on the world clock; names match the circle
         case-insensitively. Raises ``ValueError`` for an unknown or empty list of
@@ -1932,19 +1932,41 @@ class LifeService:
         duration_min = int(duration_min)
 
         self._social.add_plan(names, what, at, duration_min)
-        if at.date() == now.date():
-            last_hour = min(23, (at.hour * 60 + at.minute + duration_min - 1) // 60)
-            for hour in range(at.hour, last_hour + 1):
-                self._daily_planner.set_planned_activity(
-                    hour=hour,
-                    activity_name=what,
-                    location="",
-                    reason="plan with " + ", ".join(names),
-                    now=now,
-                )
-            self._save_plan()
+        self._apply_social_plans(now)
         self._save_social_expansion()
         logger.info(f"Social plan added: {at.isoformat()} {what} with {', '.join(names)} ({duration_min} min)")
+
+    def _apply_social_plans(self, now: datetime) -> None:
+        """Put every hour of every social plan that falls on the current daily plan's date into it.
+
+        The day is the daily plan's own ``date`` (the planner dates its plan on the
+        host clock, not the world's), so a plan for tomorrow lands when tomorrow's
+        plan is generated and a plan that crosses midnight puts its after-midnight
+        hours in the next day's plan. A slot already carrying the plan is left alone
+        (re-applying would reopen a finished one). A no-op while no plan exists.
+        """
+        plan = self._daily_planner.current_plan
+        if plan is None:
+            return
+        changed = False
+        for o in self._social.obligations:
+            if not (o.duration_min and o.deadline):
+                continue
+            reason = "plan with " + ", ".join(o.people)
+            end = o.deadline + timedelta(minutes=o.duration_min)
+            hour_start = o.deadline.replace(minute=0, second=0, microsecond=0)
+            while hour_start < end:
+                if hour_start.strftime("%Y-%m-%d") == plan.date:
+                    slot = plan.get_slot_for_hour(hour_start.hour)
+                    if not (slot and slot.activity_name == o.description and slot.reason == reason):
+                        self._daily_planner.set_planned_activity(
+                            hour=hour_start.hour, activity_name=o.description, location="",
+                            reason=reason, now=now,
+                        )
+                        changed = True
+                hour_start += timedelta(hours=1)
+        if changed:
+            self._save_plan()
 
     def get_upcoming_social_plans(self, within_hours: float) -> List[Dict]:
         """Plans running now or starting within ``within_hours``, soonest first.
@@ -2835,6 +2857,7 @@ class LifeService:
                 recent_activity_names=[a.activity_name for a in self._recent_activities[:5]],
                 work_schedule=self._career_schedule(),
             )
+            self._apply_social_plans(self._world_clock()())
             self._save_plan()
             logger.info("Generated new daily plan")
         else:
@@ -2845,6 +2868,7 @@ class LifeService:
                 mood=self._affect.mood.current_mood if self._affect else "",
                 mood_intensity=self._affect.mood.intensity if hasattr(self._affect.mood, 'intensity') else 0,
             )
+            self._apply_social_plans(self._world_clock()())
 
     def _on_world_tick(self) -> None:
         """Handle world tick. Skips if world is externally managed (shared)."""

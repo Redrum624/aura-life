@@ -207,7 +207,7 @@ class SocialSystem:
                        urgency: float = 0.3, deadline: Optional[datetime] = None):
         """Add a social obligation."""
         for o in self._obligations:
-            if o.description == description:
+            if o.description == description and not o.duration_min:  # a plan is not a debt
                 return
         self._obligations.append(SocialObligation(
             description=description, person=person,
@@ -256,7 +256,7 @@ class SocialSystem:
 
     def fulfill_obligation(self, description: str):
         """Fulfill a social obligation."""
-        self._obligations = [o for o in self._obligations if o.description != description]
+        self._obligations = [o for o in self._obligations if o.description != description or o.duration_min]
 
     def tick_obligations(self):
         """Check for overdue obligations."""
