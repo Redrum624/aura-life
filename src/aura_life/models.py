@@ -1218,6 +1218,10 @@ class SocialObligation:
     deadline: Optional[datetime] = None
     created_at: Optional[datetime] = None
     overdue: bool = False
+    # A plan she made with people (not a debt): ``duration_min > 0`` marks it, ``deadline``
+    # is when it starts, ``description`` is what they do and ``person`` the names joined.
+    people: List[str] = field(default_factory=list)
+    duration_min: int = 0
 
 
 @dataclass

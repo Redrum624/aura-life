@@ -8,7 +8,29 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **The social circle and her plans with it are public API.**
+  `LifeService.get_social_circle()` returns `{name, relationship, closeness,
+  trend}` dicts, closest first (`closeness` and `trend` are `None` for someone
+  with no arc). `add_social_plan(people, what, at, duration_min)` records a
+  plan with people from her circle (`ValueError` for an unknown name, a blank
+  activity, a non-positive duration, a timezone-aware or already-past `at`) and
+  puts the matching slot(s) into today's daily plan through the same planner
+  path as the `[PLAN: ...]` tag; `get_upcoming_social_plans(within_hours)` reads
+  them back as `{people, what, at, duration_min}`. Everything is judged on the
+  world clock and persists through the existing social-expansion save and load
+  (`SocialObligation` gains `people` and `duration_min`; a plan is never overdue
+  and the five-obligation cap never drops one). `export_outer_state()["social"]`
+  gains `people` (her five closest, as `name`/`rel`/`close`/`trend`) and `plans`
+  (the next 24 h, as `who`/`what`/`at`/`min`); the existing keys are unchanged.
+
 ### Fixed
+
+- **A social event no longer aborts the activity tick.** The value-alignment
+  lookup iterated `SocialSystem._npcs`, a `Dict[str, NPC]`, so every social
+  event raised `'str' object has no attribute 'name'` and skipped the rest of
+  the tick (445 times in one owner log).
 
 - **Work stress, `on_shift` and the career status blocks answer on the world
   clock, not the host's.** 0.3.0 made the world clock injectable and moved

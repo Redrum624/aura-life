@@ -7,7 +7,7 @@ Follows the DesireSystem pattern: state that ticks, templates, dice rolls.
 
 import json
 import random
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
 from ..models import (
@@ -214,10 +214,45 @@ class SocialSystem:
             urgency=urgency, deadline=deadline,
             created_at=datetime.now(),
         ))
-        if len(self._obligations) > 5:
-            self._obligations = sorted(
-                self._obligations, key=lambda o: o.urgency, reverse=True
-            )[:5]
+        debts = [o for o in self._obligations if not o.duration_min]
+        if len(debts) > 5:
+            keep = sorted(debts, key=lambda o: o.urgency, reverse=True)[:5]
+            # Plans with people are commitments, not debts: the cap never drops one.
+            self._obligations = [o for o in self._obligations if o.duration_min or o in keep]
+
+    def add_plan(self, people: List[str], what: str, at: datetime, duration_min: int):
+        """Record a plan with people (names already validated by the caller)."""
+        for o in self._obligations:
+            if o.duration_min and o.description == what and o.deadline == at and o.people == people:
+                return o
+        plan = SocialObligation(
+            description=what, person=", ".join(people), urgency=0.3, deadline=at,
+            created_at=datetime.now(), people=list(people), duration_min=duration_min,
+        )
+        self._obligations.append(plan)
+        return plan
+
+    def upcoming_plans(self, now: datetime, within_hours: float) -> List[dict]:
+        """Plans still running or starting within ``within_hours`` of ``now``, soonest first."""
+        horizon = now + timedelta(hours=within_hours)
+        found = [
+            o for o in self._obligations
+            if o.duration_min and o.deadline
+            and o.deadline + timedelta(minutes=o.duration_min) > now and o.deadline <= horizon
+        ]
+        found.sort(key=lambda o: o.deadline)
+        return [
+            {"people": list(o.people), "what": o.description, "at": o.deadline, "duration_min": o.duration_min}
+            for o in found
+        ]
+
+    def prune_plans(self, now: datetime, keep_hours: float = 24.0) -> None:
+        """Forget plans that ended more than ``keep_hours`` before ``now``."""
+        cutoff = now - timedelta(hours=keep_hours)
+        self._obligations = [
+            o for o in self._obligations
+            if not (o.duration_min and o.deadline and o.deadline + timedelta(minutes=o.duration_min) < cutoff)
+        ]
 
     def fulfill_obligation(self, description: str):
         """Fulfill a social obligation."""
@@ -227,6 +262,8 @@ class SocialSystem:
         """Check for overdue obligations."""
         now = datetime.now()
         for o in self._obligations:
+            if o.duration_min:
+                continue  # a plan is a commitment, not a debt: it never goes overdue
             if o.deadline and now > o.deadline:
                 o.overdue = True
                 o.urgency = min(1.0, o.urgency + 0.01)
@@ -307,8 +344,28 @@ class SocialSystem:
     def conflicts(self) -> List[SocialConflict]:
         return self._conflicts
 
-    def export_state(self) -> dict:
-        """Structured dict for LLM pipeline digest passes."""
+    def circle(self) -> List[dict]:
+        """Everyone in her circle as plain dicts, closest first."""
+        people = []
+        for npc in self._npcs.values():
+            arc = self._arcs.get(npc.name)
+            people.append({
+                "name": npc.name,
+                "relationship": npc.relationship,
+                "closeness": round(arc.closeness, 2) if arc else None,
+                "trend": arc.trend if arc else None,
+            })
+        # Stable sort: people without an arc go last, ties keep circle order.
+        people.sort(key=lambda p: -1.0 if p["closeness"] is None else p["closeness"], reverse=True)
+        return people
+
+    def export_state(self, now: Optional[datetime] = None) -> dict:
+        """Structured dict for LLM pipeline digest passes.
+
+        ``now`` is the instant the next 24 h of plans is measured from (the host
+        clock when omitted); ``LifeService`` passes its world clock.
+        """
+        now = now if now is not None else datetime.now()
         return {
             "recent_events": [
                 {"npc": e.npc_name, "type": e.event_type, "description": e.description}
@@ -322,6 +379,15 @@ class SocialSystem:
             ],
             "obligations": [o.description for o in self._obligations if o.overdue][:2],
             "conflicts": [c.cause for c in self._conflicts if c.status == "unresolved"][:2],
+            "people": [
+                {"name": p["name"], "rel": p["relationship"], "close": p["closeness"], "trend": p["trend"]}
+                for p in self.circle()[:5]
+            ],
+            "plans": [
+                {"who": ", ".join(p["people"]), "what": p["what"],
+                 "at": p["at"].isoformat(timespec="minutes"), "min": p["duration_min"]}
+                for p in self.upcoming_plans(now, 24)
+            ],
         }
 
     def get_status(self) -> dict:
@@ -360,6 +426,7 @@ class SocialSystem:
                     "urgency": o.urgency, "overdue": o.overdue,
                     "deadline": o.deadline.isoformat() if o.deadline else None,
                     "created_at": o.created_at.isoformat() if o.created_at else None,
+                    "people": list(o.people), "duration_min": o.duration_min,
                 }
                 for o in self._obligations
             ]),
@@ -417,6 +484,8 @@ class SocialSystem:
                 overdue=o.get("overdue", False),
                 deadline=datetime.fromisoformat(o["deadline"]) if o.get("deadline") else None,
                 created_at=datetime.fromisoformat(o["created_at"]) if o.get("created_at") else None,
+                people=list(o.get("people") or []),
+                duration_min=int(o.get("duration_min") or 0),
             ) for o in items
         ]
         # Conflicts

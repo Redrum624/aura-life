@@ -1591,7 +1591,7 @@ class LifeService:
             "body": {
                 **self._body.export_state(),
             },
-            "social": self._social.export_state(),
+            "social": self._social.export_state(now=self._world_clock()()),
             "media": {
                 "current_book": self._media.current_book,
                 "book_progress": round(self._media.book_progress, 2),
@@ -1882,6 +1882,77 @@ class LifeService:
         )
         self._save_plan()
         logger.info(f"Conversation plan added: {hour:02d}:{minute:02d} -> hour {hour:02d} — {what}" + (f" @ {location}" if location else ""))
+
+    # ============= Social circle and plans =============
+
+    def get_social_circle(self) -> List[Dict]:
+        """Everyone in her circle, closest first.
+
+        Plain dicts ``{name, relationship, closeness, trend}``; ``closeness`` and
+        ``trend`` come from the relationship arc and are ``None`` when the person
+        has none.
+        """
+        return self._social.circle()
+
+    def add_social_plan(self, people: List[str], what: str, at: datetime, duration_min: int) -> None:
+        """Commit her to ``what`` with ``people`` at ``at``.
+
+        Records a social obligation (it persists and reads back through
+        :meth:`get_upcoming_social_plans`) and puts the matching slot(s) into
+        today's daily plan through the same path the ``[PLAN: ...]`` tag uses, so
+        the activity engine has her out at that time. The planner's granularity is
+        hourly: the plan fills each hour it touches. A plan for another day is
+        recorded but takes no slot today.
+
+        ``at`` is a naive datetime on the world clock; names match the circle
+        case-insensitively. Raises ``ValueError`` for an unknown or empty list of
+        people, a blank ``what``, a non-positive duration, a timezone-aware ``at``
+        or a start in a past hour of the world's day.
+        """
+        circle = {n.lower(): n for n in self._social._npcs}
+        names: List[str] = []
+        for raw in people or []:
+            canonical = circle.get(str(raw).strip().lower())
+            if canonical is None:
+                raise ValueError(f"unknown person {raw!r}: not in her social circle")
+            if canonical not in names:
+                names.append(canonical)
+        if not names:
+            raise ValueError("a social plan needs at least one person")
+        what = (what or "").strip()
+        if not what:
+            raise ValueError("a social plan needs something to do")
+        if duration_min is None or int(duration_min) <= 0:
+            raise ValueError("duration_min must be positive")
+        if at.tzinfo is not None:
+            raise ValueError("at must be a naive datetime on the world clock")
+        now = self._world_clock()()
+        if at < now.replace(minute=0, second=0, microsecond=0):
+            raise ValueError(f"{at.isoformat()} is already past on the world clock")
+        duration_min = int(duration_min)
+
+        self._social.add_plan(names, what, at, duration_min)
+        if at.date() == now.date():
+            last_hour = min(23, (at.hour * 60 + at.minute + duration_min - 1) // 60)
+            for hour in range(at.hour, last_hour + 1):
+                self._daily_planner.set_planned_activity(
+                    hour=hour,
+                    activity_name=what,
+                    location="",
+                    reason="plan with " + ", ".join(names),
+                    now=now,
+                )
+            self._save_plan()
+        self._save_social_expansion()
+        logger.info(f"Social plan added: {at.isoformat()} {what} with {', '.join(names)} ({duration_min} min)")
+
+    def get_upcoming_social_plans(self, within_hours: float) -> List[Dict]:
+        """Plans running now or starting within ``within_hours``, soonest first.
+
+        Each is ``{people, what, at, duration_min}``; ``at`` is a datetime on the
+        world clock.
+        """
+        return self._social.upcoming_plans(self._world_clock()(), within_hours)
 
     # ============= Transit System =============
 
@@ -2923,6 +2994,7 @@ class LifeService:
         # === Social expansion tick ===
         self._social.tick_arcs()
         self._social.tick_obligations()
+        self._social.prune_plans(self._world_clock()())
         self._social.tick_conflicts()
         self._social.recharge_social_battery()
         # Feed overdue obligations into affect stress
@@ -3951,7 +4023,7 @@ class LifeService:
                     context=f"While {activity.name}"
                 )
             # Value alignment with NPC
-            npc = next((n for n in self._social._npcs if n.name == social_event.npc_name), None)
+            npc = self._social._npcs.get(social_event.npc_name)
             if npc:
                 alignment = self._identity.get_npc_value_alignment(npc)
                 arc = self._social._arcs.get(social_event.npc_name)
