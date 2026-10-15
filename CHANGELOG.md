@@ -10,6 +10,7 @@ project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **`ProfileDatabase.set_social_circle(npcs)`** replaces only the `profile_social_circle` rows, in one transaction (rolled back on failure, the old circle kept); no other table or column, timestamps included, is touched. Entries take `name`, `relationship`, `personality` (or `personality_brief`) and `shared_interests`; `contact_frequency` is ignored (derived on load). A running `LifeService` keeps its old circle until it is rebuilt.
 - **The social circle and her plans with it are public API.**
   `LifeService.get_social_circle()` returns `{name, relationship, closeness,
   trend}` dicts, closest first (`closeness` and `trend` are `None` for someone

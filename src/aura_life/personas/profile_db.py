@@ -918,6 +918,52 @@ class ProfileDatabase:
     # Field-level updates
     # ------------------------------------------------------------------
 
+    def set_social_circle(self, npcs: List[Dict]) -> None:
+        """Replace the persona's social circle, and nothing else.
+
+        Deletes every ``profile_social_circle`` row and inserts ``npcs`` in one
+        transaction; no other table or column (``profile_core`` timestamps
+        included) is touched. Each entry is a dict with ``name`` (required,
+        non-blank), ``relationship``, ``personality`` (or ``personality_brief``)
+        and ``shared_interests`` (a string, or a list joined with ``", "``).
+        ``contact_frequency`` is accepted and ignored: it is derived from the
+        relationship when the circle is loaded into a ``LifeService``.
+
+        Raises:
+            ValueError: an entry is not a dict or has no name. Checked before
+                any write, so the old circle is kept.
+            sqlite3.DatabaseError: a write failed; the transaction is rolled
+                back and the old circle is kept.
+
+        A ``LifeService`` already running keeps the circle it was built with;
+        the host must rebuild or restart it to see the new people.
+        """
+        rows = []
+        for npc in npcs:
+            if not isinstance(npc, dict) or not str(npc.get("name", "")).strip():
+                raise ValueError(f"set_social_circle: every entry needs a name, got {npc!r}")
+            interests = npc.get("shared_interests", "")
+            if not isinstance(interests, str):
+                interests = ", ".join(str(i).strip() for i in interests if str(i).strip())
+            personality = npc.get("personality", npc.get("personality_brief", ""))
+            rows.append((str(npc["name"]).strip(), npc.get("relationship", ""), personality, interests))
+
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            conn.execute("DELETE FROM profile_social_circle")
+            conn.executemany(
+                "INSERT INTO profile_social_circle (name, relationship, personality, shared_interests) "
+                "VALUES (?, ?, ?, ?)",
+                rows,
+            )
+            conn.commit()
+        except BaseException:
+            conn.rollback()
+            raise
+        finally:
+            conn.close()
+
     def update_field(self, field: str, value) -> None:
         """Update a single scalar field in profile_core.
 
