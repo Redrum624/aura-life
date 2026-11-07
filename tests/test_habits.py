@@ -31,7 +31,8 @@ from aura_life.world import WorldEnvironment
 #: A simulated Monday, years from any host clock.
 MONDAY = datetime(2031, 3, 10, 0, 0)
 
-#: The bound: a habit moves an activity's chance in any one choice by at most x1.5 up or /1.5 down.
+#: The bound: a habit multiplies an activity's score in a choice by at most x1.5 up or /1.5 down (before the cut, so a
+#: habit can bring an activity into the planner's six or take one out).
 MAX_RATIO = 1.5
 #: Comfort peaks when an activity fills 15% of a part of her day; neutral at twice that, fully stale from three times.
 PEAK_SHARE = 0.15
@@ -45,7 +46,7 @@ HISTORY_CAP = 28 * 72
 
 
 def _factor(signal: float, confidence: float = 1.0) -> float:
-    return MAX_RATIO ** (confidence * signal / 2)
+    return MAX_RATIO ** (confidence * signal)
 
 
 class ScriptedClock:
@@ -166,8 +167,11 @@ def test_the_history_keeps_four_weeks():
         bs.track_activity("reading", at=MONDAY + timedelta(days=day), hour=9)
     last = MONDAY + timedelta(days=39)
     ages = [(last - at).days for _, at, _ in bs.activity_log]
-    assert max(ages) == HISTORY_DAYS
-    assert len(bs.activity_log) == HISTORY_DAYS + 1
+    # Kept: four weeks before the previous tick (so one tick far ahead cannot wipe it); counted: four weeks before now.
+    assert max(ages) == HISTORY_DAYS + 1
+    assert len(bs.activity_log) == HISTORY_DAYS + 2
+    counted = sum(0.5 ** (age / HALF_LIFE_DAYS) for age in range(HISTORY_DAYS + 1))
+    assert bs.habits(last)[0]["count"] == pytest.approx(counted)
 
 
 def test_the_history_is_capped_at_four_weeks_of_twenty_minute_ticks():
@@ -220,12 +224,32 @@ def test_what_she_did_half_a_week_ago_counts_half():
     now = MONDAY + timedelta(days=7)
     _lived(bs, {"reading": 100}, now)
     _lived(bs, {"journaling": 100}, now - timedelta(days=HALF_LIFE_DAYS))
-    _lived(bs, {"yoga": 10}, now + timedelta(days=2))   # dated after `now` (a clock set back): counts as today
+    _lived(bs, {"yoga": 10}, now + timedelta(days=2))   # dated after `now` (a clock set back): not counted at all
     detail = {h["name"]: h for h in bs.habits(now)}
     assert detail["reading"]["count"] == pytest.approx(100.0)
     assert detail["journaling"]["count"] == pytest.approx(50.0)
-    assert detail["yoga"]["count"] == pytest.approx(10.0)
-    assert detail["journaling"]["share"] == pytest.approx(50 / 160)
+    assert "yoga" not in detail
+    assert detail["journaling"]["share"] == pytest.approx(50 / 150)
+
+
+def test_one_tick_with_the_clock_far_ahead_neither_wipes_her_history_nor_counts():
+    bs = BehaviorSystem()
+    for i in range(14 * 72):   # two weeks of her 20-minute tick, her mornings
+        bs.track_activity("reading" if i % 3 else "journaling", at=MONDAY + timedelta(minutes=20 * i), hour=9)
+    last = MONDAY + timedelta(minutes=20 * (14 * 72 - 1))
+    before = bs.habit_factors(last)
+    bs.track_activity("stargazing", at=last + timedelta(days=400), hour=9)   # a bad clock, for one tick
+    bs.track_activity("reading", at=last + timedelta(minutes=20), hour=9)    # the clock back
+    assert len(bs.activity_log) == 14 * 72 + 2
+    after = bs.habit_factors(last + timedelta(minutes=20))
+    assert "stargazing" not in after["morning"]
+    assert after["morning"]["reading"] == pytest.approx(before["morning"]["reading"], abs=0.01)
+    # A real absence of more than four weeks still prunes, by age.
+    later = last + timedelta(days=30)
+    bs.track_activity("yoga", at=later, hour=9)
+    bs.track_activity("yoga", at=later + timedelta(minutes=20), hour=9)
+    assert [name for name, _, _ in bs.activity_log] == ["stargazing", "yoga", "yoga"]
+    assert set(bs.habit_factors(later + timedelta(minutes=20))["morning"]) == {"yoga"}
 
 
 def test_a_new_life_has_no_habits_yet():
@@ -262,8 +286,9 @@ def _record_draws(monkeypatch):
     def spy(candidates, habit):
         before = list(candidates)
         top, weights = real(candidates, habit)
+        base_top, base = real(list(before), None)
         draws.append({"before": before, "top": list(top), "weights": list(weights),
-                      "base": list(real(list(before), None)[1]), "habit": habit})
+                      "base_top": list(base_top), "base": list(base), "habit": habit})
         return top, weights
 
     monkeypatch.setattr(daily_planner, "_slot_draw", spy)
@@ -298,30 +323,53 @@ def test_without_habits_the_planner_draws_exactly_as_before():
     assert [(s.hour, s.activity_name) for s in seeded(habits=neutral).slots] == base
 
 
-@pytest.mark.parametrize("is_ai", [False, True], ids=["human", "ai"])
-def test_a_habit_reweights_a_slots_own_candidates_within_the_bound(monkeypatch, is_ai):
-    draws = _record_draws(monkeypatch)
-    strong = {"reading": MAX_RATIO ** 0.5, "puzzles and games": MAX_RATIO ** -0.5, "daydreaming": MAX_RATIO ** 0.5,
-              "listening to music": MAX_RATIO ** -0.5}
-    habits = {"morning": strong, "afternoon": strong, "evening": strong}
-    random.seed(3)
-    for _ in range(20):
-        _plan(DailyPlanner(occupation="", interests=[], is_ai=is_ai), habits=habits)
+def test_a_habit_can_bring_an_activity_into_the_six_or_take_one_out():
+    tied = [(f"pastime {i}", 1.0, "routine") for i in range(8)]   # eight tied: list order decides the six
+    top, _ = daily_planner._slot_draw(list(tied), None)
+    assert [n for n, _, _ in top] == [f"pastime {i}" for i in range(6)]
+    top, weights = daily_planner._slot_draw(list(tied), {"pastime 7": MAX_RATIO, "pastime 0": 1 / MAX_RATIO})
+    names = [n for n, _, _ in top]
+    assert names[0] == "pastime 7" and "pastime 0" not in names   # in on its habit, out on its staleness
+    assert weights[0] == pytest.approx(MAX_RATIO / (MAX_RATIO + 5))
 
+
+#: Every part of her day its own habits: a slot drawn with another part's would score differently.
+BAND_HABITS = {
+    "morning": {"reading": MAX_RATIO, "puzzles and games": 1 / MAX_RATIO, "yoga": MAX_RATIO},
+    "afternoon": {"daydreaming": MAX_RATIO, "reading": 1 / MAX_RATIO, "relaxing": MAX_RATIO},
+    "evening": {"creating a playlist": 1 / MAX_RATIO, "reading": MAX_RATIO, "stretching": MAX_RATIO},
+}
+
+
+@pytest.mark.parametrize("is_ai", [False, True], ids=["human", "ai"])
+def test_each_slot_draws_with_its_own_part_of_the_day_within_the_bound(monkeypatch, is_ai):
+    draws = _record_draws(monkeypatch)
     moved = 0
-    for d in draws:
-        # The cut is the planner's own: the six best by score, whatever the habit.
-        assert d["top"] == sorted(d["before"], key=lambda c: c[1], reverse=True)[:6]
-        base, weighted = _shares(d["top"], d["base"]), _shares(d["top"], d["weights"])
-        for name, p in base.items():
-            ratio = weighted[name] / p
-            assert 1 / MAX_RATIO - 1e-9 <= ratio <= MAX_RATIO + 1e-9, (name, ratio)
-            moved += abs(ratio - 1) > 0.01
-        for name in ("reading", "daydreaming"):   # favoured: up whenever the draw holds a less favoured one
-            if name in base and any(strong.get(n, 1.0) < strong[name] for n in base):
-                assert weighted[name] > base[name]
-    assert d["habit"] is strong
-    assert moved > 20
+    for seed in range(10):
+        random.seed(seed)
+        start = len(draws)
+        plan = DailyPlanner(occupation="", interests=[], is_ai=is_ai).generate_daily_plan(
+            goals=[], weather=Weather.CLOUDY, available_activities=ACTIVITIES, recent_activity_names=[],
+            habits=BAND_HABITS)
+        # The slots that drew, in the order they were drawn: the free hours of a human day, the AI's daytime hours,
+        # less any that found no candidate at all (the planner's own "free time" fallback, which draws nothing).
+        drawing = set(range(8, 22)) if is_ai else {h for h in range(24) if h not in ANCHOR_HOURS}
+        hours = sorted(s.hour for s in plan.slots if s.hour in drawing and s.reason != "free time")
+        assert len(draws) - start == len(hours)
+        for hour, d in zip(hours, draws[start:]):
+            own = BAND_HABITS[habit_band(hour)]
+            assert d["habit"] is own, hour
+            base_score = {(n, why): s for n, s, why in d["before"]}
+            for n, s, why in d["top"]:
+                factor = s / base_score[(n, why)]
+                assert factor == pytest.approx(own.get(n, 1.0))      # its own part of the day's factor
+                assert 1 / MAX_RATIO - 1e-9 <= factor <= MAX_RATIO + 1e-9
+            # The cut comes after the habit: the six best of the scaled scores.
+            scaled = sorted(((n, s * own.get(n, 1.0), why) for n, s, why in d["before"]), key=lambda c: c[1],
+                            reverse=True)
+            assert d["top"] == scaled[:6]
+            moved += [n for n, _, _ in d["top"]] != [n for n, _, _ in d["base_top"]]
+    assert moved >= 10   # habits do change which six she chooses from
 
 
 # ---------------------------------------------------------------- the simulated week (acceptance)
@@ -383,12 +431,13 @@ def _simulate_weeks(monkeypatch):
 
 
 def _ratio(per_day, day, band, name):
-    """Her chance of `name` over that day's draws with her habits, over the same draws without them."""
+    """Her chance of `name` over that day's draws with her habits, over the same draws without them (each with its
+    own six: the habit's and the planner's)."""
     hab = base = 0.0
     for _, d, b, draw in per_day:
         if d == day and b == band:
             hab += _shares(draw["top"], draw["weights"]).get(name, 0.0)
-            base += _shares(draw["top"], draw["base"]).get(name, 0.0)
+            base += _shares(draw["base_top"], draw["base"]).get(name, 0.0)
     return hab / base, base
 
 
@@ -398,13 +447,13 @@ def test_a_simulated_week_drifts_toward_what_she_repeats_and_away_from_what_she_
     # Day one: no history, no habit -- every draw is the planner's own.
     for _, d, _, draw in per_day:
         if d == 0:
-            assert draw["weights"] == draw["base"]
+            assert draw["top"] == draw["base_top"] and draw["weights"] == draw["base"]
 
-    # The bound holds in every draw of every day, every part of the day.
+    # The bound holds in every draw of every day, every part of the day: no score moved past x1.5 or /1.5.
     for _, _, _, draw in per_day:
-        base, weighted = _shares(draw["top"], draw["base"]), _shares(draw["top"], draw["weights"])
-        for name, p in base.items():
-            assert 1 / MAX_RATIO - 1e-9 <= weighted[name] / p <= MAX_RATIO + 1e-9
+        base_score = {(n, why): s for n, s, why in draw["before"]}
+        for n, s, why in draw["top"]:
+            assert 1 / MAX_RATIO - 1e-9 <= s / base_score[(n, why)] <= MAX_RATIO + 1e-9
 
     # By the end of the week her mornings lean toward the habit and away from the overdone one, and the lean grew.
     repeated = [_ratio(per_day, d, "morning", REPEATED)[0] for d in range(7)]
@@ -413,7 +462,8 @@ def test_a_simulated_week_drifts_toward_what_she_repeats_and_away_from_what_she_
     assert repeated[6] > 1.05
     assert overdone[6] < 0.90
     assert 1.0 < repeated[1] < repeated[6]
-    assert overdone[6] < overdone[1] < 1.0
+    # Its score tied with the others' at the cut, the overdone one leaves her six as soon as its pull turns negative.
+    assert overdone[6] <= overdone[1] < 1.0
 
     # And her days keep their variety: no activity takes over a part of her day.
     for band, counts in planned.items():
@@ -499,3 +549,76 @@ def test_a_catch_up_plan_is_drawn_with_her_habits_but_its_hours_train_none(tmp_p
     replayed = result["activities"]
     assert svc._behavior._activity_history[-len(replayed):] == replayed
     assert svc._behavior.activity_log == dated
+
+
+# ---------------------------------------------------------------- her own picks between slots
+
+def test_her_own_picks_between_slots_lean_the_same_way_before_their_cut(monkeypatch):
+    from aura_life.activities import activity_engine
+    from aura_life.models import TimeOfDay
+    seen = []
+    real = random.choices
+    monkeypatch.setattr(activity_engine.random, "choices",
+                        lambda pop, weights: seen.append((list(pop), list(weights))) or real(pop, weights=weights))
+    engine = ActivityEngine()
+
+    def pick(habit=None):
+        engine._recent_activities = []
+        engine.select_activity(energy_level=0.8, time_of_day=TimeOfDay.MORNING, weather=Weather.CLOUDY,
+                               current_location="home", habit=habit)
+        return seen[-1]
+
+    base_pop, _ = pick()
+    assert len(base_pop) == 5
+    outside = next(a for a in engine.get_all_activities() if a not in base_pop and TimeOfDay.MORNING in a.preferred_times
+                   and "home" in a.suitable_locations and a.min_energy <= 0.8)
+    pop, weights = pick({outside.name: MAX_RATIO, base_pop[0].name: 1 / MAX_RATIO})
+    assert pop[0] is outside                     # her habit brought it into the five
+    assert base_pop[0] not in pop                # the stale one went out
+    assert pick({})[0] == base_pop               # no habit: the 0.4.0 five
+
+
+def test_her_own_picks_use_the_habits_of_her_hour(tmp_path, monkeypatch):
+    clock = ScriptedClock(MONDAY.replace(hour=10))
+    svc = _service(tmp_path / "adhoc.db", WorldEnvironment(now=clock))
+    _lived(svc._behavior, {"daydreaming": 40, "people watching": 20}, MONDAY - timedelta(hours=20), hour=15)
+    _lived(svc._behavior, {"journaling": 40, "reading": 20}, MONDAY - timedelta(hours=20), hour=9)
+    monkeypatch.setattr(svc, "persona_local_hour", lambda: 15)   # her afternoon
+    monkeypatch.setattr(svc._energy, "should_sleep", lambda **kw: False)
+    monkeypatch.setattr(svc._energy, "should_rest", lambda: False)
+    monkeypatch.setattr(svc._desire_system, "should_do_intimate_activity", lambda *a, **k: False)
+    seen = []
+    real = svc._activity_engine.select_activity
+    monkeypatch.setattr(svc._activity_engine, "select_activity", lambda **kw: seen.append(kw) or real(**kw))
+    expected = svc._habit_factors()["afternoon"]   # before the tick dates what she picks
+
+    svc._on_activity_tick()   # no plan yet: her own pick
+
+    assert len(seen) == 1
+    assert seen[0]["habit"] == expected
+    assert "daydreaming" in seen[0]["habit"] and "journaling" not in seen[0]["habit"]
+
+
+# ---------------------------------------------------------------- what the prompt says about her habits
+
+def test_her_patterns_text_says_what_the_planner_draws_with(tmp_path):
+    clock = ScriptedClock(MONDAY.replace(hour=12))
+    svc = _service(tmp_path / "ctx.db", WorldEnvironment(now=clock))
+    for day in range(1, 8):   # a week of mornings, 20 free ticks each: puzzles 40% (overdone), journaling 15%
+        _lived(svc._behavior, {"puzzles and games": 8, "journaling": 3, "reading": 2, "sketching ideas": 2, "yoga": 2,
+                               "making tea": 2, "meditating": 1}, MONDAY.replace(hour=9) - timedelta(days=day), hour=9)
+    factors = svc._habit_factors()["morning"]
+    assert factors["puzzles and games"] < 1.0 < factors["journaling"]   # the planner pushes one away, pulls the other
+
+    text = svc._context_builder._build_behavior_section()
+
+    assert "Puzzles and games has become a comforting" not in text
+    assert "- You've had a lot of puzzles and games lately" in text
+    assert "- Journaling has become a comforting part of your mornings" in text
+
+
+def test_no_dated_history_no_habit_in_her_patterns_text(tmp_path):
+    svc = _service(tmp_path / "ctx0.db", WorldEnvironment(now=ScriptedClock(MONDAY)))
+    for _ in range(40):
+        svc._behavior.track_activity("reading")   # undated: the old routine counters only
+    assert "comforting" not in svc._context_builder._build_behavior_section()

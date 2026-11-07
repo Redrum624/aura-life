@@ -250,19 +250,20 @@ def _slot_draw(
     candidates: List[Tuple[str, float, str]],
     habit: Optional[Dict[str, float]],
 ) -> Tuple[List[Tuple[str, float, str]], List[float]]:
-    """A slot's draw: its best SLOT_DRAW_SIZE candidates by score (sorted in place), and their weights.
+    """A slot's draw: its best SLOT_DRAW_SIZE candidates by score (``candidates`` re-sorted in place), and their
+    weights, each its share of the cut's score.
 
-    A weight is the candidate's share of the cut's score, times its habit factor when ``habit`` (``{activity:
-    factor}`` for this part of her day; a name missing is 1.0) is given. The factor comes after the cut, so a habit
-    reweights the slot's own candidates and never adds or removes one: that keeps its effect on any one choice inside
-    the factor bound (behavior_system's DESIGN VALUES). Without a habit the weights are exactly the 0.4.0 ones.
+    With ``habit`` (``{activity: factor}`` for this part of her day; a name missing is 1.0) every candidate's score
+    is first multiplied by its factor, so a habit can bring an activity into the six or take one out; the factor is
+    the bound (behavior_system's DESIGN VALUES: at most x1.5 or /1.5 on a score). Without a habit the draw is exactly
+    the 0.4.0 one.
     """
+    if habit:
+        candidates[:] = [(name, s * habit.get(name, 1.0), why) for name, s, why in candidates]
     candidates.sort(key=lambda x: x[1], reverse=True)
     top = candidates[:SLOT_DRAW_SIZE]
     total = sum(s for _, s, _ in top)
     weights = [s / total for _, s, _ in top]
-    if habit:
-        weights = [w * habit.get(name, 1.0) for w, (name, _, _) in zip(weights, top)]
     return top, weights
 
 # ============= AI Scheduler: Physical-Activity Exclusions =============

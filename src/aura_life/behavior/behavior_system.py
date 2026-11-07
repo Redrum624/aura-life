@@ -25,26 +25,29 @@ logger = __import__("logging").getLogger(__name__)
 # ---- DESIGN VALUES: habits that drift over days (0.5.0) -------------------------------------------------------------
 # None is measured and none is the owner's yet: the owner's eye sets them. One line each says why.
 #
-# The rule. Per part of her day (habit_band) and activity, her lived ticks of the last weeks are counted, each weighted
-# 0.5 ** (age_days / HABIT_HALF_LIFE_DAYS); `share` is the activity's part of that band's weighted free-time ticks.
+# The rule. Per part of her day (habit_band) and activity, her lived ticks of the last four weeks are counted, each
+# weighted 0.5 ** (age_days / HABIT_HALF_LIFE_DAYS) (a tick dated after `now`, a clock set back, is not counted);
+# `share` is the activity's part of that band's weighted free-time ticks.
 #   comfort   = min(1, share / HABIT_PEAK_SHARE)                  -- what she has done often lately pulls her back
 #   staleness = clamp(share / HABIT_PEAK_SHARE - 1, 0, 2)          -- past the peak, too much of it pushes her away
-#   pull      = comfort - staleness, in [-1, 1]: 0 at no share, +1 at the peak, 0 at twice it, -1 from three times it
-#   factor    = HABIT_MAX_RATIO ** (confidence * pull / 2),  confidence = min(1, band ticks / HABIT_FULL_EVIDENCE)
-# The planner multiplies a candidate's draw weight by its factor AFTER its own top-six cut, so a habit never adds or
-# removes a candidate; every factor lies in [R ** -0.5, R ** 0.5] (R = HABIT_MAX_RATIO), and so does the weighted mean
-# of a draw's factors, hence an activity's chance in any one choice moves by at most x R up or / R down.
+#   pull      = confidence * (comfort - staleness), in [-1, 1]: 0 at no share, +1 at the peak, 0 at twice it, -1 from
+#               three times it;  confidence = min(1, band ticks / HABIT_FULL_EVIDENCE)
+#   factor    = HABIT_MAX_RATIO ** pull, in [1 / R, R] (R = HABIT_MAX_RATIO)
+# The planner (and her own picks between slots) multiplies a candidate's SCORE by its factor before its cut to the best
+# few, so a habit can bring an activity into the choice or take one out; the bound is on the score: x R up, / R down.
 
 # What she did 3.5 days ago counts half as much as today: a habit builds and fades on the scale of a week, not a day.
 HABIT_HALF_LIFE_DAYS = 3.5
 # Comfort peaks when an activity fills 15% of a part of her day lately (about 40 minutes of a four-hour morning, daily).
 HABIT_PEAK_SHARE = 0.15
-# A habit moves an activity's chance in any one choice by at most x1.5 up or /1.5 down: her days shift, never lock.
+# A habit multiplies an activity's score in a choice by at most x1.5 up or /1.5 down: her days shift, never lock.
 HABIT_MAX_RATIO = 1.5
 # Full strength once a part of her day holds 60 weighted ticks (20 hours of free time in it): habits form over a week.
 HABIT_FULL_EVIDENCE = 60.0
 # The dated history keeps four weeks: at the half-life an older tick would weigh under 0.4%.
 HABIT_HISTORY_DAYS = 28
+# The prompt names a habit once its pull is half its full strength either way (comforting, or had a lot of it lately).
+HABIT_SHOWN_PULL = 0.5
 
 
 def habit_band(hour: int) -> str:
@@ -125,8 +128,11 @@ class BehaviorSystem:
         nothing is dated: a catch-up replays hours she did not live, and habits must not learn from them.
         """
         if at is not None:
+            newest = max((e[1] for e in self._activity_log), default=at)
             self._activity_log.append((activity_name, at, at.hour if hour is None else int(hour)))
-            cutoff = at - timedelta(days=HABIT_HISTORY_DAYS)
+            # Pruned by age: four weeks older than this tick AND than the newest before it, so one tick with the clock
+            # far ahead cannot wipe her history (a real absence prunes it from the tick after).
+            cutoff = min(at, newest) - timedelta(days=HABIT_HISTORY_DAYS)
             self._activity_log = [e for e in self._activity_log if e[1] >= cutoff][-self.MAX_ACTIVITY_LOG:]
         self._activity_history.append(activity_name)
         self._activity_history = self._activity_history[-50:]  # Keep last 50
@@ -189,15 +195,16 @@ class BehaviorSystem:
 
     def habits(self, now: datetime, exclude: Iterable[str] = ()) -> List[dict]:
         """Her habits at ``now`` (world clock), one dict per part of her day and activity she has lived in it:
-        ``band``, ``name``, ``count`` (decayed ticks), ``share``, ``comfort``, ``staleness``, ``factor`` (the rule is
-        in the DESIGN VALUES block above). ``exclude`` names activities no habit forms on (day anchors, sleep): they
-        are left out of the shares too."""
+        ``band``, ``name``, ``count`` (decayed ticks), ``share``, ``comfort``, ``staleness``, ``pull``, ``factor``
+        (the rule is in the DESIGN VALUES block above). ``exclude`` names activities no habit forms on (day anchors,
+        sleep): they are left out of the shares too. Ticks dated after ``now`` or over four weeks before it count
+        for nothing."""
         skip = set(exclude)
         counts: Dict[str, Dict[str, float]] = {}
         for name, at, hour in self._activity_log:
-            if name in skip:
+            age_days = (now - at).total_seconds() / 86400.0
+            if name in skip or not 0.0 <= age_days <= HABIT_HISTORY_DAYS:
                 continue
-            age_days = max(0.0, (now - at).total_seconds() / 86400.0)
             band = counts.setdefault(habit_band(hour), {})
             band[name] = band.get(name, 0.0) + 0.5 ** (age_days / HABIT_HALF_LIFE_DAYS)
         out = []
@@ -208,10 +215,11 @@ class BehaviorSystem:
                 share = count / total
                 comfort = min(1.0, share / HABIT_PEAK_SHARE)
                 staleness = min(2.0, max(0.0, share / HABIT_PEAK_SHARE - 1.0))
+                pull = confidence * (comfort - staleness)
                 out.append({
                     "band": band, "name": name, "count": count, "share": share,
-                    "comfort": comfort, "staleness": staleness,
-                    "factor": HABIT_MAX_RATIO ** (confidence * (comfort - staleness) / 2.0),
+                    "comfort": comfort, "staleness": staleness, "pull": pull,
+                    "factor": HABIT_MAX_RATIO ** pull,
                 })
         return out
 

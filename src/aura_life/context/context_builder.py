@@ -34,6 +34,8 @@ from ..activities import ActivityEngine
 from ..goals import GoalEngine
 from ..intimacy import DesireSystem
 from ..social import SocialSystem
+from ..behavior.behavior_system import HABIT_SHOWN_PULL
+from ..planner.daily_planner import NOT_HABIT_FORMING
 
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
@@ -994,16 +996,24 @@ class LifeContextBuilder:
     # ============= Behavior Section =============
 
     def _build_behavior_section(self) -> str:
-        """Build behavior section — routines and creative output."""
+        """Build behavior section — her habits and creative output.
+
+        The habits are the ones her planner draws with (``BehaviorSystem.habits``
+        on the service's world clock, the day anchors left out), so the prompt and
+        the plan agree: what pulls her (``HABIT_SHOWN_PULL`` or more) is a
+        comforting part of that part of her day, what pushes her away as much is
+        something she has had a lot of lately -- never the one for the other.
+        """
         if not self._behavior:
             return ""
         lines = []
-        routines = self._behavior.get_established_routines(2)
-        for r in routines:
-            if r.staleness > 0.5:
-                lines.append(f"- Your {r.name} routine is feeling stale")
-            elif r.comfort_level > 0.6:
-                lines.append(f"- {r.name.capitalize()} has become a comforting part of your day")
+        clock = getattr(self._life_service, "_world_clock", None)
+        now = clock()() if callable(clock) else datetime.now()
+        habits = sorted(self._behavior.habits(now, exclude=NOT_HABIT_FORMING), key=lambda h: h["pull"], reverse=True)
+        for h in [h for h in habits if h["pull"] >= HABIT_SHOWN_PULL][:2]:
+            lines.append(f"- {h['name'].capitalize()} has become a comforting part of your {h['band']}s")
+        for h in [h for h in reversed(habits) if h["pull"] <= -HABIT_SHOWN_PULL][:1]:
+            lines.append(f"- You've had a lot of {h['name']} lately")
         artifacts = self._behavior.get_recent_artifacts(1)
         if artifacts:
             a = artifacts[0]

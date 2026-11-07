@@ -6,7 +6,7 @@ Manages the persona's activities: selection, execution, and narrative generation
 
 import random
 from datetime import datetime
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from ..models import (
     Activity,
@@ -1073,6 +1073,7 @@ class ActivityEngine:
         force_rest: bool = False,
         season: Optional[Season] = None,
         salient_values: Optional[List[dict]] = None,
+        habit: Optional[Dict[str, float]] = None,
     ) -> Optional[Activity]:
         """
         Select an appropriate activity based on current state.
@@ -1080,6 +1081,9 @@ class ActivityEngine:
         Args:
             salient_values: Optional list of {"name", "salience", "aligned_tags"} dicts
                 from IdentitySystem for value-influenced scoring.
+            habit: Optional {activity: factor} for this part of her day
+                (BehaviorSystem.habit_factors): each score is multiplied by its
+                factor before the cut to the best five, as the planner does.
 
         Returns None if no suitable activity found.
         """
@@ -1098,6 +1102,8 @@ class ActivityEngine:
                 salient_values,
             )
             if score > 0:
+                if habit:
+                    score *= habit.get(activity.name, 1.0)
                 candidates.append((activity, score))
 
         if not candidates:

@@ -44,6 +44,7 @@ from .activities import ActivityEngine
 from .goals import GoalEngine
 from .planner import DailyPlanner
 from .planner.daily_planner import NOT_HABIT_FORMING, PHYSICAL_ACTIVITIES, SOCIAL_PLAN_REASON_PREFIX
+from .behavior.behavior_system import habit_band
 from aura_life.conversation_session import ConversationSession
 from aura_life.planner.daily_planner import is_important_activity
 from .scheduler import LifeScheduler
@@ -3869,6 +3870,7 @@ class LifeService:
                 force_rest=force_rest,
                 season=self._world.season,
                 salient_values=salient_vals,
+                habit=self._habit_factors().get(habit_band(self.persona_local_hour())),
             )
 
         if not activity:
