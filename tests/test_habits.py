@@ -464,6 +464,13 @@ def test_a_simulated_week_drifts_toward_what_she_repeats_and_away_from_what_she_
     assert 1.0 < repeated[1] < repeated[6]
     # Its score tied with the others' at the cut, the overdone one leaves her six as soon as its pull turns negative.
     assert overdone[6] <= overdone[1] < 1.0
+    # Her habit acts before the cut: it brings the repeated one into morning choices the planner alone would not offer
+    # it in, and takes the overdone one out of choices it would.
+    def names(top):
+        return {n for n, _, _ in top}
+    mornings = [draw for _, d, b, draw in per_day if d >= 1 and b == "morning"]
+    assert sum(REPEATED in names(dr["top"]) and REPEATED not in names(dr["base_top"]) for dr in mornings) >= 10
+    assert sum(OVERDONE in names(dr["base_top"]) and OVERDONE not in names(dr["top"]) for dr in mornings) >= 10
 
     # And her days keep their variety: no activity takes over a part of her day.
     for band, counts in planned.items():
@@ -604,9 +611,13 @@ def test_her_own_picks_use_the_habits_of_her_hour(tmp_path, monkeypatch):
 def test_her_patterns_text_says_what_the_planner_draws_with(tmp_path):
     clock = ScriptedClock(MONDAY.replace(hour=12))
     svc = _service(tmp_path / "ctx.db", WorldEnvironment(now=clock))
-    for day in range(1, 8):   # a week of mornings, 20 free ticks each: puzzles 40% (overdone), journaling 15%
-        _lived(svc._behavior, {"puzzles and games": 8, "journaling": 3, "reading": 2, "sketching ideas": 2, "yoga": 2,
-                               "making tea": 2, "meditating": 1}, MONDAY.replace(hour=9) - timedelta(days=day), hour=9)
+    # A week of mornings, 20 free ticks each: puzzles 40% (overdone: full comfort, more staleness), journaling 15% (the
+    # peak), nine others at 5% (a third of the comfort, too little to name).
+    others = ["reading", "sketching ideas", "yoga", "making tea", "meditating", "listening to music", "daydreaming",
+              "learning something new", "tending to plants"]
+    for day in range(1, 8):
+        _lived(svc._behavior, {"puzzles and games": 8, "journaling": 3, **{n: 1 for n in others}},
+               MONDAY.replace(hour=9) - timedelta(days=day), hour=9)
     factors = svc._habit_factors()["morning"]
     assert factors["puzzles and games"] < 1.0 < factors["journaling"]   # the planner pushes one away, pulls the other
 
