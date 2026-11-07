@@ -45,8 +45,10 @@ HISTORY_DAYS = 28
 HISTORY_CAP = 28 * 72
 
 
-def _factor(signal: float, confidence: float = 1.0) -> float:
-    return MAX_RATIO ** (confidence * signal)
+def _pair(comfort: float, staleness: float, confidence: float = 1.0) -> tuple:
+    """(raise, damp): a positive pull raises the score before the cut, a negative one damps the weight after it."""
+    pull = confidence * (comfort - staleness)
+    return MAX_RATIO ** max(0.0, pull), MAX_RATIO ** min(0.0, pull)
 
 
 class ScriptedClock:
@@ -204,11 +206,11 @@ def test_comfort_rises_to_its_peak_then_staleness_takes_the_pull_away():
     _lived(bs, {"journaling": 30, "reading": 60, "puzzles and games": 90, "yoga": 15, "making tea": 5}, now)
 
     morning = bs.habit_factors(now)["morning"]
-    assert morning["journaling"] == pytest.approx(_factor(1.0))         # at the peak: the full pull
-    assert morning["reading"] == pytest.approx(_factor(0.0))            # twice the peak: neutral
-    assert morning["puzzles and games"] == pytest.approx(_factor(-1.0))  # three times: fully stale
-    assert morning["yoga"] == pytest.approx(_factor(0.5))
-    assert morning["making tea"] == pytest.approx(_factor(0.025 / PEAK_SHARE))
+    assert morning["journaling"] == pytest.approx(_pair(1.0, 0.0))      # at the peak: the full pull
+    assert morning["reading"] == pytest.approx(_pair(1.0, 1.0))         # twice the peak: no damp yet
+    assert morning["puzzles and games"] == pytest.approx(_pair(1.0, 2.0))  # three times: fully stale
+    assert morning["yoga"] == pytest.approx(_pair(0.5, 0.0))
+    assert morning["making tea"] == pytest.approx(_pair(0.025 / PEAK_SHARE, 0.0))
 
     detail = {h["name"]: h for h in bs.habits(now) if h["band"] == "morning"}
     assert detail["journaling"]["comfort"] == pytest.approx(1.0)
@@ -256,10 +258,10 @@ def test_a_new_life_has_no_habits_yet():
     bs = BehaviorSystem()
     now = MONDAY.replace(hour=10)
     bs.track_activity("reading", at=now, hour=9)   # one tick: a share of 100%, but no evidence
-    assert bs.habit_factors(now)["morning"]["reading"] == pytest.approx(_factor(-1.0, 1 / FULL_EVIDENCE))
+    assert bs.habit_factors(now)["morning"]["reading"] == pytest.approx(_pair(1.0, 2.0, 1 / FULL_EVIDENCE))
     bs = BehaviorSystem()
     _lived(bs, {"reading": 30}, now)               # half the evidence: half the pull
-    assert bs.habit_factors(now)["morning"]["reading"] == pytest.approx(_factor(-1.0, 0.5))
+    assert bs.habit_factors(now)["morning"]["reading"] == pytest.approx(_pair(1.0, 2.0, 0.5))
 
 
 def test_the_day_anchors_and_sleep_form_no_habit():
@@ -268,7 +270,7 @@ def test_the_day_anchors_and_sleep_form_no_habit():
     _lived(bs, {"having breakfast": 100, "sleeping": 50, "reading": 30, "sketching ideas": 170}, now)
     morning = bs.habit_factors(now, exclude=NOT_HABIT_FORMING)["morning"]
     assert "having breakfast" not in morning and "sleeping" not in morning
-    assert morning["reading"] == pytest.approx(_factor(1.0))   # 30 of her 200 free ticks: the peak
+    assert morning["reading"] == pytest.approx(_pair(1.0, 0.0))   # 30 of her 200 free ticks: the peak
     assert NOT_HABIT_FORMING >= {"waking up", "having breakfast", "having lunch", "having dinner",
                                  "getting ready for bed", "working", "commuting", "sleeping", "napping"}
 
@@ -319,25 +321,27 @@ def test_without_habits_the_planner_draws_exactly_as_before():
     base = [(s.hour, s.activity_name) for s in seeded().slots]
     assert [(s.hour, s.activity_name) for s in seeded(habits=None).slots] == base
     assert [(s.hour, s.activity_name) for s in seeded(habits={}).slots] == base
-    neutral = {"morning": {"reading": 1.0}, "afternoon": {"reading": 1.0}, "evening": {"reading": 1.0}}
+    neutral = {"morning": {"reading": (1.0, 1.0)}, "afternoon": {"reading": (1.0, 1.0)}, "evening": {"reading": (1.0, 1.0)}}
     assert [(s.hour, s.activity_name) for s in seeded(habits=neutral).slots] == base
 
 
-def test_a_habit_can_bring_an_activity_into_the_six_or_take_one_out():
+def test_comfort_can_bring_an_activity_into_the_six_and_staleness_only_dampens():
     tied = [(f"pastime {i}", 1.0, "routine") for i in range(8)]   # eight tied: list order decides the six
     top, _ = daily_planner._slot_draw(list(tied), None)
     assert [n for n, _, _ in top] == [f"pastime {i}" for i in range(6)]
-    top, weights = daily_planner._slot_draw(list(tied), {"pastime 7": MAX_RATIO, "pastime 0": 1 / MAX_RATIO})
+    top, weights = daily_planner._slot_draw(list(tied), {"pastime 7": (MAX_RATIO, 1.0), "pastime 5": (1.0, 1 / MAX_RATIO)})
     names = [n for n, _, _ in top]
-    assert names[0] == "pastime 7" and "pastime 0" not in names   # in on its habit, out on its staleness
-    assert weights[0] == pytest.approx(MAX_RATIO / (MAX_RATIO + 5))
+    assert names[0] == "pastime 7"            # in on its habit (its score x1.5, before the cut)
+    assert "pastime 5" in names               # last of the six: staleness and comfort never take it out...
+    chance = dict(zip(names, (w / sum(weights) for w in weights)))
+    assert chance["pastime 5"] == pytest.approx((1 / MAX_RATIO) / (MAX_RATIO + 1 / MAX_RATIO + 4))   # ...only /1.5
 
 
 #: Every part of her day its own habits: a slot drawn with another part's would score differently.
 BAND_HABITS = {
-    "morning": {"reading": MAX_RATIO, "puzzles and games": 1 / MAX_RATIO, "yoga": MAX_RATIO},
-    "afternoon": {"daydreaming": MAX_RATIO, "reading": 1 / MAX_RATIO, "relaxing": MAX_RATIO},
-    "evening": {"creating a playlist": 1 / MAX_RATIO, "reading": MAX_RATIO, "stretching": MAX_RATIO},
+    "morning": {"reading": (MAX_RATIO, 1.0), "puzzles and games": (1.0, 1 / MAX_RATIO), "yoga": (MAX_RATIO, 1.0)},
+    "afternoon": {"daydreaming": (MAX_RATIO, 1.0), "reading": (MAX_RATIO, 1 / MAX_RATIO), "relaxing": (1.2, 1.0)},
+    "evening": {"creating a playlist": (1.0, 1 / MAX_RATIO), "reading": (MAX_RATIO, 1.0), "stretching": (MAX_RATIO, 1.0)},
 }
 
 
@@ -360,14 +364,20 @@ def test_each_slot_draws_with_its_own_part_of_the_day_within_the_bound(monkeypat
             own = BAND_HABITS[habit_band(hour)]
             assert d["habit"] is own, hour
             base_score = {(n, why): s for n, s, why in d["before"]}
-            for n, s, why in d["top"]:
-                factor = s / base_score[(n, why)]
-                assert factor == pytest.approx(own.get(n, 1.0))      # its own part of the day's factor
-                assert 1 / MAX_RATIO - 1e-9 <= factor <= MAX_RATIO + 1e-9
-            # The cut comes after the habit: the six best of the scaled scores.
-            scaled = sorted(((n, s * own.get(n, 1.0), why) for n, s, why in d["before"]), key=lambda c: c[1],
-                            reverse=True)
-            assert d["top"] == scaled[:6]
+            total = sum(s for _, s, _ in d["top"])
+            for (n, s, why), w in zip(d["top"], d["weights"]):
+                comfort = s / base_score[(n, why)]
+                assert comfort == pytest.approx(own.get(n, (1.0, 1.0))[0])   # its own part of the day's comfort...
+                assert w == pytest.approx(s / total * own.get(n, (1.0, 1.0))[1])   # ...and staleness
+                assert 1.0 - 1e-9 <= comfort <= MAX_RATIO + 1e-9
+            # The cut comes after the comfort, before the staleness: a damped one of the planner's own six stays in it,
+            # the others are the best of the comfort-raised scores.
+            top = {(n, why) for n, _, why in d["top"]}
+            kept = {(n, why) for n, _, why in d["base_top"] if own.get(n, (1.0, 1.0))[1] < 1.0}
+            assert kept <= top
+            scaled = sorted(((n, s * own.get(n, (1.0, 1.0))[0], why) for n, s, why in d["before"]
+                             if (n, why) not in kept), key=lambda c: c[1], reverse=True)
+            assert top - kept == {(n, why) for n, _, why in scaled[:6 - len(kept)]}
             moved += [n for n, _, _ in d["top"]] != [n for n, _, _ in d["base_top"]]
     assert moved >= 10   # habits do change which six she chooses from
 
@@ -385,6 +395,8 @@ WEEKS = 30
 SEED_BASE = 1000   # the weeks are seeded: the run is the same every time
 #: No activity takes more than a quarter of a part of her day's planned slots over a week.
 VARIETY_CAP = 0.25
+#: The overdone one keeps at least half its no-habit chance in her morning choices, every day of the week.
+OVERDONE_FLOOR = 0.5
 
 
 #: The day's anchors for the default schedule (wake 7, bed 23, no work): waking up, breakfast, lunch, dinner, bed.
@@ -449,11 +461,14 @@ def test_a_simulated_week_drifts_toward_what_she_repeats_and_away_from_what_she_
         if d == 0:
             assert draw["top"] == draw["base_top"] and draw["weights"] == draw["base"]
 
-    # The bound holds in every draw of every day, every part of the day: no score moved past x1.5 or /1.5.
+    # The bound holds in every draw of every day, every part of the day: no score raised past x1.5, no weight lowered
+    # past /1.5 (its share of the six's scores, times its staleness).
     for _, _, _, draw in per_day:
         base_score = {(n, why): s for n, s, why in draw["before"]}
-        for n, s, why in draw["top"]:
-            assert 1 / MAX_RATIO - 1e-9 <= s / base_score[(n, why)] <= MAX_RATIO + 1e-9
+        total = sum(s for _, s, _ in draw["top"])
+        for (n, s, why), w in zip(draw["top"], draw["weights"]):
+            assert 1.0 - 1e-9 <= s / base_score[(n, why)] <= MAX_RATIO + 1e-9
+            assert 1 / MAX_RATIO - 1e-9 <= w / (s / total) <= 1.0 + 1e-9
 
     # By the end of the week her mornings lean toward the habit and away from the overdone one, and the lean grew.
     repeated = [_ratio(per_day, d, "morning", REPEATED)[0] for d in range(7)]
@@ -462,15 +477,16 @@ def test_a_simulated_week_drifts_toward_what_she_repeats_and_away_from_what_she_
     assert repeated[6] > 1.05
     assert overdone[6] < 0.90
     assert 1.0 < repeated[1] < repeated[6]
-    # Its score tied with the others' at the cut, the overdone one leaves her six as soon as its pull turns negative.
-    assert overdone[6] <= overdone[1] < 1.0
-    # Her habit acts before the cut: it brings the repeated one into morning choices the planner alone would not offer
-    # it in, and takes the overdone one out of choices it would.
+    # The overdone one is dampened, never erased: its chance falls day by day and stays above the floor.
+    assert overdone[6] < overdone[1] < 1.0
+    assert min(overdone) >= OVERDONE_FLOOR
+    # Comfort acts before the cut: it brings the repeated one into morning choices the planner alone would not offer
+    # it in; staleness acts after it: the overdone one stays in every six the planner alone would put it in.
     def names(top):
         return {n for n, _, _ in top}
     mornings = [draw for _, d, b, draw in per_day if d >= 1 and b == "morning"]
     assert sum(REPEATED in names(dr["top"]) and REPEATED not in names(dr["base_top"]) for dr in mornings) >= 10
-    assert sum(OVERDONE in names(dr["base_top"]) and OVERDONE not in names(dr["top"]) for dr in mornings) >= 10
+    assert all(OVERDONE in names(dr["top"]) for dr in mornings if OVERDONE in names(dr["base_top"]))
 
     # And her days keep their variety: no activity takes over a part of her day.
     for band, counts in planned.items():
@@ -575,13 +591,17 @@ def test_her_own_picks_between_slots_lean_the_same_way_before_their_cut(monkeypa
                                current_location="home", habit=habit)
         return seen[-1]
 
-    base_pop, _ = pick()
+    base_pop, base_weights = pick()
     assert len(base_pop) == 5
     outside = next(a for a in engine.get_all_activities() if a not in base_pop and TimeOfDay.MORNING in a.preferred_times
                    and "home" in a.suitable_locations and a.min_energy <= 0.8)
-    pop, weights = pick({outside.name: MAX_RATIO, base_pop[0].name: 1 / MAX_RATIO})
-    assert pop[0] is outside                     # her habit brought it into the five
-    assert base_pop[0] not in pop                # the stale one went out
+    pop, weights = pick({outside.name: (MAX_RATIO, 1.0), base_pop[4].name: (1.0, 1 / MAX_RATIO)})
+    assert pop[0] is outside                     # her comfort brought it into the five (its score, before the cut)
+    assert base_pop[4] in pop                    # the stale one, last of the five, stays in it...
+    stale, hab = base_pop[4].name, dict(zip((a.name for a in pop), weights))
+    base = dict(zip((a.name for a in base_pop), base_weights))
+    plain = next(n for n in hab if n in base and n != stale)
+    assert hab[stale] / hab[plain] == pytest.approx(base[stale] / base[plain] / MAX_RATIO)   # ...its weight /1.5
     assert pick({})[0] == base_pop               # no habit: the 0.4.0 five
 
 
@@ -619,13 +639,32 @@ def test_her_patterns_text_says_what_the_planner_draws_with(tmp_path):
         _lived(svc._behavior, {"puzzles and games": 8, "journaling": 3, **{n: 1 for n in others}},
                MONDAY.replace(hour=9) - timedelta(days=day), hour=9)
     factors = svc._habit_factors()["morning"]
-    assert factors["puzzles and games"] < 1.0 < factors["journaling"]   # the planner pushes one away, pulls the other
+    assert factors["puzzles and games"][1] < 1.0 < factors["journaling"][0]   # the planner damps one, raises the other
 
     text = svc._context_builder._build_behavior_section()
 
     assert "Puzzles and games has become a comforting" not in text
     assert "- You've had a lot of puzzles and games lately" in text
     assert "- Journaling has become a comforting part of your mornings" in text
+
+
+def test_her_exported_routines_are_the_same_habits(tmp_path):
+    clock = ScriptedClock(MONDAY.replace(hour=12))
+    svc = _service(tmp_path / "export.db", WorldEnvironment(now=clock))
+    others = ["reading", "sketching ideas", "yoga", "making tea", "meditating", "listening to music", "daydreaming",
+              "learning something new", "tending to plants"]
+    for day in range(1, 8):
+        _lived(svc._behavior, {"puzzles and games": 8, "journaling": 3, "having breakfast": 3, **{n: 1 for n in others}},
+               MONDAY.replace(hour=9) - timedelta(days=day), hour=9)
+    routines = svc.export_outer_state()["behavior"]["routines"]
+    assert [r["name"] for r in routines] == ["journaling"]          # comforting; not the overdone, not an anchor
+    assert routines[0]["band"] == "morning"
+    journaling = next(h for h in svc._behavior.habits(clock(), NOT_HABIT_FORMING) if h["name"] == "journaling")
+    assert routines[0]["comfort"] == pytest.approx(round(journaling["pull"], 2))
+    fresh = BehaviorSystem()
+    for _ in range(40):
+        fresh.track_activity("reading")                               # old counters only: nothing to export
+    assert fresh.export_state(MONDAY)["routines"] == []
 
 
 def test_no_dated_history_no_habit_in_her_patterns_text(tmp_path):

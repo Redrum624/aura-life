@@ -1599,7 +1599,7 @@ class LifeService:
                 "current_show": self._media.current_show,
                 "current_music": self._media.current_music_obsession,
             },
-            "behavior": self._behavior.export_state(),
+            "behavior": self._behavior.export_state(self._world_clock()(), exclude=NOT_HABIT_FORMING),
             "expression": self._expression.export_state(),
             "skills": self._skills_system.export_state(),
         }

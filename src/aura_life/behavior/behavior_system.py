@@ -32,9 +32,11 @@ logger = __import__("logging").getLogger(__name__)
 #   staleness = clamp(share / HABIT_PEAK_SHARE - 1, 0, 2)          -- past the peak, too much of it pushes her away
 #   pull      = confidence * (comfort - staleness), in [-1, 1]: 0 at no share, +1 at the peak, 0 at twice it, -1 from
 #               three times it;  confidence = min(1, band ticks / HABIT_FULL_EVIDENCE)
-#   factor    = HABIT_MAX_RATIO ** pull, in [1 / R, R] (R = HABIT_MAX_RATIO)
-# The planner (and her own picks between slots) multiplies a candidate's SCORE by its factor before its cut to the best
-# few, so a habit can bring an activity into the choice or take one out; the bound is on the score: x R up, / R down.
+#   factor    = R ** pull (R = HABIT_MAX_RATIO): raise = max(1, factor) in [1, R], damp = min(1, factor) in [1 / R, 1]
+# The planner (and her own picks between slots) multiplies a candidate's SCORE by its raise before its cut to the best
+# few, so comfort can bring an activity into the choice; it multiplies the WEIGHT by its damp after the cut, and a
+# damped activity in the planner's own few keeps its place there, so staleness lowers an activity's chance by at most
+# / R and nothing pushes it out: what she overdid is dampened, never erased.
 
 # What she did 3.5 days ago counts half as much as today: a habit builds and fades on the scale of a week, not a day.
 HABIT_HALF_LIFE_DAYS = 3.5
@@ -219,15 +221,18 @@ class BehaviorSystem:
                 out.append({
                     "band": band, "name": name, "count": count, "share": share,
                     "comfort": comfort, "staleness": staleness, "pull": pull,
+                    "raise": HABIT_MAX_RATIO ** max(0.0, pull),
+                    "damp": HABIT_MAX_RATIO ** min(0.0, pull),
                     "factor": HABIT_MAX_RATIO ** pull,
                 })
         return out
 
-    def habit_factors(self, now: datetime, exclude: Iterable[str] = ()) -> Dict[str, Dict[str, float]]:
-        """``{band: {activity: factor}}`` at ``now``, for the planner; an activity or band missing is neutral (1.0)."""
-        out: Dict[str, Dict[str, float]] = {}
+    def habit_factors(self, now: datetime, exclude: Iterable[str] = ()) -> Dict[str, Dict[str, Tuple[float, float]]]:
+        """``{band: {activity: (raise, damp)}}`` at ``now``, for the planner and her own picks: the raise multiplies
+        the score before the cut, the damp the weight after it; an activity or band missing is neutral (1.0, 1.0)."""
+        out: Dict[str, Dict[str, Tuple[float, float]]] = {}
         for h in self.habits(now, exclude):
-            out.setdefault(h["band"], {})[h["name"]] = h["factor"]
+            out.setdefault(h["band"], {})[h["name"]] = (h["raise"], h["damp"])
         return out
 
     # ============= Creative Output =============
@@ -343,12 +348,16 @@ class BehaviorSystem:
 
     # ============= Export / Serialize =============
 
-    def export_state(self) -> dict:
-        """Structured export for pipeline digest."""
+    def export_state(self, now: Optional[datetime] = None, exclude: Iterable[str] = ()) -> dict:
+        """Structured export for pipeline digest. ``routines`` are her habits at ``now`` (world clock; default the
+        host's), the same the planner draws with and the prompt names: the (at most two) comforting ones, ``comfort``
+        being the pull (``HABIT_SHOWN_PULL`` or more), with their part of the day."""
+        comforting = sorted((h for h in self.habits(now or datetime.now(), exclude) if h["pull"] >= HABIT_SHOWN_PULL),
+                            key=lambda h: h["pull"], reverse=True)[:2]
         return {
             "routines": [
-                {"name": r.name, "comfort": round(r.comfort_level, 2)}
-                for r in self.get_established_routines(2)
+                {"name": h["name"], "band": h["band"], "comfort": round(h["pull"], 2)}
+                for h in comforting
             ],
             "recent_creations": [
                 {"type": a.artifact_type, "title": a.title}

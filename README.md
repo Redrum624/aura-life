@@ -235,7 +235,7 @@ each other directly.
 | `money` | A light evolving ledger: income, purchases, financial stress. |
 | `persona_evolution` | Slow personality drift from lived experience, bounded by a maximum drift. |
 | `personas` | The persona pipeline: genre randomisation, personality configuration, the profile database and parser, place and appearance generation. |
-| `planner` | The daily plan — generated once a day, followed through, revised on user command; each hobby slot candidate's score scaled by her habits for that part of the day (×1.5 up, ÷1.5 down at most) before the cut to six, as are her own picks between slots. |
+| `planner` | The daily plan — generated once a day, followed through, revised on user command; for each hobby slot her habits for that part of the day raise a familiar activity's score before the cut to six (×1.5 at most) and lower an overdone one's weight after it (÷1.5 at most, never out of the six), as for her own picks between slots. |
 | `sanity` | The one interior number that integrates the others and can break: a per-persona baseline, blows down, recoveries up, drift on the world clock, a graded word (`sound` to `broken`) the rest couples to. |
 | `scheduler` | The tick loop. APScheduler-backed when the extra is installed; `force_all_ticks()` either way. |
 | `shadow` | The darker inner psychology: felt insecurity, temptation and transgression, secrets. |

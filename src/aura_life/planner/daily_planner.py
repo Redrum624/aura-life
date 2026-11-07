@@ -246,25 +246,35 @@ ROUTINE_ACTIVITIES = {
 NOT_HABIT_FORMING = frozenset(ROUTINE_ACTIVITIES | {"sleeping", "napping"})
 
 
+_NO_HABIT = (1.0, 1.0)
+
+
 def _slot_draw(
     candidates: List[Tuple[str, float, str]],
-    habit: Optional[Dict[str, float]],
+    habit: Optional[Dict[str, Tuple[float, float]]],
 ) -> Tuple[List[Tuple[str, float, str]], List[float]]:
     """A slot's draw: its best SLOT_DRAW_SIZE candidates by score (``candidates`` re-sorted in place), and their
     weights, each its share of the cut's score.
 
-    With ``habit`` (``{activity: factor}`` for this part of her day; a name missing is 1.0) every candidate's score
-    is first multiplied by its factor, so a habit can bring an activity into the six or take one out; the factor is
-    the bound (behavior_system's DESIGN VALUES: at most x1.5 or /1.5 on a score). Without a habit the draw is exactly
-    the 0.4.0 one.
+    With ``habit`` (``{activity: (raise, damp)}`` for this part of her day; a name missing is neutral) the raise
+    (comfort, x1 to x1.5) first multiplies the candidate's score, so a habit can bring an activity into the six; the
+    damp (staleness, /1.5 to x1) multiplies its weight after the cut, and a damped candidate the planner alone would
+    have put in the six keeps its place there, so staleness lowers its chance by at most /1.5 and nothing pushes it
+    out (behavior_system's DESIGN VALUES). Without a habit the draw is exactly the 0.4.0 one.
     """
-    if habit:
-        candidates[:] = [(name, s * habit.get(name, 1.0), why) for name, s, why in candidates]
+    if not habit:
+        candidates.sort(key=lambda x: x[1], reverse=True)
+        top = candidates[:SLOT_DRAW_SIZE]
+        total = sum(s for _, s, _ in top)
+        return top, [s / total for _, s, _ in top]
+    own = sorted(candidates, key=lambda x: x[1], reverse=True)[:SLOT_DRAW_SIZE]
+    kept = {(name, why) for name, _, why in own if habit.get(name, _NO_HABIT)[1] < 1.0}
+    candidates[:] = [(name, s * habit.get(name, _NO_HABIT)[0], why) for name, s, why in candidates]
     candidates.sort(key=lambda x: x[1], reverse=True)
-    top = candidates[:SLOT_DRAW_SIZE]
+    rest = [c for c in candidates if (c[0], c[2]) not in kept][:SLOT_DRAW_SIZE - len(kept)]
+    top = sorted([c for c in candidates if (c[0], c[2]) in kept] + rest, key=lambda x: x[1], reverse=True)
     total = sum(s for _, s, _ in top)
-    weights = [s / total for _, s, _ in top]
-    return top, weights
+    return top, [s / total * habit.get(name, _NO_HABIT)[1] for name, s, _ in top]
 
 # ============= AI Scheduler: Physical-Activity Exclusions =============
 # AI personas have no physical body — no sleep, meals, commute, work, errands,
@@ -675,7 +685,7 @@ class DailyPlanner:
         available_activities: List[Activity],
         recent_activity_names: List[str],
         work_schedule: Optional[dict] = None,
-        habits: Optional[Dict[str, Dict[str, float]]] = None,
+        habits: Optional[Dict[str, Dict[str, Tuple[float, float]]]] = None,
     ) -> DailyPlan:
         """
         Generate a new daily plan.
@@ -687,7 +697,7 @@ class DailyPlanner:
         AI personas have no physical life, so they take a separate path: a 24h
         light day/night rhythm of non-physical activities, never asleep.
 
-        ``habits`` is ``{part of her day: {activity: factor}}``
+        ``habits`` is ``{part of her day: {activity: (raise, damp)}}``
         (``BehaviorSystem.habit_factors``): each hobby slot's draw is reweighted
         by its part of the day's factors (``_slot_draw``). ``None`` draws as 0.4.0.
         """
@@ -901,7 +911,7 @@ class DailyPlanner:
         weather: Weather,
         available_activities: List[Activity],
         recent_activity_names: List[str],
-        habits: Optional[Dict[str, Dict[str, float]]] = None,
+        habits: Optional[Dict[str, Dict[str, Tuple[float, float]]]] = None,
     ) -> DailyPlan:
         """Build an AI persona's daily plan: a 24h-awake light day/night rhythm.
 
@@ -1879,7 +1889,7 @@ class DailyPlanner:
         weather: Weather,
         used: List[str],
         is_ai: bool = False,
-        habit: Optional[Dict[str, float]] = None,
+        habit: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> Tuple[Optional[str], str]:
         """
         Select a single activity for a slot.
@@ -1889,7 +1899,7 @@ class DailyPlanner:
         2. Goal-aligned activity (30% chance if available)
         3. Best-fit activity from the pool
 
-        ``habit`` is ``{activity: factor}`` for the slot's part of her day (see ``_slot_draw``).
+        ``habit`` is ``{activity: (raise, damp)}`` for the slot's part of her day (see ``_slot_draw``).
         """
         candidates: List[Tuple[str, float, str]] = []  # (name, score, reason)
 

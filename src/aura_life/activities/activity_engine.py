@@ -1073,7 +1073,7 @@ class ActivityEngine:
         force_rest: bool = False,
         season: Optional[Season] = None,
         salient_values: Optional[List[dict]] = None,
-        habit: Optional[Dict[str, float]] = None,
+        habit: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> Optional[Activity]:
         """
         Select an appropriate activity based on current state.
@@ -1081,9 +1081,10 @@ class ActivityEngine:
         Args:
             salient_values: Optional list of {"name", "salience", "aligned_tags"} dicts
                 from IdentitySystem for value-influenced scoring.
-            habit: Optional {activity: factor} for this part of her day
-                (BehaviorSystem.habit_factors): each score is multiplied by its
-                factor before the cut to the best five, as the planner does.
+            habit: Optional {activity: (raise, damp)} for this part of her day
+                (BehaviorSystem.habit_factors), as the planner uses it: the raise
+                multiplies the score before the cut to the best five, the damp
+                the weight after it (staleness never takes one out).
 
         Returns None if no suitable activity found.
         """
@@ -1102,8 +1103,6 @@ class ActivityEngine:
                 salient_values,
             )
             if score > 0:
-                if habit:
-                    score *= habit.get(activity.name, 1.0)
                 candidates.append((activity, score))
 
         if not candidates:
@@ -1112,10 +1111,20 @@ class ActivityEngine:
         # Sort by score and add some randomness
         candidates.sort(key=lambda x: x[1], reverse=True)
 
-        # Take top 5 and weight by score
-        top_candidates = candidates[:5]
+        # Take top 5 and weight by score; her habits as the planner uses them: comfort raises the score before the
+        # cut, staleness lowers the weight after it, and a damped one of the five keeps its place
+        if habit:
+            kept = {a.name for a, _ in candidates[:5] if habit.get(a.name, (1.0, 1.0))[1] < 1.0}
+            candidates = sorted(((a, s * habit.get(a.name, (1.0, 1.0))[0]) for a, s in candidates),
+                                key=lambda x: x[1], reverse=True)
+            rest = [c for c in candidates if c[0].name not in kept][:5 - len(kept)]
+            top_candidates = sorted([c for c in candidates if c[0].name in kept] + rest, key=lambda x: x[1], reverse=True)
+        else:
+            top_candidates = candidates[:5]
         total_score = sum(s for _, s in top_candidates)
         weights = [s / total_score for _, s in top_candidates]
+        if habit:
+            weights = [w * habit.get(a.name, (1.0, 1.0))[1] for w, (a, _) in zip(weights, top_candidates)]
 
         selected = random.choices([a for a, _ in top_candidates], weights=weights)[0]
         return selected
