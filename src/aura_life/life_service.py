@@ -4842,11 +4842,10 @@ class LifeService:
                     creative_portfolio TEXT DEFAULT '[]',
                     possessions TEXT DEFAULT '[]',
                     neighborhood TEXT DEFAULT '[]',
-                    activity_history TEXT DEFAULT '[]',
-                    activity_log TEXT DEFAULT '[]'
+                    activity_history TEXT DEFAULT '[]'
                 )
             """)
-            # Dated activity history (0.5.0): ALTER TABLE for existing DBs
+            # Dated activity history (0.5.0), on a new or an existing DB alike
             try:
                 cursor.execute("ALTER TABLE life_behavior_state ADD COLUMN activity_log TEXT DEFAULT '[]'")
             except sqlite3.OperationalError:

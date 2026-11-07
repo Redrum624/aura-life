@@ -202,9 +202,7 @@ class BehaviorSystem:
             band[name] = band.get(name, 0.0) + 0.5 ** (age_days / HABIT_HALF_LIFE_DAYS)
         out = []
         for band, names in counts.items():
-            total = sum(names.values())
-            if total <= 0.0:
-                continue
+            total = sum(names.values())   # > 0: a band exists only once a tick (weight > 0) is in it
             confidence = min(1.0, total / HABIT_FULL_EVIDENCE)
             for name, count in names.items():
                 share = count / total
@@ -493,7 +491,8 @@ class BehaviorSystem:
         for e in items if isinstance(items, list) else []:
             try:
                 name, at, hour = e
-                system._activity_log.append((str(name), datetime.fromisoformat(at), int(hour)))
+                if isinstance(name, str):
+                    system._activity_log.append((name, datetime.fromisoformat(at), int(hour)))
             except (TypeError, ValueError):
                 continue
         return system

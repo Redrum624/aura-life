@@ -84,6 +84,7 @@ def test_the_dated_history_is_saved_and_read_back():
     bs.track_activity("journaling", at=MONDAY.replace(hour=9, minute=20), hour=9)
     # Her local hour is her own: a persona in another timezone than the world clock's.
     bs.track_activity("yoga", at=MONDAY.replace(hour=18), hour=19)
+    bs.track_activity("making tea", at=MONDAY.replace(hour=20))   # no hour given: the instant's own
 
     back = BehaviorSystem.from_dict(json.loads(json.dumps(bs.to_dict())))
 
@@ -91,8 +92,11 @@ def test_the_dated_history_is_saved_and_read_back():
         ("reading", MONDAY.replace(hour=9), 9),
         ("journaling", MONDAY.replace(hour=9, minute=20), 9),
         ("yoga", MONDAY.replace(hour=18), 19),
+        ("making tea", MONDAY.replace(hour=20), 20),
     ]
-    assert back._activity_history == ["reading", "journaling", "yoga"]
+    assert back._activity_history == ["reading", "journaling", "yoga", "making tea"]
+    back.activity_log.clear()   # a reader's copy: the history itself is untouched
+    assert len(back.activity_log) == 4
 
 
 def test_an_old_undated_history_still_loads():
@@ -114,7 +118,9 @@ def test_an_old_undated_history_still_loads():
 def test_a_damaged_dated_history_loads_empty():
     bs = BehaviorSystem.from_dict({"activity_log": "not json", "activity_history": "[]"})
     assert bs.activity_log == []
+    assert BehaviorSystem.from_dict({"activity_log": "5"}).activity_log == []   # JSON, but not a list
     bs = BehaviorSystem.from_dict({"activity_log": json.dumps([["reading", "not a date", 9], ["yoga"], 7,
+                                                               [["a", "list"], MONDAY.isoformat(), 8],
                                                                ["tea", MONDAY.isoformat(), 8]])})
     assert bs.activity_log == [("tea", MONDAY, 8)]
 
@@ -214,10 +220,12 @@ def test_what_she_did_half_a_week_ago_counts_half():
     now = MONDAY + timedelta(days=7)
     _lived(bs, {"reading": 100}, now)
     _lived(bs, {"journaling": 100}, now - timedelta(days=HALF_LIFE_DAYS))
+    _lived(bs, {"yoga": 10}, now + timedelta(days=2))   # dated after `now` (a clock set back): counts as today
     detail = {h["name"]: h for h in bs.habits(now)}
     assert detail["reading"]["count"] == pytest.approx(100.0)
     assert detail["journaling"]["count"] == pytest.approx(50.0)
-    assert detail["journaling"]["share"] == pytest.approx(1 / 3)
+    assert detail["yoga"]["count"] == pytest.approx(10.0)
+    assert detail["journaling"]["share"] == pytest.approx(50 / 160)
 
 
 def test_a_new_life_has_no_habits_yet():
@@ -430,8 +438,9 @@ def test_a_lived_tick_is_dated_on_the_world_clock_and_her_hour(tmp_path, monkeyp
 
 
 def _habit_history(bs):
-    # Yesterday morning she journaled a lot; five days ago she read a lot (ages differ, so the instant matters).
-    _lived(bs, {"journaling": 40, "sketching ideas": 20}, MONDAY - timedelta(hours=20))
+    # Yesterday morning she journaled a lot; five days ago she read a lot (ages differ, so the instant matters); her
+    # breakfasts form no habit (so leaving the anchors out matters too).
+    _lived(bs, {"journaling": 40, "sketching ideas": 20, "having breakfast": 30}, MONDAY - timedelta(hours=20))
     _lived(bs, {"reading": 60}, MONDAY - timedelta(days=5))
 
 
