@@ -43,7 +43,7 @@ from .energy import EnergySystem
 from .activities import ActivityEngine
 from .goals import GoalEngine
 from .planner import DailyPlanner
-from .planner.daily_planner import PHYSICAL_ACTIVITIES, SOCIAL_PLAN_REASON_PREFIX
+from .planner.daily_planner import NOT_HABIT_FORMING, PHYSICAL_ACTIVITIES, SOCIAL_PLAN_REASON_PREFIX
 from aura_life.conversation_session import ConversationSession
 from aura_life.planner.daily_planner import is_important_activity
 from .scheduler import LifeScheduler
@@ -2864,6 +2864,7 @@ class LifeService:
                 available_activities=self._activity_engine.get_all_activities(),
                 recent_activity_names=[a.activity_name for a in self._recent_activities[:5]],
                 work_schedule=self._career_schedule(),
+                habits=self._habit_factors(),
             )
             self._apply_social_plans(self._world_clock()())
             self._save_plan()
@@ -4029,8 +4030,8 @@ class LifeService:
         if life_event:
             self._bridge_life_event(life_event)
 
-        # === Behavior: routines + creative output ===
-        self._behavior.track_activity(activity.name)
+        # === Behavior: routines + creative output; dated (world clock, her hour) so habits learn from it ===
+        self._behavior.track_activity(activity.name, at=self._world_clock()(), hour=self.persona_local_hour())
         artifact = self._behavior.on_creative_activity(
             activity.name,
             mood=next(iter(log.emotions_triggered), "") if log.emotions_triggered else "",
@@ -4841,9 +4842,15 @@ class LifeService:
                     creative_portfolio TEXT DEFAULT '[]',
                     possessions TEXT DEFAULT '[]',
                     neighborhood TEXT DEFAULT '[]',
-                    activity_history TEXT DEFAULT '[]'
+                    activity_history TEXT DEFAULT '[]',
+                    activity_log TEXT DEFAULT '[]'
                 )
             """)
+            # Dated activity history (0.5.0): ALTER TABLE for existing DBs
+            try:
+                cursor.execute("ALTER TABLE life_behavior_state ADD COLUMN activity_log TEXT DEFAULT '[]'")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
             # Expression state table (single row)
             cursor.execute("""
@@ -6062,12 +6069,12 @@ class LifeService:
             data = self._behavior.to_dict()
             cursor.execute("""
                 INSERT OR REPLACE INTO life_behavior_state
-                (id, routines, creative_portfolio, possessions, neighborhood, activity_history)
-                VALUES (1, ?, ?, ?, ?, ?)
+                (id, routines, creative_portfolio, possessions, neighborhood, activity_history, activity_log)
+                VALUES (1, ?, ?, ?, ?, ?, ?)
             """, (
                 data["routines"], data["creative_portfolio"],
                 data["possessions"], data["neighborhood"],
-                data["activity_history"],
+                data["activity_history"], data["activity_log"],
             ))
             conn.commit()
 
@@ -6771,6 +6778,7 @@ class LifeService:
                     available_activities=self._activity_engine.get_all_activities(),
                     recent_activity_names=[a.activity_name for a in self._recent_activities[:5]],
                     work_schedule=self._career_schedule(),
+                    habits=self._habit_factors(),
                 )
                 if plan and plan.slots:
                     for slot in plan.slots:
@@ -6886,6 +6894,11 @@ class LifeService:
             return self._place_location.current_timezone or ""
         except Exception:
             return ""
+
+    def _habit_factors(self) -> Dict[str, Dict[str, float]]:
+        """Her habits now, per part of her day, for the planner: from the dated history, on the world clock (its
+        instants are world-clock ones), her free time only (``NOT_HABIT_FORMING`` left out)."""
+        return self._behavior.habit_factors(self._world_clock()(), exclude=NOT_HABIT_FORMING)
 
     def _world_clock(self) -> Callable[[], datetime]:
         """The clock the world runs on, for engines that measure elapsed time.
@@ -7078,7 +7091,9 @@ class LifeService:
         if activity_name in mental:
             return ActivityCategory.MENTAL
         if activity_name in physical:
-            return ActivityCategory.PHYSICAL
+            # There is no PHYSICAL category: the activity's own (yoga is REST, a run EXPLORATION), else EXPLORATION.
+            known = self._activity_engine.get_activity(activity_name)
+            return known.category if known else ActivityCategory.EXPLORATION
         if activity_name in social:
             return ActivityCategory.SOCIAL
         return ActivityCategory.REST

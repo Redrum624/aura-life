@@ -14,6 +14,7 @@ import random
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
+from ..behavior.behavior_system import habit_band
 from ..models import (
     DailyPlan,
     PlannedSlot,
@@ -26,6 +27,9 @@ from ..models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: A slot's draw is among its best candidates by score, this many (the planner's own cut, unchanged by habits).
+SLOT_DRAW_SIZE = 6
 
 
 # ============= Occupation → Derived Locations =============
@@ -236,6 +240,30 @@ ROUTINE_ACTIVITIES = {
     "attending classes",
     "studying",
 }
+
+# No habit forms on the day's anchors (the planner sets them by the clock, never draws them) or on sleep: they are
+# left out of the habit shares, so a habit is a share of her free time.
+NOT_HABIT_FORMING = frozenset(ROUTINE_ACTIVITIES | {"sleeping", "napping"})
+
+
+def _slot_draw(
+    candidates: List[Tuple[str, float, str]],
+    habit: Optional[Dict[str, float]],
+) -> Tuple[List[Tuple[str, float, str]], List[float]]:
+    """A slot's draw: its best SLOT_DRAW_SIZE candidates by score (sorted in place), and their weights.
+
+    A weight is the candidate's share of the cut's score, times its habit factor when ``habit`` (``{activity:
+    factor}`` for this part of her day; a name missing is 1.0) is given. The factor comes after the cut, so a habit
+    reweights the slot's own candidates and never adds or removes one: that keeps its effect on any one choice inside
+    the factor bound (behavior_system's DESIGN VALUES). Without a habit the weights are exactly the 0.4.0 ones.
+    """
+    candidates.sort(key=lambda x: x[1], reverse=True)
+    top = candidates[:SLOT_DRAW_SIZE]
+    total = sum(s for _, s, _ in top)
+    weights = [s / total for _, s, _ in top]
+    if habit:
+        weights = [w * habit.get(name, 1.0) for w, (name, _, _) in zip(weights, top)]
+    return top, weights
 
 # ============= AI Scheduler: Physical-Activity Exclusions =============
 # AI personas have no physical body — no sleep, meals, commute, work, errands,
@@ -646,6 +674,7 @@ class DailyPlanner:
         available_activities: List[Activity],
         recent_activity_names: List[str],
         work_schedule: Optional[dict] = None,
+        habits: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> DailyPlan:
         """
         Generate a new daily plan.
@@ -656,6 +685,10 @@ class DailyPlanner:
 
         AI personas have no physical life, so they take a separate path: a 24h
         light day/night rhythm of non-physical activities, never asleep.
+
+        ``habits`` is ``{part of her day: {activity: factor}}``
+        (``BehaviorSystem.habit_factors``): each hobby slot's draw is reweighted
+        by its part of the day's factors (``_slot_draw``). ``None`` draws as 0.4.0.
         """
         if self._is_ai:
             return self._generate_ai_plan(
@@ -663,6 +696,7 @@ class DailyPlanner:
                 weather=weather,
                 available_activities=available_activities,
                 recent_activity_names=recent_activity_names,
+                habits=habits,
             )
 
         now = datetime.now()
@@ -794,6 +828,7 @@ class DailyPlanner:
                 weather=weather,
                 used=used_names,
                 is_ai=self._is_ai,
+                habit=(habits or {}).get(habit_band(clock_h)),
             )
             if activity_name:
                 activity_def = activity_map.get(activity_name)
@@ -865,6 +900,7 @@ class DailyPlanner:
         weather: Weather,
         available_activities: List[Activity],
         recent_activity_names: List[str],
+        habits: Optional[Dict[str, Dict[str, float]]] = None,
     ) -> DailyPlan:
         """Build an AI persona's daily plan: a 24h-awake light day/night rhythm.
 
@@ -937,6 +973,7 @@ class DailyPlanner:
                     weather=weather,
                     used=used_names,
                     is_ai=self._is_ai,
+                    habit=(habits or {}).get(habit_band(clock_h)),
                 )
             elif clock_h in night_active_hours and quiet_pool:
                 # Sparse night activity: one calm, low-key thing.
@@ -1841,6 +1878,7 @@ class DailyPlanner:
         weather: Weather,
         used: List[str],
         is_ai: bool = False,
+        habit: Optional[Dict[str, float]] = None,
     ) -> Tuple[Optional[str], str]:
         """
         Select a single activity for a slot.
@@ -1849,6 +1887,8 @@ class DailyPlanner:
         1. Desire with high urgency (40% chance if available)
         2. Goal-aligned activity (30% chance if available)
         3. Best-fit activity from the pool
+
+        ``habit`` is ``{activity: factor}`` for the slot's part of her day (see ``_slot_draw``).
         """
         candidates: List[Tuple[str, float, str]] = []  # (name, score, reason)
 
@@ -1895,11 +1935,8 @@ class DailyPlanner:
         if not candidates:
             return "relaxing", "free time"
 
-        # Weighted random selection from top candidates
-        candidates.sort(key=lambda x: x[1], reverse=True)
-        top = candidates[:6]
-        total = sum(s for _, s, _ in top)
-        weights = [s / total for _, s, _ in top]
+        # Weighted random selection from top candidates, reweighted by her habits
+        top, weights = _slot_draw(candidates, habit)
 
         selected = random.choices(top, weights=weights)[0]
         return selected[0], selected[2]

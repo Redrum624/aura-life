@@ -3,6 +3,7 @@ Behavior Engine
 
 Tracks behavioral patterns and creative output:
 - Routine detection: auto-detect from repeated activity patterns
+- Habits: a dated activity history whose comfort and staleness, per part of her day, reweight her planner's choices
 - Creative artifacts: poems, sketches, playlists created during activities
 - Ambient senses: derived from location + weather + time
 - Possessions: meaningful objects with sentimental value
@@ -11,8 +12,8 @@ Tracks behavioral patterns and creative output:
 
 import json
 import random
-from datetime import datetime
-from typing import Dict, List
+from datetime import datetime, timedelta
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from ..models import (
     RoutinePattern, CreativeArtifact,
@@ -20,6 +21,42 @@ from ..models import (
 )
 
 logger = __import__("logging").getLogger(__name__)
+
+# ---- DESIGN VALUES: habits that drift over days (0.5.0) -------------------------------------------------------------
+# None is measured and none is the owner's yet: the owner's eye sets them. One line each says why.
+#
+# The rule. Per part of her day (habit_band) and activity, her lived ticks of the last weeks are counted, each weighted
+# 0.5 ** (age_days / HABIT_HALF_LIFE_DAYS); `share` is the activity's part of that band's weighted free-time ticks.
+#   comfort   = min(1, share / HABIT_PEAK_SHARE)                  -- what she has done often lately pulls her back
+#   staleness = clamp(share / HABIT_PEAK_SHARE - 1, 0, 2)          -- past the peak, too much of it pushes her away
+#   pull      = comfort - staleness, in [-1, 1]: 0 at no share, +1 at the peak, 0 at twice it, -1 from three times it
+#   factor    = HABIT_MAX_RATIO ** (confidence * pull / 2),  confidence = min(1, band ticks / HABIT_FULL_EVIDENCE)
+# The planner multiplies a candidate's draw weight by its factor AFTER its own top-six cut, so a habit never adds or
+# removes a candidate; every factor lies in [R ** -0.5, R ** 0.5] (R = HABIT_MAX_RATIO), and so does the weighted mean
+# of a draw's factors, hence an activity's chance in any one choice moves by at most x R up or / R down.
+
+# What she did 3.5 days ago counts half as much as today: a habit builds and fades on the scale of a week, not a day.
+HABIT_HALF_LIFE_DAYS = 3.5
+# Comfort peaks when an activity fills 15% of a part of her day lately (about 40 minutes of a four-hour morning, daily).
+HABIT_PEAK_SHARE = 0.15
+# A habit moves an activity's chance in any one choice by at most x1.5 up or /1.5 down: her days shift, never lock.
+HABIT_MAX_RATIO = 1.5
+# Full strength once a part of her day holds 60 weighted ticks (20 hours of free time in it): habits form over a week.
+HABIT_FULL_EVIDENCE = 60.0
+# The dated history keeps four weeks: at the half-life an older tick would weigh under 0.4%.
+HABIT_HISTORY_DAYS = 28
+
+
+def habit_band(hour: int) -> str:
+    """The part of her day a local hour belongs to, as habits count it (the planner's morning / afternoon split at 12
+    and 17; evening ends at 22, when the AI persona's night rhythm begins)."""
+    if 6 <= hour < 12:
+        return "morning"
+    if 12 <= hour < 17:
+        return "afternoon"
+    if 17 <= hour < 22:
+        return "evening"
+    return "night"
 
 # Activity -> creative artifact type
 CREATIVE_ACTIVITIES = {
@@ -58,7 +95,10 @@ LIGHT_QUALITY = {
 
 
 class BehaviorSystem:
-    """Tracks routines, creative output, ambient senses, possessions, neighborhood."""
+    """Tracks routines, habits, creative output, ambient senses, possessions, neighborhood."""
+
+    # Four weeks of her 20-minute activity tick (72 a day): the dated history never holds more, whatever the tick rate.
+    MAX_ACTIVITY_LOG = HABIT_HISTORY_DAYS * 72
 
     def __init__(self):
         self._routines: Dict[str, RoutinePattern] = {}
@@ -67,6 +107,8 @@ class BehaviorSystem:
         self._possessions: List[Possession] = []
         self._neighborhood: Dict[str, NeighborhoodPlace] = {}
         self._activity_history: List[str] = []  # last N activities for routine detection
+        # The dated history habits are learned from: (activity, world-clock instant, her local hour), oldest first.
+        self._activity_log: List[Tuple[str, datetime, int]] = []
 
     # ============= Tick =============
 
@@ -76,8 +118,16 @@ class BehaviorSystem:
 
     # ============= Routines =============
 
-    def track_activity(self, activity_name: str):
-        """Track activity for routine detection."""
+    def track_activity(self, activity_name: str, at: Optional[datetime] = None, hour: Optional[int] = None):
+        """Track activity for routine detection, and -- given the instant she lived it -- in the dated history.
+
+        ``at`` is the world clock's (naive) instant, ``hour`` her local hour (default ``at.hour``). Without ``at``
+        nothing is dated: a catch-up replays hours she did not live, and habits must not learn from them.
+        """
+        if at is not None:
+            self._activity_log.append((activity_name, at, at.hour if hour is None else int(hour)))
+            cutoff = at - timedelta(days=HABIT_HISTORY_DAYS)
+            self._activity_log = [e for e in self._activity_log if e[1] >= cutoff][-self.MAX_ACTIVITY_LOG:]
         self._activity_history.append(activity_name)
         self._activity_history = self._activity_history[-50:]  # Keep last 50
 
@@ -129,6 +179,50 @@ class BehaviorSystem:
             if len(unique) <= 3:
                 stale.append("overall_variety")
         return stale
+
+    # ============= Habits (the dated history) =============
+
+    @property
+    def activity_log(self) -> List[Tuple[str, datetime, int]]:
+        """The dated history, oldest first: (activity, world-clock instant, her local hour)."""
+        return list(self._activity_log)
+
+    def habits(self, now: datetime, exclude: Iterable[str] = ()) -> List[dict]:
+        """Her habits at ``now`` (world clock), one dict per part of her day and activity she has lived in it:
+        ``band``, ``name``, ``count`` (decayed ticks), ``share``, ``comfort``, ``staleness``, ``factor`` (the rule is
+        in the DESIGN VALUES block above). ``exclude`` names activities no habit forms on (day anchors, sleep): they
+        are left out of the shares too."""
+        skip = set(exclude)
+        counts: Dict[str, Dict[str, float]] = {}
+        for name, at, hour in self._activity_log:
+            if name in skip:
+                continue
+            age_days = max(0.0, (now - at).total_seconds() / 86400.0)
+            band = counts.setdefault(habit_band(hour), {})
+            band[name] = band.get(name, 0.0) + 0.5 ** (age_days / HABIT_HALF_LIFE_DAYS)
+        out = []
+        for band, names in counts.items():
+            total = sum(names.values())
+            if total <= 0.0:
+                continue
+            confidence = min(1.0, total / HABIT_FULL_EVIDENCE)
+            for name, count in names.items():
+                share = count / total
+                comfort = min(1.0, share / HABIT_PEAK_SHARE)
+                staleness = min(2.0, max(0.0, share / HABIT_PEAK_SHARE - 1.0))
+                out.append({
+                    "band": band, "name": name, "count": count, "share": share,
+                    "comfort": comfort, "staleness": staleness,
+                    "factor": HABIT_MAX_RATIO ** (confidence * (comfort - staleness) / 2.0),
+                })
+        return out
+
+    def habit_factors(self, now: datetime, exclude: Iterable[str] = ()) -> Dict[str, Dict[str, float]]:
+        """``{band: {activity: factor}}`` at ``now``, for the planner; an activity or band missing is neutral (1.0)."""
+        out: Dict[str, Dict[str, float]] = {}
+        for h in self.habits(now, exclude):
+            out.setdefault(h["band"], {})[h["name"]] = h["factor"]
+        return out
 
     # ============= Creative Output =============
 
@@ -314,6 +408,7 @@ class BehaviorSystem:
                 for p in self._neighborhood.values()
             ]),
             "activity_history": json.dumps(self._activity_history[-50:]),
+            "activity_log": json.dumps([[name, at.isoformat(), hour] for name, at, hour in self._activity_log]),
         }
 
     @classmethod
@@ -389,4 +484,16 @@ class BehaviorSystem:
             system._activity_history = json.loads(raw) if isinstance(raw, str) else raw
         except (json.JSONDecodeError, TypeError):
             system._activity_history = []
+        # Dated history (0.5.0; a 0.4.0 row has none): [name, iso instant, local hour] entries, a bad one skipped.
+        raw = data.get("activity_log", "[]")
+        try:
+            items = json.loads(raw) if isinstance(raw, str) else raw
+        except (json.JSONDecodeError, TypeError):
+            items = []
+        for e in items if isinstance(items, list) else []:
+            try:
+                name, at, hour = e
+                system._activity_log.append((str(name), datetime.fromisoformat(at), int(hour)))
+            except (TypeError, ValueError):
+                continue
         return system

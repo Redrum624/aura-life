@@ -213,7 +213,7 @@ each other directly.
 |---|---|
 | `activities` | Activity selection and execution, and the narrative line each one produces. |
 | `affect` | Background mood and cumulative stress — the emotional undertone that outlives a spike. |
-| `behavior` | Routine detection from repeated activity, and creative artifacts: poems, sketches, playlists. |
+| `behavior` | Routine detection from repeated activity; habits from a dated four-week activity history (comfort for what she did often lately, staleness for what she overdid, per part of her day, fading over days); creative artifacts: poems, sketches, playlists. |
 | `body` | Physical state — general health, minor ailments, an optional hormonal cycle — and its pull on mood and energy. |
 | `chaos` | Cross-cutting randomness: unexpected twists mid-activity, serendipity, entropy injected into the other engines. |
 | `cognitive` | Focus and flow state, rumination loops, the quality of attention. |
@@ -235,7 +235,7 @@ each other directly.
 | `money` | A light evolving ledger: income, purchases, financial stress. |
 | `persona_evolution` | Slow personality drift from lived experience, bounded by a maximum drift. |
 | `personas` | The persona pipeline: genre randomisation, personality configuration, the profile database and parser, place and appearance generation. |
-| `planner` | The daily plan — generated once a day, followed through, revised on user command. |
+| `planner` | The daily plan — generated once a day, followed through, revised on user command; each hobby slot's draw reweighted by her habits, at most ×1.5 or ÷1.5 on any one choice. |
 | `sanity` | The one interior number that integrates the others and can break: a per-persona baseline, blows down, recoveries up, drift on the world clock, a graded word (`sound` to `broken`) the rest couples to. |
 | `scheduler` | The tick loop. APScheduler-backed when the extra is installed; `force_all_ticks()` either way. |
 | `shadow` | The darker inner psychology: felt insecurity, temptation and transgression, secrets. |
