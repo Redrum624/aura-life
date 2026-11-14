@@ -3,7 +3,7 @@
  "days": 2,
  "personas": {
   "nurse": {
-   "activity_logs": "933d8efaf128168a",
+   "activity_logs": "787fd3ef82caf43a",
    "counts": {
     "activity_logs": 95,
     "plans": 3,
@@ -591,7 +591,7 @@
    ]
   },
   "plain": {
-   "activity_logs": "0086105e1b2c52e9",
+   "activity_logs": "4d39bbf4b25a987f",
    "counts": {
     "activity_logs": 99,
     "plans": 3,

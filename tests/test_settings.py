@@ -243,10 +243,20 @@ def _step_view(record) -> dict:
 def _activity_rows(db_path: str) -> list:
     """Every activity_logs row the run wrote -- narratives carry the
     activity's own text, the weather suffix, and any NPC, micro-event and
-    chaos line appended to it."""
+    chaos line appended to it.
+
+    The emotion intensities are rounded to nine places: Python 3.12 made
+    ``sum()`` of floats more exact, so 3.11 and 3.12+ store values that
+    differ in the last digit (0.14999999999999997 against 0.15) for the same
+    life, and the recording must hold on every supported Python."""
     with contextlib.closing(sqlite3.connect(db_path)) as conn:
         conn.row_factory = sqlite3.Row
-        return [dict(row) for row in conn.execute("SELECT * FROM activity_logs ORDER BY id")]
+        rows = [dict(row) for row in conn.execute("SELECT * FROM activity_logs ORDER BY id")]
+    for row in rows:
+        emotions = row.get("emotions_triggered")
+        if emotions:
+            row["emotions_triggered"] = {name: round(value, 9) for name, value in json.loads(emotions).items()}
+    return rows
 
 
 def _end_state(svc) -> dict:
