@@ -18,6 +18,12 @@ from datetime import datetime
 from typing import List, Optional
 
 from ..models import CareerState
+from ..settings import DEFAULT_SETTING, SettingSpec, get_setting
+# Legacy names: the work events moved, unchanged, into the contemporary setting
+# pack (aura_life.settings.contemporary, with WORK_EVENT_EMOTIONS, what each
+# makes her feel) in Task 9's fix round (ruling T9-R5) -- the system reads its
+# persona's setting now; re-exported so an import from here keeps working.
+from ..settings.contemporary import NEGATIVE_EVENTS, POSITIVE_EVENTS  # noqa: F401
 
 
 # ============= Career constants (module level) =============
@@ -25,15 +31,6 @@ from ..models import CareerState
 WORKLOAD_DRIFT = 0.04          # per worked day, toward a rolled target
 SATISFACTION_DRIFT = 0.02      # per worked day, toward a workload-shaped baseline
 WORK_EVENT_CHANCE = 0.35       # chance of a notable work event on a workday
-
-POSITIVE_EVENTS = [
-    "got praised by her boss", "wrapped up a big task", "had a good team lunch",
-    "made real progress on a project", "got a nice note from a coworker",
-]
-NEGATIVE_EVENTS = [
-    "sat through a draining meeting", "dealt with a difficult client",
-    "got handed a tight deadline", "had a frustrating day", "stayed late to finish up",
-]
 
 # Activity keywords that change workload.
 BUSY_ACTIVITIES = ("working", "work", "meeting", "deadline", "overtime", "commuting")
@@ -49,9 +46,15 @@ class CareerSystem:
         occupation: str = "",
         monthly_salary: Optional[float] = None,
         rng=None,
+        setting: Optional[SettingSpec] = None,
     ):
+        """``setting``: her setting pack (:class:`~aura_life.settings.SettingSpec`),
+        whose ``work_events_positive`` / ``work_events_negative`` a workday's
+        event is drawn from. ``None`` -- the default -- is
+        :data:`~aura_life.settings.DEFAULT_SETTING`'s."""
         self._state = initial_state or CareerState()
         self._rng = rng if rng is not None else random
+        self._setting = setting if setting is not None else get_setting(DEFAULT_SETTING)
         if occupation and not self._state.occupation:
             self._state.occupation = occupation
         if monthly_salary is not None:
@@ -88,14 +91,21 @@ class CareerSystem:
     # Tick / reactions
     # ------------------------------------------------------------------
 
-    def tick(self, now: Optional[datetime] = None) -> None:
+    def tick(self, now: Optional[datetime] = None) -> Optional[str]:
         """Advance the work life. Registers a workday once per calendar day on
         scheduled work days, drifting workload/satisfaction and rolling events.
-        ``now`` may be backdated for catch-up."""
+        ``now`` may be backdated for catch-up.
+
+        Returns the work event rolled on this call (one of her setting's
+        ``work_events_positive`` or ``work_events_negative`` texts, its
+        emotions in the setting's ``work_event_emotions``), or ``None``: at
+        most one per workday, none when the pool drawn is empty.
+        ``recent_work_event`` keeps the latest one after its day."""
         now = now or datetime.now()
         if not self._state.employed:
-            return
+            return None
 
+        event = None
         is_workday = now.weekday() in self._state.work_days
         new_day = (
             self._state.last_workday is None
@@ -117,11 +127,15 @@ class CareerSystem:
 
             if self._rng.random() < WORK_EVENT_CHANCE:
                 if self._state.satisfaction >= 0.5 and self._rng.random() < self._state.satisfaction:
-                    self._state.recent_work_event = self._rng.choice(POSITIVE_EVENTS)
+                    pool = self._setting.work_events_positive
                 else:
-                    self._state.recent_work_event = self._rng.choice(NEGATIVE_EVENTS)
+                    pool = self._setting.work_events_negative
+                if pool:
+                    event = self._rng.choice(pool)
+                    self._state.recent_work_event = event
 
         self._clamp()
+        return event
 
     def on_activity(self, activity_name: str) -> None:
         if not self._state.employed or not activity_name:
@@ -196,7 +210,8 @@ class CareerSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, occupation: str = "", rng=None) -> "CareerSystem":
+    def from_dict(cls, data: dict, occupation: str = "", rng=None,
+                  setting: Optional[SettingSpec] = None) -> "CareerSystem":
         def _dt(v):
             return datetime.fromisoformat(v) if v else None
 
@@ -235,4 +250,4 @@ class CareerSystem:
             last_workday=_dt(data.get("last_workday")),
             recent_work_event=data.get("recent_work_event"),
         )
-        return cls(initial_state=state, occupation=occupation, rng=rng)
+        return cls(initial_state=state, occupation=occupation, rng=rng, setting=setting)

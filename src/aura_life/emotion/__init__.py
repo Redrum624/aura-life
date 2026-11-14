@@ -25,8 +25,16 @@ from .emotion_persistence import (
     clear_emotion_persistence,
     get_emotion_persistence,
 )
+from .vocabulary import (
+    EMOTION_VOCABULARY,
+    NEUTRAL_POINT,
+    valence_arousal,
+)
 
 __all__ = [
+    "EMOTION_VOCABULARY",
+    "NEUTRAL_POINT",
+    "valence_arousal",
     "FeelingsWheel",
     "EmotionTier",
     "CORE_EMOTIONS",

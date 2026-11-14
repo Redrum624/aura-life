@@ -62,8 +62,35 @@ def test_every_exported_name_actually_resolves():
 def test_surface_size_is_the_seeded_one():
     # 114 from the origin engine package's __init__.py + hooks + HookNotConfigured = 116 at extraction (0.1.0);
     # + clear_persona_schedule, the teardown for the schedule cache, added in 0.2.0 = 117;
-    # + SanitySystem, the interior that integrates and can break, added in 0.3.0 = 118.
-    assert len(aura_life.__all__) == 118
+    # + SanitySystem, the interior that integrates and can break, added in 0.3.0 = 118;
+    # + the humanness program's ten (0.6.0, test_the_humanness_names_are_exported_from_their_modules) = 128.
+    assert len(aura_life.__all__) == 128
+
+
+#: The names the humanness program made public (0.6.0; rulings T19b-R2, T18-R1),
+#: each with the module that defines it.
+HUMANNESS_EXPORTS = {
+    "Moment": "aura_life.context.moment",
+    "Share": "aura_life.context.moment",
+    "LengthTarget": "aura_life.context.moment",
+    "PersonaParameters": "aura_life.personas.parameters",
+    "SettingSpec": "aura_life.settings.spec",
+    "register_setting": "aura_life.settings.spec",
+    "unregister_setting": "aura_life.settings.spec",
+    "get_setting": "aura_life.settings.spec",
+    "Household": "aura_life.social.household",
+    "Episode": "aura_life.memory.episodes",
+}
+
+
+def test_the_humanness_names_are_exported_from_their_modules():
+    """Each of the ten is in ``__all__`` and is the very object its module
+    defines -- not a copy, not a same-named stand-in."""
+    import importlib
+
+    assert set(HUMANNESS_EXPORTS) <= set(aura_life.__all__)
+    for name, module in HUMANNESS_EXPORTS.items():
+        assert getattr(aura_life, name) is getattr(importlib.import_module(module), name), name
 
 
 def test_internals_exposes_life_service():

@@ -23,12 +23,18 @@ class LifeScheduler:
     """
     Manages the background simulation loop.
 
-    Tick intervals:
+    Tick intervals (``TICK_INTERVAL_MINUTES``):
     - World tick: 5 minutes (weather, time)
-    - Activity tick: 20 minutes (perform activities)
     - Energy tick: 5 minutes (circadian, boosts decay)
+    - Plan tick: 30 minutes (new day's plan, revisions)
+    - Activity tick: 20 minutes (perform activities)
     - Goal tick: 60 minutes (check progress, generate daily)
     """
+
+    #: Minutes between two runs of each tick in the background loop.
+    TICK_INTERVAL_MINUTES = {"world": 5, "energy": 5, "plan": 30, "activity": 20, "goal": 60}
+    #: The order force_all_ticks runs them in.
+    TICK_ORDER = ("world", "energy", "plan", "activity", "goal")
 
     def __init__(
         self,
@@ -85,7 +91,7 @@ class LifeScheduler:
         if self._on_world_tick:
             self._scheduler.add_job(
                 self._world_tick_wrapper,
-                IntervalTrigger(minutes=5),
+                IntervalTrigger(minutes=self.TICK_INTERVAL_MINUTES["world"]),
                 id="world_tick",
                 name="World Environment Update",
             )
@@ -94,7 +100,7 @@ class LifeScheduler:
         if self._on_energy_tick:
             self._scheduler.add_job(
                 self._energy_tick_wrapper,
-                IntervalTrigger(minutes=5),
+                IntervalTrigger(minutes=self.TICK_INTERVAL_MINUTES["energy"]),
                 id="energy_tick",
                 name="Energy State Update",
             )
@@ -103,7 +109,7 @@ class LifeScheduler:
         if self._on_activity_tick:
             self._scheduler.add_job(
                 self._activity_tick_wrapper,
-                IntervalTrigger(minutes=20),
+                IntervalTrigger(minutes=self.TICK_INTERVAL_MINUTES["activity"]),
                 id="activity_tick",
                 name="Activity Simulation",
             )
@@ -112,7 +118,7 @@ class LifeScheduler:
         if self._on_goal_tick:
             self._scheduler.add_job(
                 self._goal_tick_wrapper,
-                IntervalTrigger(minutes=60),
+                IntervalTrigger(minutes=self.TICK_INTERVAL_MINUTES["goal"]),
                 id="goal_tick",
                 name="Goal Management",
             )
@@ -121,7 +127,7 @@ class LifeScheduler:
         if self._on_plan_tick:
             self._scheduler.add_job(
                 self._plan_tick_wrapper,
-                IntervalTrigger(minutes=30),
+                IntervalTrigger(minutes=self.TICK_INTERVAL_MINUTES["plan"]),
                 id="plan_tick",
                 name="Daily Plan Management",
             )
@@ -193,7 +199,7 @@ class LifeScheduler:
 
     def force_all_ticks(self) -> None:
         """Force all ticks to run immediately."""
-        for tick_type in ["world", "energy", "plan", "activity", "goal"]:
+        for tick_type in self.TICK_ORDER:
             self.force_tick(tick_type)
 
     def get_status(self) -> dict:

@@ -38,7 +38,7 @@ def test_relative_db_path_falls_back_to_the_explicit_persona_id(
 
     import aura_life.emotion.emotion_persistence as ep
 
-    def _fake_get_emotion_persistence(persona_id, datastore=None):
+    def _fake_get_emotion_persistence(persona_id, datastore=None, **kwargs):
         seen.append(persona_id)
         return _Recorder()
 
@@ -73,7 +73,7 @@ def test_dot_prefixed_relative_db_path_also_falls_back(tmp_path, monkeypatch):
     monkeypatch.setattr(
         ep,
         "get_emotion_persistence",
-        lambda persona_id, datastore=None: seen.append(persona_id) or _Recorder(),
+        lambda persona_id, datastore=None, **kwargs: seen.append(persona_id) or _Recorder(),
     )
 
     svc._persist_activity_emotions("reading", {"content": 0.5})
@@ -100,7 +100,7 @@ def test_nested_db_path_still_derives_from_the_parent_directory(
     monkeypatch.setattr(
         ep,
         "get_emotion_persistence",
-        lambda persona_id, datastore=None: seen.append(persona_id) or _Recorder(),
+        lambda persona_id, datastore=None, **kwargs: seen.append(persona_id) or _Recorder(),
     )
 
     svc._persist_activity_emotions("reading", {"content": 0.5})

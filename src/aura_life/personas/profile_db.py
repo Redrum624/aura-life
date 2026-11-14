@@ -140,6 +140,11 @@ class ProfileDatabase:
                     languages TEXT DEFAULT __DEFAULT_LANGUAGES__,
                     -- Multi-user isolation: device that created this persona ('' = unset)
                     owner_device_id TEXT DEFAULT '',
+                    -- Humanness program Task 7 (spec §4.1/§4.2) scalar fields
+                    setting TEXT DEFAULT '',
+                    attachment_style TEXT DEFAULT '',
+                    intimacy_rate REAL,
+                    personal_goal TEXT DEFAULT '',
                     -- Metadata
                     is_preset INTEGER DEFAULT 0,
                     created_at TEXT DEFAULT '',
@@ -172,13 +177,33 @@ class ProfileDatabase:
                     name TEXT NOT NULL,
                     relationship TEXT DEFAULT '',
                     personality TEXT DEFAULT '',
-                    shared_interests TEXT DEFAULT ''
+                    shared_interests TEXT DEFAULT '',
+                    kind TEXT DEFAULT 'friend'
                 );
 
                 CREATE TABLE IF NOT EXISTS profile_media (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     media_type TEXT NOT NULL,
                     title TEXT NOT NULL
+                );
+
+                -- Humanness program Task 7 (spec §4.1/§4.2)
+                CREATE TABLE IF NOT EXISTS profile_state_expressions (
+                    state TEXT PRIMARY KEY,
+                    text TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS profile_traits (
+                    trait TEXT PRIMARY KEY,
+                    value REAL NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS profile_example_dialogue (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    block_index INTEGER NOT NULL,
+                    line_index INTEGER NOT NULL,
+                    speaker TEXT NOT NULL,
+                    text TEXT NOT NULL
                 );
             """.replace("__DEFAULT_LANGUAGES__", _default_languages_sql_literal()))
             conn.commit()
@@ -208,12 +233,27 @@ class ProfileDatabase:
                 ("hair_length", "TEXT DEFAULT ''"),
                 # Multi-user isolation (v2.27.0)
                 ("owner_device_id", "TEXT DEFAULT ''"),
+                # Humanness program Task 7 (spec §4.1/§4.2)
+                ("setting", "TEXT DEFAULT ''"),
+                ("attachment_style", "TEXT DEFAULT ''"),
+                ("intimacy_rate", "REAL"),
+                ("personal_goal", "TEXT DEFAULT ''"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE profile_core ADD COLUMN {col} {col_def}")
                     conn.commit()
                 except sqlite3.OperationalError:
                     pass  # Column already exists
+
+            # profile_social_circle gained "kind" in Task 7 (spec §4.1/§4.2);
+            # an existing row is backfilled to the column DEFAULT ('friend').
+            try:
+                conn.execute(
+                    "ALTER TABLE profile_social_circle ADD COLUMN kind TEXT DEFAULT 'friend'"
+                )
+                conn.commit()
+            except sqlite3.OperationalError:
+                pass  # Column already exists
         finally:
             conn.close()
 
@@ -262,6 +302,7 @@ class ProfileDatabase:
                     spending_habit, monthly_salary, home_type,
                     home_city, home_country, home_lat, home_lon, home_timezone,
                     cultural_stance, cultural_summary, appearance_origin, languages,
+                    setting, attachment_style, intimacy_rate, personal_goal,
                     is_preset, created_at, updated_at
                 ) VALUES (
                     1, ?, ?, ?, ?, ?, ?,
@@ -279,6 +320,7 @@ class ProfileDatabase:
                     ?, ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?
                 )
@@ -332,6 +374,11 @@ class ProfileDatabase:
                 getattr(parsed, "cultural_summary", ""),
                 getattr(parsed, "appearance_origin", "local"),
                 json.dumps(getattr(parsed, "languages", _default_languages_list())),
+                # Humanness program Task 7 (spec §4.1/§4.2)
+                getattr(parsed, "setting", ""),
+                getattr(parsed, "attachment_style", ""),
+                getattr(parsed, "intimacy_rate", None),
+                getattr(parsed, "personal_goal", ""),
                 1 if is_preset else 0, now, now,
             ))
             conn.execute(
@@ -352,6 +399,10 @@ class ProfileDatabase:
                 ("struggles", getattr(parsed, "struggles", [])),
                 ("character_defects", getattr(parsed, "character_defects", [])),
                 ("intrusive_thought_themes", getattr(parsed, "intrusive_thought_themes", [])),
+                # Humanness program Task 7 (spec §4.1/§4.2)
+                ("household", getattr(parsed, "household", [])),
+                ("never_say", getattr(parsed, "never_say", [])),
+                ("allow_phrases", getattr(parsed, "allow_phrases", [])),
             ]:
                 for v in values:
                     if v.strip():
@@ -394,6 +445,33 @@ class ProfileDatabase:
                     (emotion, intensity),
                 )
 
+            # State expressions (Task 7, spec §4.1/§4.2)
+            conn.execute("DELETE FROM profile_state_expressions")
+            for state, text in getattr(parsed, "state_expressions", {}).items():
+                conn.execute(
+                    "INSERT INTO profile_state_expressions (state, text) VALUES (?, ?)",
+                    (state, text),
+                )
+
+            # Traits (Task 7, spec §4.1/§4.2)
+            conn.execute("DELETE FROM profile_traits")
+            for trait, value in getattr(parsed, "traits", {}).items():
+                conn.execute(
+                    "INSERT INTO profile_traits (trait, value) VALUES (?, ?)",
+                    (trait, value),
+                )
+
+            # Example dialogue (Task 7, spec §4.1/§4.2) -- block_index/line_index
+            # preserve order; a block is a list of (speaker, text) tuples.
+            conn.execute("DELETE FROM profile_example_dialogue")
+            for block_index, block in enumerate(getattr(parsed, "example_dialogue", [])):
+                for line_index, (speaker, dialogue_text) in enumerate(block):
+                    conn.execute(
+                        "INSERT INTO profile_example_dialogue "
+                        "(block_index, line_index, speaker, text) VALUES (?, ?, ?, ?)",
+                        (block_index, line_index, speaker, dialogue_text),
+                    )
+
             # Locations
             conn.execute("DELETE FROM profile_locations")
             for name, desc in parsed.locations.items():
@@ -414,9 +492,11 @@ class ProfileDatabase:
             conn.execute("DELETE FROM profile_social_circle")
             for npc in parsed.social_circle:
                 conn.execute(
-                    "INSERT INTO profile_social_circle (name, relationship, personality, shared_interests) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO profile_social_circle "
+                    "(name, relationship, personality, shared_interests, kind) VALUES (?, ?, ?, ?, ?)",
                     (npc.get("name", ""), npc.get("relationship", ""),
-                     npc.get("personality", ""), npc.get("shared_interests", "")),
+                     npc.get("personality", ""), npc.get("shared_interests", ""),
+                     npc.get("kind") or "friend"),
                 )
 
             # Media preferences
@@ -543,6 +623,17 @@ class ProfileDatabase:
                 ),
             )
 
+            # Humanness program Task 7 (spec §4.1/§4.2)
+            conn.execute(
+                """UPDATE profile_core SET
+                    setting = ?, attachment_style = ?, intimacy_rate = ?, personal_goal = ?
+                WHERE id = 1""",
+                (
+                    _get("setting", ""), _get("attachment_style", ""),
+                    _get("intimacy_rate", None), _get("personal_goal", ""),
+                ),
+            )
+
             # Lists
             conn.execute("DELETE FROM profile_lists")
             for list_type, field_name in [
@@ -556,6 +647,9 @@ class ProfileDatabase:
                 ("struggles", "struggles"),
                 ("character_defects", "character_defects"),
                 ("intrusive_thought_themes", "intrusive_thought_themes"),
+                ("household", "household"),
+                ("never_say", "never_say"),
+                ("allow_phrases", "allow_phrases"),
             ]:
                 values = _get(field_name, [])
                 if isinstance(values, str):
@@ -606,6 +700,44 @@ class ProfileDatabase:
                     (emotion, float(intensity)),
                 )
 
+            # State expressions (Task 7, spec §4.1/§4.2)
+            conn.execute("DELETE FROM profile_state_expressions")
+            state_expressions = _get("state_expressions", {})
+            if isinstance(state_expressions, dict):
+                for state, text in state_expressions.items():
+                    if text and text.strip():
+                        conn.execute(
+                            "INSERT INTO profile_state_expressions (state, text) VALUES (?, ?)",
+                            (state, text.strip()),
+                        )
+
+            # Traits (Task 7, spec §4.1/§4.2)
+            conn.execute("DELETE FROM profile_traits")
+            traits = _get("traits", {})
+            if isinstance(traits, dict):
+                for trait, value in traits.items():
+                    conn.execute(
+                        "INSERT INTO profile_traits (trait, value) VALUES (?, ?)",
+                        (trait, float(value)),
+                    )
+
+            # Example dialogue (Task 7, spec §4.1/§4.2)
+            conn.execute("DELETE FROM profile_example_dialogue")
+            example_dialogue = _get("example_dialogue", [])
+            if isinstance(example_dialogue, list):
+                for block_index, block in enumerate(example_dialogue):
+                    if not isinstance(block, list):
+                        continue
+                    for line_index, line in enumerate(block):
+                        if not (isinstance(line, (list, tuple)) and len(line) == 2):
+                            continue
+                        speaker, dialogue_text = line
+                        conn.execute(
+                            "INSERT INTO profile_example_dialogue "
+                            "(block_index, line_index, speaker, text) VALUES (?, ?, ?, ?)",
+                            (block_index, line_index, speaker, dialogue_text),
+                        )
+
             # Locations
             conn.execute("DELETE FROM profile_locations")
             locations = _get("locations", {})
@@ -632,9 +764,11 @@ class ProfileDatabase:
             for npc in social_circle:
                 if isinstance(npc, dict):
                     conn.execute(
-                        "INSERT INTO profile_social_circle (name, relationship, personality, shared_interests) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO profile_social_circle "
+                        "(name, relationship, personality, shared_interests, kind) VALUES (?, ?, ?, ?, ?)",
                         (npc.get("name", ""), npc.get("relationship", ""),
-                         npc.get("personality", ""), npc.get("shared_interests", "")),
+                         npc.get("personality", ""), npc.get("shared_interests", ""),
+                         npc.get("kind") or "friend"),
                     )
 
             # Media preferences
@@ -709,14 +843,37 @@ class ProfileDatabase:
             for r in conn.execute("SELECT context, description FROM profile_outfits"):
                 outfits[r["context"]] = r["description"]
 
+            # State expressions (Task 7, spec §4.1/§4.2)
+            state_expressions = {}
+            for r in conn.execute("SELECT state, text FROM profile_state_expressions"):
+                state_expressions[r["state"]] = r["text"]
+
+            # Traits (Task 7, spec §4.1/§4.2)
+            traits = {}
+            for r in conn.execute("SELECT trait, value FROM profile_traits"):
+                traits[r["trait"]] = r["value"]
+
+            # Example dialogue (Task 7, spec §4.1/§4.2) -- ordered blocks of
+            # (speaker, text) tuples, preserving authored order.
+            _dialogue_blocks: Dict[int, List[tuple]] = {}
+            for r in conn.execute(
+                "SELECT block_index, line_index, speaker, text FROM profile_example_dialogue "
+                "ORDER BY block_index, line_index"
+            ):
+                _dialogue_blocks.setdefault(r["block_index"], []).append((r["speaker"], r["text"]))
+            example_dialogue = [_dialogue_blocks[k] for k in sorted(_dialogue_blocks)]
+
             # Social circle
             social_circle = []
-            for r in conn.execute("SELECT name, relationship, personality, shared_interests FROM profile_social_circle"):
+            for r in conn.execute(
+                "SELECT name, relationship, personality, shared_interests, kind FROM profile_social_circle"
+            ):
                 social_circle.append({
                     "name": r["name"],
                     "relationship": r["relationship"],
                     "personality": r["personality"],
                     "shared_interests": r["shared_interests"],
+                    "kind": r["kind"] or "friend",
                 })
 
             # Media preferences
@@ -818,6 +975,17 @@ class ProfileDatabase:
                 ),
                 # Multi-user isolation (v2.27.0)
                 "owner_device_id": (row["owner_device_id"] if "owner_device_id" in row.keys() else None) or "",
+                # Humanness program Task 7 (spec §4.1/§4.2)
+                "example_dialogue": example_dialogue,
+                "state_expressions": state_expressions,
+                "traits": traits,
+                "setting": (row["setting"] if "setting" in row.keys() else None) or "",
+                "household": lists.get("household", []),
+                "attachment_style": (row["attachment_style"] if "attachment_style" in row.keys() else None) or "",
+                "intimacy_rate": row["intimacy_rate"] if "intimacy_rate" in row.keys() else None,
+                "never_say": lists.get("never_say", []),
+                "allow_phrases": lists.get("allow_phrases", []),
+                "personal_goal": (row["personal_goal"] if "personal_goal" in row.keys() else None) or "",
                 # Metadata (prefixed with _ so PersonalityDefinition ignores it)
                 "_updated_at": row["updated_at"] or "",
             }
@@ -860,6 +1028,9 @@ class ProfileDatabase:
             data["struggles"] = []
             data["character_defects"] = []
             data["intrusive_thought_themes"] = []
+            data["household"] = []
+            data["never_say"] = []
+            data["allow_phrases"] = []
             data["taste_seeds"] = {}
             data["substance_tendencies"] = {}
             data["behavioral_tendencies"] = {}
@@ -895,14 +1066,36 @@ class ProfileDatabase:
             for r in conn.execute("SELECT context, description FROM profile_outfits"):
                 data["outfits"][r["context"]] = r["description"]
 
+            # State expressions (Task 7, spec §4.1/§4.2)
+            data["state_expressions"] = {}
+            for r in conn.execute("SELECT state, text FROM profile_state_expressions"):
+                data["state_expressions"][r["state"]] = r["text"]
+
+            # Traits (Task 7, spec §4.1/§4.2)
+            data["traits"] = {}
+            for r in conn.execute("SELECT trait, value FROM profile_traits"):
+                data["traits"][r["trait"]] = r["value"]
+
+            # Example dialogue (Task 7, spec §4.1/§4.2)
+            _dialogue_blocks: Dict[int, List[tuple]] = {}
+            for r in conn.execute(
+                "SELECT block_index, line_index, speaker, text FROM profile_example_dialogue "
+                "ORDER BY block_index, line_index"
+            ):
+                _dialogue_blocks.setdefault(r["block_index"], []).append((r["speaker"], r["text"]))
+            data["example_dialogue"] = [_dialogue_blocks[k] for k in sorted(_dialogue_blocks)]
+
             # Social circle
             data["social_circle"] = []
-            for r in conn.execute("SELECT name, relationship, personality, shared_interests FROM profile_social_circle"):
+            for r in conn.execute(
+                "SELECT name, relationship, personality, shared_interests, kind FROM profile_social_circle"
+            ):
                 data["social_circle"].append({
                     "name": r["name"],
                     "relationship": r["relationship"],
                     "personality": r["personality"],
                     "shared_interests": r["shared_interests"],
+                    "kind": r["kind"] or "friend",
                 })
 
             # Media preferences

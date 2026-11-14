@@ -14,6 +14,7 @@ import json
 import logging
 import random
 from datetime import datetime
+from typing import Optional
 
 from ..models import (
     InebriationState,
@@ -24,6 +25,7 @@ from ..models import (
     SleepQualityState,
     FitnessState,
 )
+from ..personas.parameters import PersonaParameters
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +45,21 @@ SUBSTANCE_ACTIVITIES = {
     "happy hour": ("alcohol", 0.3),
     "having a beer": ("beer", 0.15),
 }
+#: Ruling T10-R2: an activity of her setting carrying a substance tag (the
+#: tags aura_life.activities.choice.SUBSTANCE_TAGS maps her substances to)
+#: is that substance whatever its name: the tag -> (the substance, the
+#: intoxication it adds, before her tendency's modifier).
+#: - "alcohol": 0.3, the value two of the three "alcohol" entries of
+#:   SUBSTANCE_ACTIVITIES take ("going out for drinks", "happy hour").
+#: - "smoking": 0.05, chosen (Task 10 fix round): a smoke registers as a
+#:   substance -- her tendency for it applies, "avoidant" keeps her off it --
+#:   but never inebriates: it is below both the 0.1 of "is_inebriated" and
+#:   the 0.05 export_state reports from, and INEBRIATION_DECAY_RATE takes it
+#:   back to nothing before her next activity tick.
+SUBSTANCE_TAG_EFFECTS = {
+    "alcohol": ("alcohol", 0.3),
+    "smoking": ("tobacco", 0.05),
+}
 INEBRIATION_DECAY_RATE = 0.02
 HANGOVER_THRESHOLD = 0.4
 HANGOVER_DECAY_RATE = 0.01
@@ -51,6 +68,12 @@ HANGOVER_DECAY_RATE = 0.01
 ILLNESS_RECOVERY_RATE = 0.02       # illness_severity decay per tick
 INJURY_RECOVERY_RATE = 0.006       # injury_severity decay per tick (slower heal)
 UNWELL_THRESHOLD = 0.05            # severity below this counts as recovered/healthy
+
+#: The quality of a night's sleep with nothing against it -- no stress, no
+#: caffeine, no insomnia risk: where on_sleep starts before taking those off.
+#: (Named in the humanness program's Task 14 fix round, ruling T14-R1, so a
+#: day's quality can be judged against it; the value is on_sleep's own.)
+SLEEP_QUALITY_BASE = 0.7
 
 # Body-image dynamics
 BODY_IMAGE_DRIFT_RATE = 0.004      # pull toward baseline per tick
@@ -61,16 +84,9 @@ BODY_IMAGE_FITNESS_NUDGE = 0.004   # upward nudge per tick for good fitness/comf
 LOW_MOOD_THRESHOLD = 0.35          # mood below this drags body_image down
 HIGH_SHAME_THRESHOLD = 0.5         # shame above this drags body_image down
 
-# Seeding: phrases in struggles/traits that lower the body_image baseline
-BODY_IMAGE_STRUGGLE_MARKERS = (
-    "body issues",
-    "body image",
-    "insecure about her looks",
-    "insecure about my looks",
-    "eating disorder",
-    "hates her body",
-    "hate my body",
-)
+# Seeding: the phrases in struggles/traits that lower the body_image baseline
+# are read by aura_life.personas.parameters (BODY_IMAGE_STRUGGLE_MARKERS,
+# PersonaParameters.body_image_struggle).
 BODY_IMAGE_SEED_LOW = 0.35         # baseline when struggles indicate body-image problems
 
 # Minor ailments pool
@@ -107,7 +123,19 @@ class BodySystem:
     """Manages all physical body state modules."""
 
     def __init__(self, hormonal_enabled: bool = False, substance_tendencies: dict = None,
-                 struggles: list = None, core_traits: list = None):
+                 struggles: list = None, core_traits: list = None, rng=None,
+                 params: PersonaParameters = None):
+        """``rng``: optional ``random.Random`` for the sleep/daily-health
+        rolls. ``None`` -- the default -- is a fresh, unseeded
+        ``random.Random()`` (never the module), so a bare ``BodySystem()``
+        still works and shares no draw sequence with any other instance or
+        the module.
+
+        ``params``: her traits' engine parameters
+        (:class:`~aura_life.personas.parameters.PersonaParameters`), whose
+        ``body_image_struggle`` seeds a lower body-image baseline; without them
+        ``struggles`` and ``core_traits`` are read for them."""
+        self._rng = rng if rng is not None else random.Random()
         self._health = PhysicalHealthState()
         self._hormonal = HormonalCycleState(enabled=hormonal_enabled)
         self._comfort = PhysicalComfortState()
@@ -116,14 +144,13 @@ class BodySystem:
         self._fitness = FitnessState()
         self._inebriation = InebriationState()
         self._substance_tendencies = substance_tendencies or {}
-        self._seed_body_image(struggles, core_traits)
+        if params is None:
+            params = PersonaParameters.from_core_traits(core_traits, struggles=struggles)
+        self._seed_body_image(params)
 
-    def _seed_body_image(self, struggles: list = None, core_traits: list = None):
+    def _seed_body_image(self, params: PersonaParameters):
         """Seed body_image baseline LOWER when struggles/traits signal body-image problems."""
-        haystack = " ".join(
-            str(x).lower() for x in (list(struggles or []) + list(core_traits or []))
-        )
-        if any(marker in haystack for marker in BODY_IMAGE_STRUGGLE_MARKERS):
+        if params.body_image_struggle:
             self._health.body_image = BODY_IMAGE_SEED_LOW
         # Baseline is the seeded resting set-point body_image drifts toward.
         self._health.body_image_baseline = self._health.body_image
@@ -139,19 +166,23 @@ class BodySystem:
         """
         mood = kwargs.get("mood", 0.5)
         shame = kwargs.get("shame", 0.0)
+        # now: the world instant LifeService passes (humanness Task 19): when
+        # an ailment ends, how long since a workout; the host's clock if absent.
+        now = kwargs.get("now")
         self._update_comfort(activity_name, weather)
         self._update_appearance(hours_awake)
-        self._resolve_conditions()
+        self._resolve_conditions(now=now)
         self._recover_acute_health()
         self._update_body_image(mood, shame)
         self._update_insomnia_risk(stress_level)
         # Fitness decays very slowly each tick
-        self._decay_fitness()
+        self._decay_fitness(now=now)
         self._tick_inebriation()
 
-    def on_new_day(self):
-        """Daily reset and rolls."""
-        self.roll_daily_health()
+    def on_new_day(self, *, now: Optional[datetime] = None):
+        """Daily reset and rolls (an ailment starts ``now``: the world instant;
+        the host's clock when omitted)."""
+        self.roll_daily_health(now=now)
         if self._hormonal.enabled:
             self.advance_hormonal_cycle()
         # Reset appearance for new day
@@ -160,22 +191,25 @@ class BodySystem:
 
     # ============= Activity Handlers =============
 
-    def on_activity(self, activity_name: str):
-        """Update body state from activity."""
+    def on_activity(self, activity_name: str, *, now: Optional[datetime] = None):
+        """Update body state from activity; a workout is stamped ``now`` (the
+        world instant ``LifeService`` passes, humanness Task 19:
+        :meth:`_decay_fitness` compares it; the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
         # Fitness improvement
         if activity_name in CARDIO_ACTIVITIES:
             self._fitness.cardio = min(1.0, self._fitness.cardio + 0.002)
-            self._fitness.last_cardio_session = datetime.now()
+            self._fitness.last_cardio_session = now
             if self._fitness.cardio > self._fitness.peak_cardio:
                 self._fitness.peak_cardio = self._fitness.cardio
         if activity_name in STRENGTH_ACTIVITIES:
             self._fitness.strength = min(1.0, self._fitness.strength + 0.002)
-            self._fitness.last_strength_session = datetime.now()
+            self._fitness.last_strength_session = now
             if self._fitness.strength > self._fitness.peak_strength:
                 self._fitness.peak_strength = self._fitness.strength
         if activity_name in FLEXIBILITY_ACTIVITIES:
             self._fitness.flexibility = min(1.0, self._fitness.flexibility + 0.002)
-            self._fitness.last_flexibility_session = datetime.now()
+            self._fitness.last_flexibility_session = now
 
         # Comfort from relief activities
         if activity_name in COMFORT_RELIEF_ACTIVITIES:
@@ -193,7 +227,7 @@ class BodySystem:
     def on_sleep(self, stress_level: float, caffeine_boost: float):
         """Calculate sleep quality when sleeping."""
         # Base quality
-        quality = 0.7
+        quality = SLEEP_QUALITY_BASE
         # Stress reduces quality
         quality -= stress_level * 0.3
         # Caffeine reduces quality
@@ -203,7 +237,7 @@ class BodySystem:
         quality = max(0.1, min(1.0, quality))
 
         self._sleep.last_quality = quality
-        self._sleep.dream_vividness = 0.3 + random.uniform(0.0, 0.4)
+        self._sleep.dream_vividness = 0.3 + self._rng.uniform(0.0, 0.4)
 
         if quality < 0.4:
             self._sleep.consecutive_poor_nights += 1
@@ -216,18 +250,21 @@ class BodySystem:
 
     # ============= Health =============
 
-    def roll_daily_health(self):
-        """Small chance of minor ailment each day (3%)."""
-        if random.random() < 0.03 and not self._health.active_conditions:
-            ailment = random.choice(MINOR_AILMENTS).copy()
-            ailment["started_at"] = datetime.now().isoformat()
+    def roll_daily_health(self, *, now: Optional[datetime] = None):
+        """Small chance of minor ailment each day (3%), starting ``now`` (the
+        world instant; :meth:`_resolve_conditions` compares it; the host's
+        clock when omitted)."""
+        if self._rng.random() < 0.03 and not self._health.active_conditions:
+            ailment = self._rng.choice(MINOR_AILMENTS).copy()
+            ailment["started_at"] = (now if now is not None else datetime.now()).isoformat()
             self._health.active_conditions.append(ailment)
             self._health.wellness = max(0.3, self._health.wellness - ailment["severity"])
             logger.info(f"Body: minor ailment — {ailment['name']}")
 
-    def _resolve_conditions(self):
-        """Remove expired conditions."""
-        now = datetime.now()
+    def _resolve_conditions(self, *, now: Optional[datetime] = None):
+        """Remove the conditions expired at ``now`` (the world instant; the
+        host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
         remaining = []
         for cond in self._health.active_conditions:
             started = datetime.fromisoformat(cond["started_at"])
@@ -379,9 +416,10 @@ class BodySystem:
 
     # ============= Fitness =============
 
-    def _decay_fitness(self):
-        """Very slow fitness decay per tick."""
-        now = datetime.now()
+    def _decay_fitness(self, *, now: Optional[datetime] = None):
+        """Very slow fitness decay per tick, by the days to ``now`` since a
+        workout (the world instant; the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
         # Cardio decays if no session in 3+ days
         if self._fitness.last_cardio_session:
             days_since = (now - self._fitness.last_cardio_session).days
@@ -400,16 +438,24 @@ class BodySystem:
 
     # ============= Inebriation =============
 
-    def on_substance_activity(self, activity_name: str):
-        """Check if activity involves substances and apply inebriation."""
+    def on_substance_activity(self, activity_name: str, tags=frozenset(), *, now: Optional[datetime] = None):
+        """Check if activity involves substances and apply inebriation: by its
+        name (SUBSTANCE_ACTIVITIES), or else by its tags
+        (SUBSTANCE_TAG_EFFECTS, ruling T10-R2) -- a pack's drink under any name
+        makes a drinker tipsy. Her tendency for the substance scales it."""
         entry = SUBSTANCE_ACTIVITIES.get(activity_name)
-        if not entry:
-            return
-        substance, increment = entry
-        # Apply tendency multiplier
-        tendency = self._substance_tendencies.get(substance, "")
-        if not tendency:
-            tendency = self._substance_tendencies.get("alcohol", "")
+        if entry:
+            substance, increment = entry
+            # Apply tendency multiplier
+            tendency = self._substance_tendencies.get(substance, "")
+            if not tendency:
+                tendency = self._substance_tendencies.get("alcohol", "")
+        else:
+            tag = next((t for t in sorted(tags or ()) if t in SUBSTANCE_TAG_EFFECTS), None)
+            if tag is None:
+                return
+            substance, increment = SUBSTANCE_TAG_EFFECTS[tag]
+            tendency = self._tendency_for_tag(tag)
         if tendency == "avoidant":
             return  # Won't drink
         elif tendency == "heavy":
@@ -418,9 +464,26 @@ class BodySystem:
             increment *= 0.7
         self._inebriation.level = min(1.0, self._inebriation.level + increment)
         self._inebriation.substance = substance
+        now = now if now is not None else datetime.now()
         if not self._inebriation.started_at:
-            self._inebriation.started_at = datetime.now()
-        self._inebriation.last_drink_at = datetime.now()
+            self._inebriation.started_at = now
+        self._inebriation.last_drink_at = now
+
+    def _tendency_for_tag(self, tag: str) -> str:
+        """Her tendency for the substances that are ``tag``
+        (aura_life.activities.choice.SUBSTANCE_TAGS: "whiskey" and "wine" are
+        both "alcohol"): "avoidant" when she avoids any of them, else the
+        most frequent -- the rule her activity choice follows; "" when she
+        names none."""
+        from ..activities.choice import SUBSTANCE_FREQUENCY, SUBSTANCE_TAGS, SUBSTANCE_UNKNOWN_FREQUENCY
+
+        words = [str(tendency or "").strip().lower() for substance, tendency in self._substance_tendencies.items()
+                 if SUBSTANCE_TAGS.get(str(substance).strip().lower()) == tag]
+        if not words:
+            return ""
+        if "avoidant" in words:
+            return "avoidant"
+        return max(words, key=lambda word: SUBSTANCE_FREQUENCY.get(word, SUBSTANCE_UNKNOWN_FREQUENCY))
 
     def _tick_inebriation(self):
         """Decay inebriation level each tick."""
@@ -577,17 +640,30 @@ class BodySystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "BodySystem":
-        """Deserialize from DB."""
-        system = cls(hormonal_enabled=bool(data.get("hormonal_enabled", False)))
+    def from_dict(cls, data: dict, rng=None, params: PersonaParameters = None,
+                  substance_tendencies: dict = None) -> "BodySystem":
+        """Deserialize from DB.
+
+        ``params`` and ``substance_tendencies``: her definition's seeds, which
+        a rebuilt body takes as a new one does (the reload rule of Task 8):
+        with ``params``, her body-image baseline is her seed's, whatever the
+        row saved; ``substance_tendencies`` are never saved, so without them a
+        reloaded body keeps none."""
+        system = cls(hormonal_enabled=bool(data.get("hormonal_enabled", False)), rng=rng,
+                     substance_tendencies=substance_tendencies, params=params)
         if not data:
             return system
+        seeded_baseline = system._health.body_image_baseline
         system._health.wellness = data.get("wellness", 0.8)
         conditions = data.get("active_conditions", "[]")
         system._health.active_conditions = json.loads(conditions) if isinstance(conditions, str) else conditions
         system._health.body_image = data.get("body_image", 0.6)
-        # Old rows lack a stored baseline — fall back to the restored body_image.
-        system._health.body_image_baseline = data.get("body_image_baseline", system._health.body_image)
+        # Her seed's baseline when her parameters are given; otherwise the saved
+        # one (old rows lack it -- fall back to the restored body_image).
+        system._health.body_image_baseline = (
+            seeded_baseline if params is not None
+            else data.get("body_image_baseline", system._health.body_image)
+        )
         system._health.illness = data.get("illness", "")
         system._health.illness_severity = data.get("illness_severity", 0.0)
         system._health.injury = data.get("injury", "")
@@ -622,7 +698,8 @@ class BodySystem:
             hangover_severity=data.get("inebriation_hangover", 0.0),
             last_drink_at=datetime.fromisoformat(data["inebriation_last_drink"]) if data.get("inebriation_last_drink") else None,
         )
-        system._substance_tendencies = data.get("_substance_tendencies", {})
+        if substance_tendencies is None:
+            system._substance_tendencies = data.get("_substance_tendencies", {})
         return system
 
     # ============= Properties =============

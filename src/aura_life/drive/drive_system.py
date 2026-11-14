@@ -13,6 +13,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from ..models import CuriosityQuestion, AvoidanceItem, ComfortZoneBoundary
+from ..personas.parameters import PersonaParameters
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -98,15 +99,19 @@ DRIVE_CONVERSATION_TRIGGERS = {
 }
 
 # ============= Personality Growth Multiplier =============
-
-DRIVE_GROWTH_TRAITS = {
-    "curious": 0.3, "adventurous": 0.2, "ambitious": 0.15, "driven": 0.15,
-    "lazy": -0.2, "cautious": -0.1, "anxious": -0.1,
-}
+# Read from her trait text by aura_life.personas.parameters
+# (DRIVE_GROWTH_TRAITS, PersonaParameters.drive_multiplier).
 
 GUILT_GROWTH_RATE = 0.003  # Per tick for avoidance items
 MAX_CURIOSITY = 5
 MAX_AVOIDANCE = 4
+#: The chance, per roll_avoidance, that she starts putting something off (the
+#: 3% it has always been). Per persona, times PersonaParameters.avoidance_scale:
+#: an avoidant persona puts more off (Task 15).
+AVOIDANCE_CHANCE = 0.03
+#: Guilt past this makes something she is putting off weigh on her
+#: (get_guilt_stressors; LifeService's "putting off ..." stressor).
+GUILT_STRESSOR_LEVEL = 0.4
 
 
 class DriveSystem:
@@ -114,26 +119,40 @@ class DriveSystem:
 
     def __init__(self, core_traits: Optional[List[str]] = None,
                  comfort_zone_seeds: Optional[List[str]] = None,
-                 rng=None):
+                 rng=None,
+                 params: Optional[PersonaParameters] = None):
+        """``params``: her traits' engine parameters
+        (:class:`~aura_life.personas.parameters.PersonaParameters`), whose
+        ``drive_multiplier`` scales curiosity and guilt, and whose
+        ``avoidance_scale`` (how avoidant her coping is, Task 15) scales the
+        chance she starts putting something off and how fast its guilt grows;
+        without them ``core_traits`` is read for them."""
+        if params is None:
+            params = PersonaParameters.from_core_traits(core_traits)
         self._curiosities: List[CuriosityQuestion] = []
         self._rng = rng if rng is not None else random
         self._avoidances: List[AvoidanceItem] = []
         self._comfort_zones: Dict[str, ComfortZoneBoundary] = {}
-        self._drive_multiplier = self._calc_drive_multiplier(core_traits or [])
+        self._drive_multiplier = params.drive_multiplier
+        self._avoidance_scale = params.avoidance_scale
         # Seed comfort zones from persona profile
         if comfort_zone_seeds:
             self._seed_comfort_zones(comfort_zone_seeds)
 
     # ============= Tick =============
 
-    def tick(self):
-        """Per-tick update: grow guilt, decay old curiosity."""
-        # Avoidance guilt grows — less driven personas feel more guilt
-        guilt_rate = GUILT_GROWTH_RATE * (2.0 - self._drive_multiplier)
+    def tick(self, *, now: Optional[datetime] = None):
+        """Per-tick update: grow guilt, decay old curiosity. An avoidance is
+        overdue past its deadline at ``now`` (the world instant ``LifeService``
+        passes, humanness Task 19; the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
+        # Avoidance guilt grows — less driven personas feel more guilt, and
+        # an avoidant one feels it sooner (her avoidance_scale)
+        guilt_rate = GUILT_GROWTH_RATE * (2.0 - self._drive_multiplier) * self._avoidance_scale
         for item in self._avoidances:
             item.guilt_accumulated = min(1.0, item.guilt_accumulated + guilt_rate)
             # Overdue check
-            if item.deadline and datetime.now() > item.deadline:
+            if item.deadline and now > item.deadline:
                 item.guilt_accumulated = min(1.0, item.guilt_accumulated + 0.01)
 
         # Old curiosity loses intensity slowly — curious personas hold interest longer
@@ -150,12 +169,12 @@ class DriveSystem:
 
     def on_activity(self, activity_name: str):
         """Spark curiosity from an activity, chance scaled by personality."""
-        if random.random() > 0.15 * self._drive_multiplier:
+        if self._rng.random() > 0.15 * self._drive_multiplier:
             return
         sparks = CURIOSITY_SPARKS.get(activity_name)
         if not sparks:
             return
-        topic = random.choice(sparks)
+        topic = self._rng.choice(sparks)
         # Don't duplicate
         for q in self._curiosities:
             if q.topic == topic:
@@ -163,7 +182,7 @@ class DriveSystem:
                 return
         self._curiosities.append(CuriosityQuestion(
             topic=topic,
-            intensity=random.uniform(0.3, 0.7),
+            intensity=self._rng.uniform(0.3, 0.7),
             sparked_by=activity_name,
             created_at=datetime.now(),
         ))
@@ -224,8 +243,9 @@ class DriveSystem:
         self._avoidances = [a for a in self._avoidances if a.description != description]
 
     def roll_avoidance(self):
-        """Small chance (3%) per tick to generate an avoidance item."""
-        if self._rng.random() > 0.03 or len(self._avoidances) >= MAX_AVOIDANCE:
+        """Small chance (AVOIDANCE_CHANCE, times her avoidance_scale) per tick
+        to generate an avoidance item."""
+        if self._rng.random() > AVOIDANCE_CHANCE * self._avoidance_scale or len(self._avoidances) >= MAX_AVOIDANCE:
             return
         seed = self._rng.choice(AVOIDANCE_SEEDS)
         for a in self._avoidances:
@@ -239,7 +259,21 @@ class DriveSystem:
 
     def get_guilt_stressors(self) -> List[str]:
         """Get avoidance items with high guilt (for feeding into Affect stress)."""
-        return [a.description for a in self._avoidances if a.guilt_accumulated > 0.4]
+        return [a.description for a in self._avoidances if a.guilt_accumulated > GUILT_STRESSOR_LEVEL]
+
+    def put_off(self) -> List[str]:
+        """What she is putting off that weighs on her (guilt past
+        GUILT_STRESSOR_LEVEL), the most guilt first (ties in the order she
+        started putting them off)."""
+        weighing = [a for a in self._avoidances if a.guilt_accumulated > GUILT_STRESSOR_LEVEL]
+        return [a.description for a in sorted(weighing, key=lambda a: -a.guilt_accumulated)]
+
+    def put_off_share(self) -> float:
+        """How much of all she could be putting off weighs on her, 0..1: the
+        guilt of what she is putting off past GUILT_STRESSOR_LEVEL, summed,
+        over MAX_AVOIDANCE things at full guilt."""
+        weighing = sum(a.guilt_accumulated for a in self._avoidances if a.guilt_accumulated > GUILT_STRESSOR_LEVEL)
+        return min(1.0, weighing / MAX_AVOIDANCE)
 
     # ============= Comfort Zone =============
 
@@ -309,17 +343,6 @@ class DriveSystem:
                     sparked_by="conversation",
                     created_at=datetime.now(),
                 ))
-
-    # ============= Personality Calculation =============
-
-    def _calc_drive_multiplier(self, core_traits: List[str]) -> float:
-        """Compute 0.5-1.5 drive multiplier from personality traits."""
-        traits_lower = " ".join(t.lower() for t in core_traits)
-        modifier = 0.0
-        for trait, weight in DRIVE_GROWTH_TRAITS.items():
-            if trait in traits_lower:
-                modifier += weight
-        return max(0.5, min(1.5, 1.0 + modifier))
 
     # ============= Export / Serialize =============
 
@@ -392,9 +415,9 @@ class DriveSystem:
 
     @classmethod
     def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None,
-                  rng=None) -> "DriveSystem":
+                  rng=None, params: Optional[PersonaParameters] = None) -> "DriveSystem":
         """Deserialize from DB."""
-        system = cls(core_traits=core_traits, rng=rng)
+        system = cls(core_traits=core_traits, rng=rng, params=params)
         if not data:
             return system
         # Curiosities

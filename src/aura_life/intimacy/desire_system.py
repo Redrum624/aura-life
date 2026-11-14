@@ -4,6 +4,7 @@ Desire System
 Manages the persona's intimate feelings, arousal, and private pleasures.
 """
 
+import logging
 import random
 from dataclasses import dataclass
 from datetime import datetime
@@ -11,15 +12,24 @@ from enum import Enum
 from typing import Dict, List, Optional, Tuple
 
 from ..models import TimeOfDay
+from ..personas.parameters import PersonaParameters
+from ..personas.pronoun_render import render_line
+from ..settings import DEFAULT_SETTING, SettingSpec, get_setting
+# Legacy names: IntimateActivity moved, unchanged, to aura_life.models, and the
+# intimate catalogue into the contemporary setting pack
+# (aura_life.settings.contemporary), in Task 9's fix round (ruling T9-R2) --
+# the system reads its persona's setting now; re-exported so an import from
+# here keeps working.
+from ..models import IntimateActivity  # noqa: F401
+from ..settings.contemporary import INTIMATE_ACTIVITIES  # noqa: F401
+
+
+logger = logging.getLogger(__name__)
 
 
 # ============= Personality Growth Multiplier =============
-
-DESIRE_GROWTH_TRAITS = {
-    "passionate": 0.3, "sensual": 0.3, "romantic": 0.2, "flirty": 0.2,
-    "warm": 0.1,
-    "reserved": -0.2, "cold": -0.3, "guarded": -0.2, "stoic": -0.15,
-}
+# Read from her trait text by aura_life.personas.parameters
+# (DESIRE_GROWTH_TRAITS, PersonaParameters.desire_multiplier).
 
 
 class ArousalLevel(Enum):
@@ -61,212 +71,6 @@ class DesireState:
             return ArousalLevel.ACHING
 
 
-# ============= Intimate Activities =============
-
-@dataclass
-class IntimateActivity:
-    """An intimate/private activity."""
-    name: str
-    description: str
-    min_arousal: float
-    arousal_change: float  # Positive during, negative after release
-    satisfaction_gain: float
-    energy_cost: float
-    duration_minutes: int
-    narrative_templates: List[str]
-    thought_possibilities: List[str]
-    emotion_effects: Dict[str, float]
-    preferred_locations: List[str]
-    preferred_times: List[TimeOfDay]
-    is_release: bool = False  # Does this provide release/satisfaction
-    share_worthy: bool = False
-    shyness_to_share: float = 0.7  # How shy she'd be sharing this
-
-
-INTIMATE_ACTIVITIES: List[IntimateActivity] = [
-    IntimateActivity(
-        name="sensual daydreaming",
-        description="Letting her mind wander to intimate fantasies",
-        min_arousal=0.15,
-        arousal_change=0.15,
-        satisfaction_gain=0.05,
-        energy_cost=0.02,
-        duration_minutes=10,
-        narrative_templates=[
-            "Her mind went somewhere... private",
-            "Started thinking about stuff she probably shouldn't",
-            "Let her mind wander and it went there",
-            "Got a little distracted by some thoughts",
-        ],
-        thought_possibilities=[
-            "Where did that come from...",
-            "Mm, okay that's a nice thought",
-            "I wonder what that'd be like...",
-            "I shouldn't be thinking about this... but here we are",
-        ],
-        emotion_effects={"desire": 0.15, "dreamy": 0.1, "flustered": 0.1},
-        preferred_locations=["home"],
-        preferred_times=[TimeOfDay.AFTERNOON, TimeOfDay.EVENING, TimeOfDay.NIGHT],
-        shyness_to_share=0.5,
-    ),
-    IntimateActivity(
-        name="reading something steamy",
-        description="Getting lost in a romance with heated scenes",
-        min_arousal=0.1,
-        arousal_change=0.2,
-        satisfaction_gain=0.1,
-        energy_cost=0.05,
-        duration_minutes=30,
-        narrative_templates=[
-            "Reread that chapter again, the spicy one",
-            "Kept going back to that one part in the book",
-            "Got really into a scene and had to put the book down for a sec",
-            "Read something that definitely got her attention",
-        ],
-        thought_possibilities=[
-            "This author knows exactly what they're doing",
-            "Okay I need a second after that...",
-            "Is it hot in here or is it just me",
-            "I wish... nah never mind",
-        ],
-        emotion_effects={"aroused": 0.2, "flustered": 0.1, "longing": 0.15},
-        preferred_locations=["home"],
-        preferred_times=[TimeOfDay.EVENING, TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT],
-        shyness_to_share=0.4,
-    ),
-    IntimateActivity(
-        name="taking a long bath",
-        description="A warm bath that becomes... self-indulgent",
-        min_arousal=0.2,
-        arousal_change=0.1,
-        satisfaction_gain=0.15,
-        energy_cost=-0.1,  # Relaxing
-        duration_minutes=45,
-        narrative_templates=[
-            "Took a long bath, got a little... relaxed",
-            "Bath turned into more than just a bath",
-            "Soaked in the tub and let her mind wander",
-            "Alone in the bath, just enjoying herself",
-        ],
-        thought_possibilities=[
-            "This is exactly what I needed",
-            "Nobody has to know",
-            "I know what I want right now",
-            "Just gonna enjoy this",
-        ],
-        emotion_effects={"relaxed": 0.2, "sensual": 0.15, "satisfied": 0.1},
-        preferred_locations=["home"],  # Implied bathroom
-        preferred_times=[TimeOfDay.EVENING, TimeOfDay.NIGHT],
-        shyness_to_share=0.6,
-    ),
-    IntimateActivity(
-        name="touching herself",
-        description="Giving herself the pleasure she craves",
-        min_arousal=0.4,
-        arousal_change=-0.5,  # Release brings it down
-        satisfaction_gain=0.6,
-        energy_cost=0.15,
-        duration_minutes=20,
-        narrative_templates=[
-            "Decided to take care of herself",
-            "Alone in her room, gave herself what she wanted",
-            "Took matters into her own hands, literally",
-            "Couldn't ignore it anymore so she did something about it",
-            "Got the release she needed",
-        ],
-        thought_possibilities=[
-            "I really needed this...",
-            "Yeah, right there...",
-            "Nothing wrong with knowing what I want",
-            "God...",
-            "Just for me",
-        ],
-        emotion_effects={"pleasure": 0.4, "satisfied": 0.3, "relaxed": 0.2, "vulnerable": 0.1},
-        preferred_locations=["home"],
-        preferred_times=[TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT, TimeOfDay.MORNING],
-        is_release=True,
-        shyness_to_share=0.85,
-    ),
-    IntimateActivity(
-        name="exploring her body",
-        description="Taking time to discover what feels good",
-        min_arousal=0.3,
-        arousal_change=0.2,
-        satisfaction_gain=0.25,
-        energy_cost=0.1,
-        duration_minutes=30,
-        narrative_templates=[
-            "Took some time to figure out what she likes",
-            "Explored a bit, just seeing what feels good",
-            "Got curious and tried some things",
-            "Spent some time getting to know herself better",
-        ],
-        thought_possibilities=[
-            "Oh, I didn't know that felt that good",
-            "Still learning stuff about myself apparently",
-            "Being gentle about it",
-            "What else haven't I tried?",
-        ],
-        emotion_effects={"curious": 0.15, "sensual": 0.2, "empowered": 0.15},
-        preferred_locations=["home"],
-        preferred_times=[TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT],
-        is_release=False,
-        shyness_to_share=0.75,
-    ),
-    IntimateActivity(
-        name="fantasizing about someone",
-        description="Vivid fantasies about an intimate connection",
-        min_arousal=0.25,
-        arousal_change=0.25,
-        satisfaction_gain=0.1,
-        energy_cost=0.05,
-        duration_minutes=15,
-        narrative_templates=[
-            "Let her imagination run wild for a bit",
-            "Thought about someone and didn't hold back",
-            "Fantasized about stuff she probably won't say out loud",
-            "In her head she could have exactly what she wanted",
-        ],
-        thought_possibilities=[
-            "If they knew what I'm thinking right now...",
-            "I want to feel them close",
-            "The things I'd let them do...",
-            "Is it bad that I want this so much?",
-        ],
-        emotion_effects={"longing": 0.2, "aroused": 0.2, "vulnerable": 0.1},
-        preferred_locations=["home"],
-        preferred_times=[TimeOfDay.EVENING, TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT],
-        shyness_to_share=0.7,
-    ),
-    IntimateActivity(
-        name="intense self-pleasure",
-        description="When the need is overwhelming",
-        min_arousal=0.7,
-        arousal_change=-0.7,
-        satisfaction_gain=0.8,
-        energy_cost=0.25,
-        duration_minutes=30,
-        narrative_templates=[
-            "It had been building up too long to ignore",
-            "Let go completely, didn't hold back",
-            "Went all in, needed this badly",
-            "Took exactly what she needed",
-        ],
-        thought_possibilities=[
-            "Finally...",
-            "Can't think, just feeling...",
-            "More...",
-            "Letting go",
-        ],
-        emotion_effects={"ecstasy": 0.5, "satisfied": 0.4, "exhausted": 0.2, "peaceful": 0.3},
-        preferred_locations=["home"],
-        preferred_times=[TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT],
-        is_release=True,
-        shyness_to_share=0.9,
-    ),
-]
-
-
 # ============= Arousal Triggers =============
 
 AROUSAL_TRIGGERS = {
@@ -293,27 +97,71 @@ class DesireSystem:
 
     def __init__(self, initial_state: Optional[DesireState] = None,
                  core_traits: Optional[List[str]] = None,
-                 rng=None):
-        """Initialize desire system."""
+                 rng=None, gender: Optional[str] = None,
+                 params: Optional[PersonaParameters] = None,
+                 setting: Optional[SettingSpec] = None,
+                 intimacy_rate: Optional[float] = None):
+        """Initialize desire system.
+
+        `gender` is the persona's own (from `appearance_details["gender"]`,
+        via LifeService's `_persona_gender`) -- the default every rendering
+        method here falls back to when *its own* `gender` argument is
+        omitted, so a caller that reaches this engine directly (the aura
+        host calls `.desire.get_status()`) still gets the persona's real
+        pronouns without having to know or pass anything. `None` (no
+        definition) renders as they/them, same as ever.
+
+        `params`: her traits' engine parameters
+        (:class:`~aura_life.personas.parameters.PersonaParameters`), whose
+        `desire_multiplier` scales arousal growth; without them `core_traits`
+        is read for them.
+
+        `setting`: her setting pack (:class:`~aura_life.settings.SettingSpec`),
+        whose intimate catalogue (``SettingSpec.intimate_catalogue``) she
+        draws from: its own, the default setting's when it leaves the field
+        out (so leaving it out never changes how often she does one, spec
+        R6), none when it gives an empty list. `None` -- the default -- is
+        :data:`~aura_life.settings.DEFAULT_SETTING`'s.
+
+        `intimacy_rate`: her `PersonalityDefinition.intimacy_rate` (a
+        profile's optional `Intimacy Rate:`, 0..1; spec R6). Set, it scales
+        the chance :meth:`should_do_intimate_activity` gives on each activity
+        tick -- 1.0 is today's chance, 0.5 half of it, 0 never. `None` -- the
+        default, unset -- is today's chance exactly. A value that is not a
+        number in 0..1 is dropped, with a warning, as the profile parser
+        drops one (never clamped): she keeps today's chance.
+        """
+        if params is None:
+            params = PersonaParameters.from_core_traits(core_traits)
+        if intimacy_rate is not None and (isinstance(intimacy_rate, bool)
+                                          or not isinstance(intimacy_rate, (int, float))
+                                          or not 0.0 <= intimacy_rate <= 1.0):
+            logger.warning("DesireSystem: intimacy_rate %r is not a number in 0..1; unset instead", intimacy_rate)
+            intimacy_rate = None
+        self._intimacy_rate = intimacy_rate
         self._state = initial_state or DesireState()
         self._rng = rng if rng is not None else random
-        self._intimate_activities = {a.name: a for a in INTIMATE_ACTIVITIES}
+        self._gender = gender
+        setting = setting if setting is not None else get_setting(DEFAULT_SETTING)
+        self._intimate_activities = {a.name: a for a in setting.intimate_catalogue()}
         self._recent_intimate_activities: List[str] = []
-        self._growth_multiplier = self._calc_growth_multiplier(core_traits or [])
+        self._growth_multiplier = params.desire_multiplier
 
-    def _calc_growth_multiplier(self, core_traits: List[str]) -> float:
-        """Compute 0.5-1.5 growth multiplier from personality traits."""
-        traits_lower = " ".join(t.lower() for t in core_traits)
-        modifier = 0.0
-        for trait, weight in DESIRE_GROWTH_TRAITS.items():
-            if trait in traits_lower:
-                modifier += weight
-        return max(0.5, min(1.5, 1.0 + modifier))
+    def _effective_gender(self, gender: Optional[str]) -> Optional[str]:
+        """`gender` if the caller passed one, else this instance's own
+        (possibly also `None`, which `render_line`/`resolve_gender` reads as
+        they/them)."""
+        return gender if gender is not None else self._gender
 
     @property
     def state(self) -> DesireState:
         """Get current desire state."""
         return self._state
+
+    @property
+    def intimacy_rate(self) -> Optional[float]:
+        """Her intimacy rate (see ``__init__``); ``None`` when unset."""
+        return self._intimacy_rate
 
     @property
     def arousal(self) -> float:
@@ -335,7 +183,7 @@ class DesireSystem:
         """Check if she really needs release."""
         return self._state.arousal >= 0.6 or self._state.frustration >= 0.5
 
-    def tick(self, time_of_day: TimeOfDay, weather) -> None:
+    def tick(self, time_of_day: TimeOfDay, weather, *, now: Optional[datetime] = None) -> None:
         """
         Update desire state (called every 5 minutes).
 
@@ -369,7 +217,10 @@ class DesireSystem:
 
         # Frustration from prolonged arousal without release
         if self._state.arousal > 0.4 and self._state.last_release:
-            hours_since = (datetime.now() - self._state.last_release).total_seconds() / 3600
+            # Hours to now (the world instant LifeService passes, humanness
+            # Task 19; the host's clock when omitted).
+            hours_since = ((now if now is not None else datetime.now())
+                           - self._state.last_release).total_seconds() / 3600
             if hours_since > 24:
                 self._state.frustration = min(1.0, self._state.frustration + 0.02)
 
@@ -427,11 +278,14 @@ class DesireSystem:
         # Weighted random selection
         total = sum(s for _, s in candidates)
         weights = [s / total for _, s in candidates]
-        return random.choices([a for a, _ in candidates], weights=weights)[0]
+        return self._rng.choices([a for a, _ in candidates], weights=weights)[0]
 
-    def execute_intimate_activity(self, activity: IntimateActivity) -> dict:
+    def execute_intimate_activity(self, activity: IntimateActivity, *,
+                                  now: Optional[datetime] = None) -> dict:
         """
-        Execute an intimate activity.
+        Execute an intimate activity (a release stamped ``now``: the world
+        instant ``LifeService`` passes, humanness Task 19, which :meth:`tick`
+        compares; the host's clock when omitted).
 
         Returns activity log data.
         """
@@ -439,15 +293,15 @@ class DesireSystem:
         if activity.is_release:
             self._state.arousal = max(0.1, self._state.arousal + activity.arousal_change)
             self._state.frustration = max(0.0, self._state.frustration - 0.4)
-            self._state.last_release = datetime.now()
+            self._state.last_release = now if now is not None else datetime.now()
         else:
             self._state.arousal = min(1.0, self._state.arousal + activity.arousal_change)
 
         self._state.satisfaction = min(1.0, self._state.satisfaction + activity.satisfaction_gain)
 
         # Generate narrative
-        narrative = random.choice(activity.narrative_templates)
-        thoughts = random.sample(
+        narrative = self._rng.choice(activity.narrative_templates)
+        thoughts = self._rng.sample(
             activity.thought_possibilities,
             min(2, len(activity.thought_possibilities))
         )
@@ -464,12 +318,13 @@ class DesireSystem:
             "emotion_effects": activity.emotion_effects,
             "energy_cost": activity.energy_cost,
             "is_release": activity.is_release,
-            "share_worthy": random.random() < (1.0 - activity.shyness_to_share),
+            "share_worthy": self._rng.random() < (1.0 - activity.shyness_to_share),
             "shyness_to_share": activity.shyness_to_share,
         }
 
     def should_do_intimate_activity(self, energy_level: float, time_of_day: TimeOfDay) -> bool:
-        """Check if conditions are right for an intimate activity."""
+        """Check if conditions are right for an intimate activity (her
+        intimacy rate, when set, scales the chance; see ``__init__``)."""
         if energy_level < 0.2:
             return False
 
@@ -481,23 +336,29 @@ class DesireSystem:
             base_chance += 0.2
         if self.needs_release:
             base_chance += 0.3
+        if self._intimacy_rate is not None:
+            base_chance *= self._intimacy_rate
 
-        return random.random() < base_chance
+        return self._rng.random() < base_chance
 
-    def get_desire_description(self) -> str:
-        """Get a description of current desire state."""
+    def get_desire_description(self, gender: Optional[str] = None) -> str:
+        """Get a description of current desire state, in the persona's own
+        pronouns (`gender`, else this instance's own -- see `__init__`)."""
         level = self.arousal_level
 
         descriptions = {
             ArousalLevel.NONE: "not really thinking about that stuff right now",
-            ArousalLevel.SUBTLE: "a little aware of her body, nothing major",
+            ArousalLevel.SUBTLE: "a little aware of {poss} body, nothing major",
             ArousalLevel.SIMMERING: "starting to feel something, getting a bit worked up",
             ArousalLevel.AROUSED: "definitely turned on, hard to ignore it",
             ArousalLevel.HEATED: "really wanting it, can't stop thinking about it",
-            ArousalLevel.ACHING: "seriously needs it, body won't let her think about anything else",
+            ArousalLevel.ACHING: "seriously needs it, body won't let {obj} think about anything else",
         }
 
-        return descriptions.get(level, "")
+        template = descriptions.get(level, "")
+        if not template:
+            return ""
+        return render_line(template, gender=self._effective_gender(gender))
 
     def get_clothing_state(self, base_outfit: str) -> dict:
         """Compute dynamic clothing state from arousal + openness.
@@ -599,31 +460,33 @@ class DesireSystem:
 
         return {"level": level, "description": ", ".join(parts)}
 
-    def get_conversation_hint(self) -> Optional[str]:
-        """Get a hint for how desire might affect conversation."""
+    def get_conversation_hint(self, gender: Optional[str] = None) -> Optional[str]:
+        """Get a hint for how desire might affect conversation, in the
+        persona's own pronouns (`gender`, else this instance's own -- see
+        `__init__`)."""
         if self._state.arousal < 0.2:
             return None
 
         if self._state.arousal < 0.4:
             hints = [
-                "She might come across a little warmer than usual",
+                "{Subj} might come across a little warmer than usual",
                 "Might be a bit more affectionate right now",
             ]
         elif self._state.arousal < 0.6:
             hints = [
-                "She's a bit turned on, so she's warmer and more flirty",
-                "She's more open to flirting right now",
-                "She's thinking about physical closeness",
+                "{Subj} {be} a bit turned on, so {subj} {be} warmer and more flirty",
+                "{Subj} {be} more open to flirting right now",
+                "{Subj} {be} thinking about physical closeness",
             ]
         else:
             hints = [
-                "She's really turned on and it's distracting her",
-                "She might be more direct about what she wants",
-                "She's got sex on the brain right now, basically",
-                "She might bring up how she's feeling or drop hints",
+                "{Subj} {be} really turned on and it's distracting {obj}",
+                "{Subj} might be more direct about what {subj} want{s}",
+                "{Subj} {have} got sex on the brain right now, basically",
+                "{Subj} might bring up how {subj} {be} feeling or drop hints",
             ]
 
-        return random.choice(hints)
+        return render_line(self._rng.choice(hints), gender=self._effective_gender(gender))
 
     def would_share_with_user(self, experience_shyness: float) -> Tuple[bool, str]:
         """
@@ -634,21 +497,21 @@ class DesireSystem:
         # Factors: her openness, her shyness, how intimate the thing is
         share_threshold = self._state.shyness + experience_shyness - self._state.openness_with_user
 
-        if random.random() > share_threshold:
+        if self._rng.random() > share_threshold:
             contexts = [
                 "feeling brave enough to admit",
                 "blushing but wanting to share",
                 "trusting enough to confess",
                 "feeling close enough to mention",
             ]
-            return True, random.choice(contexts)
+            return True, self._rng.choice(contexts)
         else:
             contexts = [
                 "too shy to mention",
                 "keeping this private for now",
                 "not quite ready to share that",
             ]
-            return False, random.choice(contexts)
+            return False, self._rng.choice(contexts)
 
     def increase_openness(self, amount: float = 0.05) -> None:
         """Increase openness with user (from intimate conversations)."""
@@ -666,8 +529,12 @@ class DesireSystem:
             "openness_with_user": round(self._state.openness_with_user, 2),
         }
 
-    def get_status(self) -> dict:
-        """Get desire system status."""
+    def get_status(self, gender: Optional[str] = None) -> dict:
+        """Get desire system status. `description` renders in the persona's
+        own pronouns (`gender`, else this instance's own -- see `__init__`) --
+        this engine is public (`LifeService.desire`) and a host may read
+        `description` straight into a prompt, so it must never carry a raw
+        `{poss}`/`{obj}` token regardless of who calls it or with what."""
         return {
             "arousal": self._state.arousal,
             "arousal_level": self.arousal_level.value,
@@ -677,7 +544,7 @@ class DesireSystem:
             "openness_with_user": self._state.openness_with_user,
             "shyness": self._state.shyness,
             "needs_release": self.needs_release,
-            "description": self.get_desire_description(),
+            "description": self.get_desire_description(gender),
         }
 
     def to_dict(self) -> dict:
@@ -694,8 +561,11 @@ class DesireSystem:
 
     @classmethod
     def from_dict(cls, data: dict, core_traits: Optional[List[str]] = None,
-                  rng=None) -> "DesireSystem":
-        """Create from dict."""
+                  rng=None, gender: Optional[str] = None,
+                  params: Optional[PersonaParameters] = None,
+                  setting: Optional[SettingSpec] = None,
+                  intimacy_rate: Optional[float] = None) -> "DesireSystem":
+        """Create from dict (the other arguments as in the constructor)."""
         state = DesireState(
             arousal=data.get("arousal", 0.0),
             desire_for_connection=data.get("desire_for_connection", 0.3),
@@ -705,4 +575,5 @@ class DesireSystem:
             openness_with_user=data.get("openness_with_user", 0.3),
             shyness=data.get("shyness", 0.6),
         )
-        return cls(initial_state=state, core_traits=core_traits, rng=rng)
+        return cls(initial_state=state, core_traits=core_traits, rng=rng, gender=gender, params=params,
+                   setting=setting, intimacy_rate=intimacy_rate)

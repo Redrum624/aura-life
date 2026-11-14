@@ -34,6 +34,9 @@ from ..activities import ActivityEngine
 from ..goals import GoalEngine
 from ..intimacy import DesireSystem
 from ..social import SocialSystem
+from ..social.household import describe_housemate
+from ..personas.pronoun_render import render_line as _render_pronoun_line
+from ..personas.pronoun_render import render_second_person as _render_second_person_line
 from ..behavior.behavior_system import HABIT_SHOWN_PULL
 from ..planner.daily_planner import NOT_HABIT_FORMING
 
@@ -120,6 +123,30 @@ class LifeContextBuilder:
         self._finance = finance_system
         self._career = career_system
 
+    def _render(self, text: str, **extra) -> str:
+        """Fill persona-pronoun / user-reference tokens (see
+        `pronoun_render.render_line`). Delegates to the host `LifeService`
+        when one was given (it knows the persona's gender and `user_info`);
+        without one, renders with no gender/user on record -- they/them and
+        "them", never a guess."""
+        if self._life_service is not None:
+            return self._life_service._render_text(text, **extra)
+        return _render_pronoun_line(text, **extra)
+
+    def _render_you(self, text: str) -> str:
+        """Fill a template's pronoun / user-reference tokens with the
+        persona addressed as "you" (`pronoun_render.render_second_person`):
+        what she remembers is quoted back to her (spec section 4.10), the
+        same form her memory stream's episodes are told in (Task 12).
+        Delegates to the host `LifeService` when one was given (it knows
+        `user_info`); without one, renders with no user on record -- "them",
+        never a guess. Found in Task 9: this section's nostalgia line was
+        one of two prompt-bound paths that read a `memory_reference`
+        unrendered (Task 13 fixes both)."""
+        if self._life_service is not None:
+            return self._life_service._addressed_to_her(text)
+        return _render_second_person_line(text)
+
     def build_full_context(
         self,
         recent_activities: Optional[List[ActivityLog]] = None,
@@ -145,6 +172,11 @@ class LifeContextBuilder:
         location_section = self._build_location_section()
         if location_section:
             sections.append(location_section)
+
+        # The people she lives with, as they are right now (Task 11)
+        household_section = self._build_household_section()
+        if household_section:
+            sections.append(household_section)
 
         # Real-weather awareness (human personas only, when real data is present)
         weather_section = self._build_weather_section()
@@ -462,7 +494,8 @@ class LifeContextBuilder:
 
         lines = ["**Your body and desires:**"]
 
-        # Main desire description
+        # Main desire description -- DesireSystem renders its own pronouns now
+        # (it was constructed with the persona's gender; see LifeService).
         desire_desc = self._desire_system.get_desire_description()
         if desire_desc:
             lines.append(f"*{desire_desc.capitalize()}*")
@@ -502,10 +535,28 @@ class LifeContextBuilder:
 
         return "\n".join(lines)
 
+    def _world_now(self) -> Optional[datetime]:
+        """The service's world instant (``LifeService._world_clock``), for an
+        engine's read of how long ago something was (humanness Task 19); None
+        for a builder with no service, or a duck-typed one without it -- the
+        engine then reads the host's clock, as before."""
+        clock = getattr(self._life_service, "_world_clock", None)
+        try:
+            return clock()() if callable(clock) else None
+        except Exception:
+            return None
+
+    def _now_kw(self) -> dict:
+        """``{"now": the world instant}`` for an engine read, or ``{}`` when
+        there is none (:meth:`_world_now`): the call is then the bare one it
+        always was, so a duck-typed engine that takes no instant still works."""
+        now = self._world_now()
+        return {} if now is None else {"now": now}
+
     def _build_goal_section(self) -> str:
-        """Build goals and thoughts section."""
+        """Build goals and thoughts section (on the world clock: :meth:`_world_now`)."""
         # Check for goal emotional state first
-        emotional_context = self._goal_engine.get_emotional_context()
+        emotional_context = self._goal_engine.get_emotional_context(**self._now_kw())
         goals = self._goal_engine.get_goals_for_mindset()
 
         if not goals and not emotional_context:
@@ -527,7 +578,8 @@ class LifeContextBuilder:
 
             # Format based on whether it involves user
             if goal.involves_user:
-                lines.append(f"- {goal.title}{motivation_tag} *(related to your connection with the user)*")
+                user_ref = self._identity.get_user_perception().person_name if self._identity else "them"
+                lines.append(f"- {goal.title}{motivation_tag} *(related to your connection with {user_ref})*")
             else:
                 lines.append(f"- {goal.title}{motivation_tag}")
 
@@ -577,17 +629,39 @@ class LifeContextBuilder:
         return self._LOCATION_DISPLAY.get(loc.lower(), loc.replace("_", " "))
 
     def _build_schedule_section(self, plan: DailyPlan) -> str:
-        """Build today's schedule section with location context."""
-        current_slot = plan.get_current_slot()
-        next_slot = plan.get_next_slot()
-        remaining = plan.get_remaining_slots()
+        """Build today's schedule section with location context.
+
+        "Right now", "coming up" and "later" are read at her local world time
+        (``LifeService._local_world_now``; Task 28), reached through
+        ``life_service`` as the work line reaches the world clock -- a builder
+        with no service, or a duck-typed one without it, reads the plan with
+        no instant: the host's wall clock, as before.
+
+        Inside a housemate's activity she joined (``LifeService._joint_held``)
+        the plan is read at when she joined it (``_activity_instant``) and
+        "Right now" is the joint activity, where she is, though its slot is
+        done: through the window's tail into the next hour too (Task 19,
+        ruling T19-R5).
+        """
+        try:
+            instant = getattr(self._life_service, "_activity_instant", None)
+            if not callable(instant):
+                instant = getattr(self._life_service, "_local_world_now", None)
+            now = instant() if callable(instant) else None
+            joint_held = getattr(self._life_service, "_joint_held", None)
+            held = bool(joint_held()) if callable(joint_held) else False
+        except Exception:
+            return ""
+        current_slot = plan.get_current_slot(now)
+        next_slot = plan.get_next_slot(now)
+        remaining = plan.get_remaining_slots(now)
 
         if not current_slot and not remaining:
             return ""
 
         lines = ["**Your day today:**"]
 
-        if current_slot and not current_slot.completed:
+        if current_slot and (held or not current_slot.completed):
             loc_str = f" (at {self._display_location(current_slot.location)})" if current_slot.location else ""
             lines.append(f"- Right now: {current_slot.activity_name}{loc_str}")
             if current_slot.reason and current_slot.reason != "routine":
@@ -614,9 +688,9 @@ class LifeContextBuilder:
 
         lines = ["**Things you've been wanting to do:**"]
         for desire in desires[:3]:
-            lines.append(f"- {desire.title}")
+            lines.append(f"- {self._render(desire.title)}")
             if desire.description:
-                lines.append(f"  *({desire.description})*")
+                lines.append(f"  *({self._render(desire.description)})*")
 
         return "\n".join(lines)
 
@@ -672,10 +746,11 @@ class LifeContextBuilder:
         # User perception (only when trust is notable)
         user_p = self._identity.get_user_perception()
         if user_p.trust_level > 0.6:
+            user_ref = user_p.person_name or "them"
             if user_p.trust_level > 0.7:
-                user_desc = "You trust the user deeply. They feel like someone who really sees you."
+                user_desc = f"You trust {user_ref} deeply. They feel like someone who really sees you."
             else:
-                user_desc = "You feel comfortable with the user. There's a real connection forming."
+                user_desc = f"You feel comfortable with {user_ref}. There's a real connection forming."
             lines.append(f"*{user_desc}*")
 
         # Notable NPC perceptions
@@ -826,12 +901,32 @@ class LifeContextBuilder:
         elif st.get("workload", 1) <= 0.25:
             lines.append("work's been quiet")
         if st.get("recent_work_event"):
-            lines.append(f"earlier you {st['recent_work_event']}")
+            # The career engine keeps the setting's text with its tokens
+            # ("got praised by {poss} boss", for the mood lookup): rendered
+            # to her here (ruling T18-R7; LifeService._render_career_status
+            # renders the status path the same way).
+            lines.append(f"earlier you {self._render_you(st['recent_work_event'])}")
 
         if not lines:
             return ""
 
         return "**Your work:** " + ", ".join(lines) + "."
+
+    def _build_household_section(self) -> str:
+        """The people she lives with, each as they are right now -- asleep,
+        where, doing what -- read from their own lives through the host
+        ``LifeService``'s household (Task 11, spec section 4.5). Nothing when
+        she lives alone, or with no one joined now."""
+        views = getattr(self._life_service, "_household_views", None)
+        try:
+            members = views() if callable(views) else []
+        except Exception:
+            return ""  # a housemate whose state cannot be read is left out, as a section that fails is
+        if not isinstance(members, list) or not members:
+            return ""
+        lines = ["**The people you live with:**"]
+        lines.extend(f"- {describe_housemate(view)}" for view in members)
+        return "\n".join(lines)
 
     def _build_social_section(self) -> str:
         """Build social events section — only when recent events exist."""
@@ -915,7 +1010,7 @@ class LifeContextBuilder:
             return ""
         desc = self._affect.get_loneliness_description()
         if desc:
-            return f"**Loneliness:** {desc}"
+            return f"**Loneliness:** {self._render(desc)}"
         return ""
 
     # ============= Life Events Section =============
@@ -1029,14 +1124,14 @@ class LifeContextBuilder:
         if not self._memory_time:
             return ""
         lines = []
-        state = self._memory_time.export_state()
+        state = self._memory_time.export_state(**self._now_kw())
         if state.get("time_feeling"):
             lines.append(f"*{state['time_feeling'].capitalize()}.*")
         if state.get("seasonal_feeling"):
             lines.append(f"*A sense of {state['seasonal_feeling']}.*")
         nostalgia = state.get("recent_nostalgia")
         if nostalgia:
-            lines.append(f"*A memory surfaced: {nostalgia['memory']}*")
+            lines.append(f"*A memory surfaced: {self._render_you(nostalgia['memory'])}*")
         anticipations = state.get("looking_forward_to", [])
         for ant in anticipations[:1]:
             lines.append(f"*Looking forward to: {ant['event']} (feeling {ant['feeling']})*")
@@ -1068,7 +1163,7 @@ class LifeContextBuilder:
         if not self._continuity:
             return ""
         lines = []
-        state = self._continuity.export_state()
+        state = self._continuity.export_state(**self._now_kw())
         anniversaries = state.get("upcoming_anniversaries", [])
         for ann in anniversaries[:1]:
             lines.append(f"*An anniversary is coming up: {ann.get('name', '')}*")

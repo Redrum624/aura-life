@@ -187,6 +187,195 @@ Two consequences a maintainer needs to know:
 
 ---
 
+## Fixed by the humanness program (0.6.0)
+
+*Found by the program's first three-day measurement (2026-09-25) or by its
+tasks. Fixed on the way to 0.6.0; each line names its `CHANGELOG.md` entry
+under 0.6.0, which holds the numbers before and after. `tests/test_humanness.py`
+holds the spec's rows at the production cadence.*
+
+- **Her mood read "content" on 100% of ticks**, at about 0.98 intensity, and
+  could only go up (*Mood can go down*, Task 4).
+- **She "slept" about ten times a day at any hour**, awake on 83-84% of the
+  ticks inside her own sleep window (*Sleep is a state with a duration*, Task 3).
+- **72-76% of her life events were a template slotted with a bare engine
+  label** ("Felt genuinely proud of content"), and nothing ever marked a share
+  as shared (*Life events are recorded once*, Task 5).
+- **Every activity succeeded**, felt as the same fixed emotions every time
+  (*Appraisal, and outcomes that can go wrong*, Task 14).
+- **An introvert and an extrovert did the same things**, and her interests
+  were stored and never read (*What she does is chosen from who she is*, Task 10).
+- **Hunger ran per tick**, drained her energy asleep and fed her on any
+  activity whose name held an eating word (*Hunger runs per world hour*,
+  Task 10).
+- **There was no episodic memory**: nothing she lived could be recalled
+  (*A memory stream*, Task 12).
+- **What decides her life read the host's clock**, so a host whose world
+  clock is not its wall clock saw her days at the host's hours (*What decides
+  her life reads the world clock*, Task 19).
+- **Her shadow's felt safety fell to 0 within 24 ticks and never came back**,
+  in 0.5.0 too (*Her shadow has a rest*, Task 36).
+
+---
+
+## Known limits after the humanness program (0.6.0)
+
+*Found during the program (2026-09-25 to 2026-11-13) and left as they are,
+each for the reason given. The ledger's ruling is in brackets.*
+
+### A joint activity across midnight shows the new day's plan
+
+[T19a-R2] Joining a housemate holds her at the joint place until the window
+ends, and every read of what she is doing says the joint activity while she
+is held. A join in the last minutes of a day is the exception: the reads then
+show the new day's plan at the joined hour, because they re-read the plan by
+hour. **Fix:** hold the joined slot itself instead of re-reading the plan by
+hour.
+
+### No tick lock for hunger and `on_activity`
+
+[T34b-R3] `LifeService` has no tick lock: `start()` runs the ticks on its own
+thread while a host may run the downtime catch-up on another. Her affect tick
+has a lock (`_affect_tick_lock`, in `_tick_affect`); her hunger, its stamp and the engines'
+`on_activity` follow the same read-modify-write pattern without one, older
+than this program (reproduced only by injection).
+
+### The other engines' rates are still per tick
+
+Her affect, her hunger and her money run on the hours scale; the other
+engines' per-tick rates were not converted in this program -- no measured
+harm at the app's cadence, and each conversion is a design value per engine.
+The shadow engine is among them: Task 36 changed what it measures from (her
+rests), not its rates. What a long host downtime does to each of them is not
+measured.
+
+### The downtime catch-up reads the host's clock for its span
+
+`catch_up_from_downtime` starts from the host's clock (`now = datetime.now()`,
+listed in `tests/test_world_clock_lint.py` as a host scheduler read): the gap's
+start, its slot instants, which slots are sleep hours and the backfilled
+stamps follow it. Where the world clock is not the wall clock, the slots
+follow the host's hours, and her money may read a new month (analysis, not
+measured).
+
+### After days away her mood is lower than a host that stayed on would have it
+
+Measured after Task 41 (72 hours down, Monday 22:00 to Thursday 22:00, a
+default persona): her mood valence is -0.866 after the catch-up where the host
+that stayed on has +0.264; -0.31 twelve hours later, -0.08 a day later. Two
+causes, neither fixed: her loneliness is at its top through the gap and the
+catch-up's long ticks weigh it for every hour (its growth is the owner's open
+question), and nothing of the gap is felt as lived -- the catch-up's
+`AffectSystem.on_activity` moves no mood, where a live activity is appraised
+and lifts or lowers her. Her `meals_today` after a catch-up counts the meals
+of the whole gap (9 after three days; it is a counter no engine reads and the
+next day's rollover clears it).
+
+### A live meal between the wake and the catch-up; a restart differs by one tick
+
+A gap the process lived through charges her hunger once whichever of the
+host's first tick and its catch-up runs first -- except when a live meal falls
+between the wake and the catch-up, which falls back to the earlier order
+dependence. And a restart differs by one tick's hunger (0.004) between the two
+orders.
+
+### The old path's `mark_experience_shared(int)` marks no paired life event
+
+[T18 parked] `mark_shared(id)` marks an item and the life event told with it;
+the older `mark_experience_shared(int)` marks only the shareable. A host
+should move to `mark_shared(id)` (`README.md`, "The moment").
+
+### A stressor and a setting item that never happen
+
+- [T15-R4] The stressor "the mess at home" is defined but never raised: her
+  home comfort never falls below `COMFORT_BLEAK` (`_recompute_comfort` is
+  0.35 + 0.4 x tidiness).
+- [T20-R1] aura-life cannot let a housemate join an activity she may not
+  start herself, so in a setting pack whose activity is one persona's alone
+  (a dive), her housemate never does it with her.
+
+### `topics=` and `disclosure=` have no source in a host yet
+
+`observe_user_turn(topics=, disclosure=)` takes both, and what she remembers
+of a turn's content now comes only through `topics`; no host computes either
+yet (where they could come from was read, not built).
+
+### The moment's `unspoken` line is empty for a persona with no secret
+
+Found by the whole-branch review, not fixed: over three days, 36 captures
+each, `Moment.unspoken` was empty in 36 of 36 for the no-profile control and
+both test personas. Its shadow sources (`urge_to_confess`, `concealment_load`,
+`masking`) rest under their export bar since Task 36, and the shadow states
+that do cross theirs (`unease`, `felt_unsafe`, `deferential`, in 16 to 33 of
+36 captures) are not among its keys. A persona with a secret gets her newest
+one.
+
+### A host turn writes to her database on the host's thread
+
+Found by the whole-branch review, not fixed: `observe_user_turn` and
+`get_moment` write to `life.db` on the caller's thread (an episode, the
+user-turn state, the moment's novelty, a memory's reinforcement) with no lock
+against the tick's saves, on sqlite's default five-second busy timeout. One
+"database is locked" ERROR cut an energy tick short in one of four runs of a
+tick thread against two host threads (none in three later runs, none on
+0.5.0): heavier contention than one host makes, and the next tick goes on.
+The pair costs a median of about 110 ms a turn of synchronous database work
+(52 ms and 57 ms), against about 2 ms in 0.5.0.
+
+### The moment's `to_share` offers only what an episode tells
+
+[T18-R12] `Moment.to_share` is chosen among the unshared items an episode of
+her memory tells; a shareable or a life event with no episode is never
+offered there.
+
+### Her shadow after Task 36
+
+- [T36-R1] Her shame is eased by her felt safety above its rest, but nothing
+  lifts felt safety above its rest today, and `LifeService` hands the shadow
+  tick neither `intimacy` nor `conflict`: this relief waits for a caller.
+- [T36-R5] Her attention-seeking and her autonomy rest near, not at, their
+  seeded baselines (default 0.269 against 0.2, 0.59 against 0.5): their terms
+  still measure mood from its best and felt safety from 1. Neither crosses an
+  export bar at rest for a default persona.
+
+### What she puts off is never done
+
+Found by Task 19b's review, not fixed. Nothing ends an avoidance, and its
+guilt has no rest (`DriveSystem.tick`, +0.003 a tick): two things at guilt
+1.0 for every persona from her second day; a relief takes one to 0.95 and it
+is back within the hour. It holds the "put off" stressor, keeps her need for
+autonomy low ("things feel forced") in 10 to 12 of 12 captures over three
+days, and shows as one recurring thought ("You keep putting off ..."). It
+needs what the shadow engine needed in Task 36: a rest, and something that
+ends an avoidance.
+
+### Seen in a measured conversation, not fixed
+
+- The built-in weather changes about 31 times a day at a five-minute world
+  tick (a 20% chance per tick; a spell lasts a median of 30 minutes): the
+  moment's situation line said rainy, foggy, cloudy at three turns five
+  minutes apart. The same in 0.5.0. A host with real weather
+  (`get_weather_service`, when the place feature is on) does not use it.
+- `TextEmotionAnalyzer` reads the user's words from a word list: a plain
+  "thank you", "my boss tore into me" and an insult aimed at her read as
+  nothing (valence 0, no feeling of hers). Greetings are read first since
+  Task 39; the rest is as it was.
+- A life event's words are joined to the place she is in whatever they say
+  ("A cute cat appeared on the windowsill at the beach").
+- Her hunger comes down slowly without extra meals: three meals take 1.2
+  off, a day adds 1.15.
+- [T37-R1] A persona a released version wrote opens lonely and hungry at
+  their tops and unsafe for about a day, with an empty memory stream: each
+  comes down or fills by itself, none is migrated. Her balance alone is
+  raised, once.
+
+### `personas/profile_db.py` still calls `datetime.utcnow()`
+
+Deprecated since Python 3.12; the suite shows it as 15 deprecation warnings
+on Python 3.14. Not on a tick path.
+
+---
+
 ## v0.2 API candidates
 
 The shape of the public API as shipped, with the parts a second consumer trips
@@ -215,7 +404,7 @@ The shared-world construction path needs
 cannot be written against the stable surface.
 
 **Follow-up:** export `WorldEnvironment` from `aura_life`. That moves `__all__`
-from 117 names to 118 and requires regenerating `tests/api_surface.json` with
+from 128 names (0.6.0) to 129 and requires regenerating `tests/api_surface.json` with
 `API_SURFACE_WRITE_SNAPSHOT=1` — exactly the signal that test exists to produce.
 
 ### The teardown functions are only partly on the facade
@@ -242,9 +431,10 @@ Resolved for 0.2.0, deliberately asymmetrically:
 should join it in the same pass. A single `aura_life.teardown_persona(persona_id)`
 wrapping all three remains the tidier long-term shape.
 
-### `LifeService.__init__` takes 19 positional parameters
+### `LifeService.__init__` takes 24 positional parameters
 
-`persona_id` is the ninth, `datastore` the nineteenth. Every caller in this repo
+(19 at publication; 24 at 0.6.0.) `persona_id` is the ninth, `datastore` the
+nineteenth, `appraisal_llm` the last. Every caller in this repo
 passes by keyword and the README says to, but the signature does not enforce it.
 
 **Follow-up:** consider a `*` after `db_path`. This is a breaking change for any

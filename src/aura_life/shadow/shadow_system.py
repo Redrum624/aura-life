@@ -22,6 +22,7 @@ from datetime import datetime
 from typing import Dict, List, Optional
 
 from ..models import ShadowState
+from ..personas.parameters import PersonaParameters
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,16 @@ UNEASE_APPROACH = 0.25         # how fast unease moves toward its driven target
 UNEASE_REST = 0.15             # resting floor of unease
 SAFETY_RECOVERY = 0.03         # felt_safety drifts back toward its rest
 SAFETY_REST = 0.7             # resting level of felt_safety
+# What a tick of unease above its rest wears off her felt safety. Derived from
+# the two rests, not chosen: with unease held at its maximum the wear equals
+# the most the recovery can give back (SAFETY_RECOVERY * SAFETY_REST, at no
+# felt safety at all), so only that takes all of it and anything less leaves
+# her some. At this rate the loop between the two (unease wears felt safety
+# down, lost felt safety raises unease) returns 0.35 of a change, under 1:
+# she comes back to rest when the pressure ends. The rate it replaces, 0.15
+# of ALL her unease, outran the recovery at the resting floor itself.
+SAFETY_EROSION = SAFETY_RECOVERY * SAFETY_REST / (1.0 - UNEASE_REST)
+NEUTRAL_MOOD = 0.5            # tick()'s mood: 1 = good, 0 = bad, this = neither
 DOUBT_APPROACH = 0.2
 
 TRANSGRESSION_BUILD = 0.05      # how fast pressure accumulates from tension
@@ -113,22 +124,11 @@ ATTN_ACTING_OUT = 0.6        # attention_seeking above this + low inhibition →
 
 
 # ============= Seeding Keyword Maps =============
-
-# core_traits keyword → effect on trait seeds
-REBEL_TRAITS = {"rebellious", "defiant", "stubborn", "contrarian"}
-SUBMISSIVE_TRAITS = {"submissive", "deferential", "meek", "compliant"}
-DOMINANT_TRAITS = {"dominant", "assertive", "commanding", "domineering"}
-
-# core_traits keyword → effect on inhibition seed
-UNINHIBITED_TRAITS = {"impulsive", "wild", "uninhibited", "reckless"}
-RESERVED_TRAITS = {"reserved", "proper", "shy"}
-
-# core_traits keyword → effect on attention_seeking seed
-ATTENTION_TRAITS = {"dramatic", "extroverted", "flirty", "validation", "needy"}
-PRIVATE_TRAITS = {"private", "reserved"}
-
-# core_traits keyword → effect on autonomy seed
-AUTONOMY_TRAITS = {"independent", "assertive", "strong-willed", "stubborn"}
+# The core_traits keyword sets (rebel, submissive, dominant, uninhibited,
+# reserved, attention, private, autonomy) are read from her trait text by
+# aura_life.personas.parameters (SHADOW_TRAIT_SETS): each arrives as the sign
+# of its net evidence, PersonaParameters.shadow_leanings -- +1 seeds as it
+# always did, -1 ("not rebellious") seeds the opposite way.
 
 # substance frequency → vice contribution
 SUBSTANCE_FREQUENCY_WEIGHTS = {
@@ -152,8 +152,18 @@ class ShadowSystem:
                  intrusive_thought_themes: Optional[list] = None,
                  substance_tendencies: Optional[dict] = None,
                  core_traits: Optional[list] = None,
-                 initial_state: Optional[ShadowState] = None):
+                 initial_state: Optional[ShadowState] = None,
+                 params: Optional[PersonaParameters] = None):
+        """``params``: her traits' engine parameters
+        (:class:`~aura_life.personas.parameters.PersonaParameters`), whose
+        ``shadow_leanings`` seed rebelliousness, dominance, inhibition,
+        attention-seeking and autonomy; without them ``core_traits`` is read
+        for them."""
         self._intrusive_pool: List[str] = list(intrusive_thought_themes or [])
+        # Least-recently-used cursor into `_intrusive_pool` (see
+        # `_pick_intrusive_theme`); persisted alongside the pool itself so a
+        # reload continues the rotation instead of restarting it.
+        self._intrusive_pull_index: int = 0
         # Per-persona resting levels for the dimensions that drift toward a
         # baseline (set by _capture_baselines after seed/deserialize).
         self._shame_baseline: float = SHAME_BASELINE
@@ -173,15 +183,16 @@ class ShadowSystem:
                 character_defects or [],
                 struggles or [],
                 substance_tendencies or {},
-                core_traits or [],
+                params if params is not None else PersonaParameters.from_core_traits(core_traits),
             )
 
     # ============= Seeding =============
 
     def _seed_from_profile(self, behavioral_tendencies: dict, character_defects: list,
-                           struggles: list, substance_tendencies: dict, core_traits: list):
+                           struggles: list, substance_tendencies: dict, params: PersonaParameters):
         """Seed trait fields from otherwise-dead profile data."""
         s = self._state
+        lean = params.shadow_leanings.get
 
         # --- behavioral_tendencies: dict name -> 0..1 ---
         bt = {str(k).lower(): float(v) for k, v in behavioral_tendencies.items()}
@@ -229,20 +240,10 @@ class ShadowSystem:
         if "anxiety" in strug:
             s.unease += 0.2
 
-        # --- core_traits: list of strings ---
-        traits = " ".join(str(t).lower() for t in core_traits)
-        for kw in REBEL_TRAITS:
-            if kw in traits:
-                s.rebelliousness += 0.2
-                break
-        for kw in SUBMISSIVE_TRAITS:
-            if kw in traits:
-                s.dominance_disposition -= 0.25
-                break
-        for kw in DOMINANT_TRAITS:
-            if kw in traits:
-                s.dominance_disposition += 0.25
-                break
+        # --- core_traits, as each keyword set's leaning (+1 / -1 / 0) ---
+        s.rebelliousness += 0.2 * lean("rebel", 0)
+        s.dominance_disposition -= 0.25 * lean("submissive", 0)
+        s.dominance_disposition += 0.25 * lean("dominant", 0)
 
         # --- Shame: "I am bad/unworthy" (about the self) ---
         # Seeded higher by shame-flavoured struggles and high conscientiousness.
@@ -255,17 +256,13 @@ class ShadowSystem:
         cons_now = _clamp01(s.conscientiousness)
         vice_now = _clamp01(s.vice_proneness)
         s.inhibition = (cons_now + (1.0 - vice_now)) / 2.0
-        if any(kw in traits for kw in UNINHIBITED_TRAITS):
-            s.inhibition -= 0.25
-        if any(kw in traits for kw in RESERVED_TRAITS):
-            s.inhibition += 0.2
+        s.inhibition -= 0.25 * lean("uninhibited", 0)
+        s.inhibition += 0.2 * lean("reserved", 0)
         s.inhibition = _clamp01(s.inhibition)
 
         # --- Attention-seeking: drive for attention / validation ---
-        if any(kw in traits for kw in ATTENTION_TRAITS):
-            s.attention_seeking += 0.3
-        if any(kw in traits for kw in PRIVATE_TRAITS):
-            s.attention_seeking -= 0.15
+        s.attention_seeking += 0.3 * lean("attention", 0)
+        s.attention_seeking -= 0.15 * lean("private", 0)
         # Paradoxical: deep shame + abandonment fear quietly fuels validation-seeking.
         if abandonment and s.shame > 0.4:
             s.attention_seeking += 0.15
@@ -276,8 +273,7 @@ class ShadowSystem:
             s.autonomy -= 0.25
         if abandonment:
             s.autonomy -= 0.15
-        if any(kw in traits for kw in AUTONOMY_TRAITS):
-            s.autonomy += 0.25
+        s.autonomy += 0.25 * lean("autonomy", 0)
         s.autonomy = _clamp01(s.autonomy)
 
         # --- clamp & finalize ---
@@ -326,22 +322,29 @@ class ShadowSystem:
         disinhibition = 1.0 + (LOW_INHIBITION - s.inhibition)
 
         # --- Unease & felt safety ---
-        # Target driven by external pressure + felt insecurity + negativity baseline.
+        # Target driven by external pressure, felt insecurity and a low mood,
+        # each measured from rest (0 there, 1 at its worst): the felt safety
+        # she is short of its rest, a mood below neutral. With nothing driving
+        # it the target is the resting floor. (Measured from 1 and from the
+        # best mood, as they were, the target at rest sat 0.19 above the floor.)
+        insecurity = max(0.0, SAFETY_REST - s.felt_safety) / SAFETY_REST
+        mood_below_neutral = max(0.0, NEUTRAL_MOOD - _clamp01(mood)) / NEUTRAL_MOOD
         unease_target = _clamp01(
             UNEASE_REST
             + 0.4 * stress
             + 0.3 * loneliness
-            + 0.3 * (1.0 - s.felt_safety)
-            + 0.2 * low_mood
+            + 0.3 * insecurity
+            + 0.2 * mood_below_neutral
         )
         if unease_target > s.unease:
             s.unease += (unease_target - s.unease) * UNEASE_APPROACH
         else:
             s.unease -= (s.unease - max(unease_target, UNEASE_REST)) * UNEASE_DECAY
 
-        # felt_safety recovers slowly, eroded by current unease + conflict.
+        # felt_safety recovers slowly, worn down by her unease above its rest
+        # (SAFETY_EROSION) and shaken at once by a conflict.
         s.felt_safety += (SAFETY_REST - s.felt_safety) * SAFETY_RECOVERY
-        s.felt_safety -= (0.15 * s.unease + 0.25 * conflict)
+        s.felt_safety -= SAFETY_EROSION * max(0.0, s.unease - UNEASE_REST) + 0.25 * conflict
 
         # --- Doubt ---
         doubt_target = _clamp01(0.4 * s.unease + 0.5 * low_mood)
@@ -399,18 +402,23 @@ class ShadowSystem:
 
         # --- Shame (about the SELF; distinct from guilt about an act) ---
         # Drifts toward its chronic baseline; spikes with concealment, recent
-        # transgressions and conflict; eased by intimacy and feeling safe.
+        # transgressions and conflict; eased by intimacy and feeling safe --
+        # safer than her rest (0 at rest or under it, 1 at complete safety):
+        # with nothing driving it her shame is her baseline. (Counting all
+        # her felt safety, the relief took 0.245 off the baseline once felt
+        # safety rested at SAFETY_REST: zero for a persona with no shame seed.)
         recent_tx = min(1.0, len(s.recent_transgressions) / 3.0)
+        safety_above_rest = max(0.0, s.felt_safety - SAFETY_REST) / (1.0 - SAFETY_REST)
         shame_target = _clamp01(
             self._shame_baseline
             + 0.3 * s.concealment_load
             + 0.25 * recent_tx
             + 0.25 * conflict
             - 0.2 * intimacy
-            - 0.2 * s.felt_safety
+            - 0.2 * safety_above_rest
         )
         s.shame += (shame_target - s.shame) * SHAME_APPROACH
-        s.shame -= SHAME_EASE * (0.5 * intimacy + 0.5 * s.felt_safety)
+        s.shame -= SHAME_EASE * (0.5 * intimacy + 0.5 * safety_above_rest)
         s.shame = _clamp01(s.shame)
         # Shame makes her shrink: it raises masking and drags autonomy/power down.
         if s.shame > 0.3:
@@ -480,11 +488,14 @@ class ShadowSystem:
         s.last_update = datetime.now()
 
     def _pick_intrusive_theme(self) -> str:
-        """Deterministically rotate through the intrusive pool (no RNG dependency
-        for the picked theme, so tick stays testable)."""
+        """Deterministically rotate through the intrusive pool, least-recently-
+        used first (no RNG dependency for the picked theme, so tick stays
+        testable). Always returned `pool[0]` -- every pull was the same theme."""
         if not self._intrusive_pool:
             return ""
-        return self._intrusive_pool[0]
+        theme = self._intrusive_pool[self._intrusive_pull_index % len(self._intrusive_pool)]
+        self._intrusive_pull_index += 1
+        return theme
 
     def _clamp_dynamic(self):
         s = self._state
@@ -546,8 +557,11 @@ class ShadowSystem:
         t = text.lower()
         s = self._state
 
-        # Confession / honesty cues → she comes clean.
-        if any(k in t for k in ("honestly", "i have to tell you", "i lied", "truth is", "confess", "to be honest")):
+        # Confession / honesty cues → she comes clean. Filler cues ("honestly",
+        # "truth is", "to be honest") dropped: they match ordinary sentences
+        # ("honestly I'm tired") that are not a confession, so any secret was
+        # cleared on a false trigger. The explicit cues stay.
+        if any(k in t for k in ("i have to tell you", "i lied", "confess")):
             self.confess()
 
         # Reassurance / affection → safer, calmer.
@@ -810,6 +824,7 @@ class ShadowSystem:
             "vice_proneness": s.vice_proneness,
             "last_update": s.last_update.isoformat() if s.last_update else None,
             "intrusive_pool": json.dumps(self._intrusive_pool),
+            "intrusive_pull_index": self._intrusive_pull_index,
             # Per-persona resting levels for shame/attention/autonomy.
             "shame_baseline": self._shame_baseline,
             "attention_baseline": self._attention_baseline,
@@ -874,6 +889,7 @@ class ShadowSystem:
         system = cls(initial_state=state)
         system._restraint_pressure = _clamp01(float(data.get("restraint_pressure", 0.0)))
         system._intrusive_pool = _list(data.get("intrusive_pool", []))
+        system._intrusive_pull_index = int(data.get("intrusive_pull_index", 0) or 0)
         # Restore the saved per-persona baselines (fall back to the values
         # _capture_baselines() derived from the restored state for old rows).
         system._shame_baseline = data.get("shame_baseline", system._shame_baseline)

@@ -26,9 +26,13 @@ registered when ``aura_life`` is imported. Nothing is imported here to make that
 happen -- this module still imports ``typing`` and nothing else -- and
 :func:`reset` drops it along with everything else. See that module for why the
 default exists at all.
+
+One hook is optional by design: ``embed`` (the memory stream's relevance,
+:mod:`aura_life.memory`). Most hosts never register it; its one call site is
+guarded, and without it relevance is keyword overlap, said at DEBUG only.
 """
 
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, Sequence
 
 __all__ = [
     "HookNotConfigured",
@@ -50,6 +54,7 @@ __all__ = [
     "geocode",
     "resolve_timezone",
     "persona_now",
+    "embed",
 ]
 
 
@@ -77,6 +82,7 @@ HOOK_NAMES = (
     "geocode",
     "resolve_timezone",
     "persona_now",
+    "embed",
 )
 
 _NOT_CONFIGURED = (
@@ -241,3 +247,10 @@ def resolve_timezone(lat: float, lon: float, **kwargs: Any) -> Any:
 def persona_now(timezone: Optional[str] = None) -> Any:
     """'Now' in the persona's timezone (server-local when *timezone* is falsy)."""
     return _call("persona_now", timezone)
+
+
+def embed(texts: Sequence[str]) -> Any:
+    """One embedding vector per text, in order (``list[list[float]]``, every
+    vector the same length). Optional: the memory stream ranks episodes by it
+    when a host registers it, and by keyword overlap when none does."""
+    return _call("embed", texts)

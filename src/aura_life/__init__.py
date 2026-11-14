@@ -14,7 +14,7 @@ This is the library's curated public surface -- everything listed in
 ``aura_life.internals`` (unstable; may change in a minor release).
 """
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 from aura_life.life_service import LifeService
 from aura_life.models import (
@@ -160,6 +160,11 @@ from aura_life.schedule import (
     get_persona_schedule,
     clear_persona_schedule,
 )
+from aura_life.context.moment import Moment, Share, LengthTarget
+from aura_life.personas.parameters import PersonaParameters
+from aura_life.settings.spec import SettingSpec, register_setting, unregister_setting, get_setting
+from aura_life.social.household import Household
+from aura_life.memory.episodes import Episode
 from aura_life import hooks
 from aura_life.hooks import HookNotConfigured
 
@@ -323,6 +328,21 @@ __all__ = [
     "PersonaSchedule",
     "get_persona_schedule",
     "clear_persona_schedule",
+    # The moment (0.6.0)
+    "Moment",
+    "Share",
+    "LengthTarget",
+    # Persona parameters (0.6.0)
+    "PersonaParameters",
+    # Setting packs (0.6.0)
+    "SettingSpec",
+    "register_setting",
+    "unregister_setting",
+    "get_setting",
+    # Households (0.6.0)
+    "Household",
+    # The memory stream (0.6.0)
+    "Episode",
     # Hooks
     "hooks",
     "HookNotConfigured",

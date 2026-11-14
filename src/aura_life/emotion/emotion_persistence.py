@@ -43,7 +43,8 @@ class PersistedEmotion:
 class EmotionPersistence:
     """Manages persistent emotional state."""
 
-    def __init__(self, persona_id: str, db_path: Optional[Path] = None, datastore=None):
+    def __init__(self, persona_id: str, db_path: Optional[Path] = None, datastore=None, *,
+                 now: Optional[datetime] = None):
         """
         Initialize emotion persistence.
 
@@ -62,7 +63,7 @@ class EmotionPersistence:
         if datastore is None and db_path is not None:
             self._init_standalone_db()
 
-        self._load()
+        self._load(now=now)
 
     def _init_standalone_db(self):
         """Initialize standalone database tables (legacy mode)."""
@@ -110,11 +111,13 @@ class EmotionPersistence:
 
             return standalone_conn()
 
-    def _load(self):
-        """Load persisted emotions from database."""
+    def _load(self, *, now: Optional[datetime] = None):
+        """Load persisted emotions from database, decayed to ``now`` (the world
+        instant their stamps are on -- ``LifeService`` passes it, humanness
+        Task 19; the host's clock when omitted)."""
         with self._get_connection() as conn:
             conn.row_factory = sqlite3.Row
-            now = datetime.now()
+            now = now if now is not None else datetime.now()
 
             for row in conn.execute("SELECT * FROM emotion_state").fetchall():
                 timestamp = datetime.fromisoformat(row["timestamp"])
@@ -138,10 +141,13 @@ class EmotionPersistence:
             conn.commit()
             logger.info(f"Loaded {len(self._emotions)} persisted emotions for {self.persona_id}")
 
-    def save_emotion(self, emotion: str, intensity: float, caused_by: str = "", decay_rate: float = 0.01):
-        """Save or update an emotion."""
+    def save_emotion(self, emotion: str, intensity: float, caused_by: str = "", decay_rate: float = 0.01, *,
+                     now: Optional[datetime] = None):
+        """Save or update an emotion, stamped ``now`` (the world instant
+        ``LifeService`` passes, humanness Task 19: the reads below compare it;
+        the host's clock when omitted)."""
         with self._lock:
-            now = datetime.now()
+            now = now if now is not None else datetime.now()
 
             # Categorize decay rates
             # Sticky emotions: sadness, grief, resentment - decay slowly
@@ -200,10 +206,12 @@ class EmotionPersistence:
                 "emotion_history prune skipped for %s: %s", self.persona_id, exc
             )
 
-    def get_current_emotions(self) -> Dict[str, float]:
-        """Get current emotional state with decay applied."""
+    def get_current_emotions(self, *, now: Optional[datetime] = None) -> Dict[str, float]:
+        """Get current emotional state with decay applied to ``now`` (the
+        world instant the emotions are stamped on -- pass it, humanness Task
+        19; the host's clock when omitted)."""
         with self._lock:
-            now = datetime.now()
+            now = now if now is not None else datetime.now()
             result = {}
 
             for emotion, persisted in list(self._emotions.items()):
@@ -217,21 +225,24 @@ class EmotionPersistence:
 
             return result
 
-    def get_dominant_emotion(self) -> Optional[str]:
-        """Get the current dominant emotion."""
-        emotions = self.get_current_emotions()
+    def get_dominant_emotion(self, *, now: Optional[datetime] = None) -> Optional[str]:
+        """Get the current dominant emotion (at ``now``: :meth:`get_current_emotions`)."""
+        emotions = self.get_current_emotions(now=now)
         if not emotions:
             return None
         return max(emotions.keys(), key=lambda e: emotions[e])
 
-    def get_emotional_context(self) -> str:
-        """Get emotional context for the system prompt."""
-        emotions = self.get_current_emotions()
+    def get_emotional_context(self, *, now: Optional[datetime] = None) -> str:
+        """Get emotional context for the system prompt, at ``now`` (the world
+        instant the emotions are stamped on -- pass it, humanness Task 19;
+        the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
+        emotions = self.get_current_emotions(now=now)
         if not emotions:
             return ""
 
         lines = []
-        dominant = self.get_dominant_emotion()
+        dominant = self.get_dominant_emotion(now=now)
 
         if dominant:
             intensity = emotions[dominant]
@@ -245,7 +256,7 @@ class EmotionPersistence:
             # Check for emotional causes
             persisted = self._emotions.get(dominant)
             if persisted and persisted.caused_by:
-                hours_ago = (datetime.now() - persisted.timestamp).total_seconds() / 3600
+                hours_ago = (now - persisted.timestamp).total_seconds() / 3600
                 if hours_ago < 1:
                     lines.append(f"This is recent—{persisted.caused_by}.")
                 elif hours_ago < 24:
@@ -281,12 +292,14 @@ class EmotionPersistence:
             with self._get_connection() as conn:
                 conn.execute("DELETE FROM emotion_state WHERE emotion = ?", (emotion,))
 
-    def get_status(self) -> dict:
-        """Get status dict for API."""
-        emotions = self.get_current_emotions()
+    def get_status(self, *, now: Optional[datetime] = None) -> dict:
+        """Get status dict for API, at ``now`` (the world's instant, which
+        LifeService stamps them with; the host's clock without it), as
+        :meth:`get_current_emotions` decays them."""
+        emotions = self.get_current_emotions(now=now)
         return {
             "current_emotions": emotions,
-            "dominant": self.get_dominant_emotion(),
+            "dominant": self.get_dominant_emotion(now=now),
             "emotion_count": len(emotions),
         }
 
@@ -310,7 +323,8 @@ class EmotionPersistence:
 _persistence_managers: Dict[str, EmotionPersistence] = {}
 
 
-def get_emotion_persistence(persona_id: str, db_dir: Path = None, datastore=None) -> EmotionPersistence:
+def get_emotion_persistence(persona_id: str, db_dir: Path = None, datastore=None, *,
+                            now: Optional[datetime] = None) -> EmotionPersistence:
     """Get or create emotion persistence for a persona.
 
     Raises:
@@ -335,14 +349,14 @@ def get_emotion_persistence(persona_id: str, db_dir: Path = None, datastore=None
                 datastore = None
 
         if datastore:
-            _persistence_managers[persona_id] = EmotionPersistence(persona_id, datastore=datastore)
+            _persistence_managers[persona_id] = EmotionPersistence(persona_id, datastore=datastore, now=now)
         else:
             # Legacy mode - standalone DB (only if no datastore could be resolved)
             if db_dir is None:
                 from aura_life.hooks import get_config
                 db_dir = get_config().data_dir
             db_path = safe_join(db_dir, f"{persona_id}_emotions.db")
-            _persistence_managers[persona_id] = EmotionPersistence(persona_id, db_path=db_path)
+            _persistence_managers[persona_id] = EmotionPersistence(persona_id, db_path=db_path, now=now)
     return _persistence_managers[persona_id]
 
 

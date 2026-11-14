@@ -71,12 +71,19 @@ class ErrandsSystem:
             if slipped not in self._state.overdue:
                 self._state.overdue.append(slipped)
 
+    @staticmethod
+    def clears(activity_name: str) -> bool:
+        """Whether doing ``activity_name`` clears an errand (DO_ERRAND_ACTIVITIES):
+        what on_activity acts on, and what her coping reaches for when errands
+        pile up (Task 15)."""
+        if not activity_name:
+            return False
+        key = activity_name.lower().replace(" ", "_")
+        return any(k in key for k in DO_ERRAND_ACTIVITIES)
+
     def on_activity(self, activity_name: str) -> None:
         """An errand/chore activity clears one item (overdue first)."""
-        if not activity_name:
-            return
-        key = activity_name.lower().replace(" ", "_")
-        if any(k in key for k in DO_ERRAND_ACTIVITIES):
+        if self.clears(activity_name):
             if self._state.overdue:
                 self._state.overdue.pop(0)
                 self._state.completed_count += 1

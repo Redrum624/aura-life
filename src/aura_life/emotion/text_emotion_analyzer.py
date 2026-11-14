@@ -573,6 +573,239 @@ AMPLIFIERS = {
     "totally", "completely", "utterly", "deeply", "truly"
 }
 
+# ============= Words, negation and French (humanness Task 16a) =============
+# Spec section 4.8: "The text fallback analyzer handles word boundaries, a
+# 3-token negation window, curly apostrophes and a basic French lexicon."
+# Every French word maps to an English entry of EMOTION_KEYWORDS (or
+# EMOTION_PHRASES), whose label and intensity it takes: no label or number
+# of its own.
+
+#: Apostrophes a phone or a word processor writes, read as "'" (spec 4.8).
+CURLY_APOSTROPHES = "’‘ʼ′´`"
+_APOSTROPHE_TABLE = str.maketrans({c: "'" for c in CURLY_APOSTROPHES})
+
+#: A word: letters and digits, joined by an apostrophe or a hyphen ("don't",
+#: "self-conscious", "aujourd'hui").
+_TOKEN_RE = re.compile(r"\w+(?:['\-]\w+)*")
+
+#: Punctuation that ends a clause, and with it a negation's reach.
+_CLAUSE_BREAK_RE = re.compile(r"[.,;:!?]")
+
+#: Words that end a clause too ("not great but happy" is happy).
+CLAUSE_BREAK_WORDS = frozenset({"but", "mais"})
+
+#: How many tokens after a negator it negates (the spec's "3-token negation
+#: window"): an emotion word or phrase starting 1 to 3 tokens after one, in
+#: the same clause, is not felt.
+NEGATION_WINDOW = 3
+
+#: Negators. Any word ending in "n't" ("don't", "can't") is one too, and a
+#: French word elided with "n'" ("n'aime") is negated itself. Bare "no" and
+#: "non" are not: "oh no, I'm sad" is sad.
+NEGATORS = frozenset({
+    "not", "never", "nor", "neither", "cannot", "nothing", "nobody", "none", "without",
+    "dont", "doesnt", "didnt", "isnt", "wasnt", "arent", "werent", "cant", "couldnt",
+    "wouldnt", "shouldnt", "wont", "havent", "hasnt", "hadnt", "aint",
+    # French: ne ... pas / jamais / rien / aucun, sans, ni
+    "ne", "pas", "jamais", "rien", "aucun", "aucune", "sans", "ni",
+})
+
+#: French elisions ("j'aime", "l'amour", "t'aime"): the word after the
+#: apostrophe is looked up.
+FRENCH_ELISIONS = ("j'", "l'", "d'", "m'", "t'", "s'", "c'", "n'", "qu'")
+
+#: A basic French lexicon: each word -> the English EMOTION_KEYWORDS entry
+#: whose label and intensity it reads as. Words spelled the same as an
+#: English word of another sense ("surprise", "confuse") are left out.
+FRENCH_KEYWORDS: Dict[str, str] = {
+    "heureux": "happy", "heureuse": "happy", "joie": "joy", "ravi": "delighted", "ravie": "delighted",
+    "content": "content", "contente": "content", "génial": "awesome", "géniale": "awesome",
+    "excité": "excited", "excitée": "excited", "fier": "proud", "fière": "proud",
+    "aime": "love", "aimes": "love", "adore": "adore", "adores": "adore", "amour": "love",
+    "merci": "grateful", "reconnaissant": "grateful", "reconnaissante": "grateful",
+    "soulagé": "relieved", "soulagée": "relieved", "calme": "calm", "curieux": "curious",
+    "curieuse": "curious", "surpris": "surprised",
+    "triste": "sad", "tristesse": "sad", "malheureux": "unhappy", "malheureuse": "unhappy",
+    "seul": "lonely", "seule": "lonely", "solitude": "lonely", "déprimé": "depressed",
+    "déprimée": "depressed", "déçu": "disappointed", "déçue": "disappointed", "blessé": "hurt",
+    "blessée": "hurt", "désolé": "sorry", "désolée": "sorry", "honte": "ashamed",
+    "colère": "angry", "fâché": "angry", "fâchée": "angry", "furieux": "furious",
+    "furieuse": "furious", "énervé": "annoyed", "énervée": "annoyed", "déteste": "hate",
+    "détestes": "hate", "haine": "hate", "jaloux": "jealous", "jalouse": "jealous",
+    "peur": "afraid", "effrayé": "frightened", "effrayée": "frightened", "inquiet": "worried",
+    "inquiète": "worried", "anxieux": "anxious", "anxieuse": "anxious", "stressé": "stressed",
+    "stressée": "stressed", "fatigué": "tired", "fatiguée": "tired", "épuisé": "exhausted",
+    "épuisée": "exhausted", "ennui": "bored", "ennuyé": "bored", "ennuyée": "bored",
+    "confus": "confused", "gêné": "embarrassed", "gênée": "embarrassed",
+    "mdr": "lol",
+}
+
+#: French phrases -> the English EMOTION_PHRASES or EMOTION_KEYWORDS entry
+#: they read as.
+FRENCH_PHRASES: Dict[str, str] = {
+    "tu me manques": "miss you",
+    "j'en ai marre": "frustrated",
+}
+
+#: Greetings: formulas, not feelings. Their words are matched as a whole
+#: and weighed by none of the tables ("good night" held "good": content --
+#: every evening's goodbye read as the user feeling good, and left her a
+#: memory of good news; Task 39). English and French, read whatever the
+#: language asked for: none of them is a word of the other.
+GREETING_PHRASES = (
+    "good night", "good morning", "good evening", "good afternoon", "good day",
+    "bonne nuit", "bonne journée", "bonne journee", "bonne soirée", "bonne soiree",
+)
+
+#: French words that amplify the next emotion word, as AMPLIFIERS do.
+FRENCH_AMPLIFIERS = frozenset({
+    "très", "tres", "tellement", "vraiment", "trop", "si", "extrêmement", "complètement",
+    "totalement", "profondément",
+})
+
+#: Words that address the listener -- her: a turn with one of them is aimed
+#: at her ("I hate you"), one without is about something else ("I hate my
+#: job").
+LISTENER_WORDS = frozenset({
+    "you", "your", "yours", "yourself", "you're", "youre", "you've", "you'll", "you'd", "u", "ur",
+})
+
+#: The French ones, with a word elided with "t'" ("t'aime", "t'es"): read
+#: unless the turn's language is English. "ton" and "ta" (your) are left
+#: out, as the lexicon leaves out "surprise": English words of another sense
+#: ("a ton of", "ta" for thanks), so "I hate this, I have a ton of homework"
+#: is not at her.
+FRENCH_LISTENER_WORDS = frozenset({"tu", "toi", "te", "tes", "vous", "votre", "vos"})
+
+
+@dataclass(frozen=True)
+class _Token:
+    text: str
+    start: int
+    end: int
+    clause: int
+
+
+def normalize_text(text: str) -> str:
+    """``text`` as the analyzer reads it: curly apostrophes straightened
+    (:data:`CURLY_APOSTROPHES`), lower case."""
+    return (text or "").translate(_APOSTROPHE_TABLE).lower()
+
+
+def _tokens(normalized: str) -> List[_Token]:
+    """The words of an already-normalized text, each with its clause: a
+    clause ends at ``.,;:!?`` and at :data:`CLAUSE_BREAK_WORDS`."""
+    tokens: List[_Token] = []
+    clause = 0
+    previous_end = 0
+    for match in _TOKEN_RE.finditer(normalized):
+        if _CLAUSE_BREAK_RE.search(normalized, previous_end, match.start()):
+            clause += 1
+        word = match.group()
+        if word in CLAUSE_BREAK_WORDS:
+            clause += 1
+        tokens.append(_Token(word, match.start(), match.end(), clause))
+        previous_end = match.end()
+    return tokens
+
+
+def _is_negator(word: str) -> bool:
+    return word in NEGATORS or word.endswith("n't") or word.startswith("n'")
+
+
+def _negated(tokens: List[_Token], index: int, protected: set) -> bool:
+    """True when the token at ``index`` is negated: a negator 1 to
+    :data:`NEGATION_WINDOW` tokens before it, in its clause, that is not part
+    of a matched phrase (``protected``: "can't wait" negates nothing), or the
+    token itself elided with "n'"."""
+    if tokens[index].text.startswith("n'"):
+        return True
+    for j in range(max(0, index - NEGATION_WINDOW), index):
+        if j in protected or tokens[j].clause != tokens[index].clause:
+            continue
+        if _is_negator(tokens[j].text):
+            return True
+    return False
+
+
+def _phrase_occurrences(tokens: List[_Token], phrase_words: List[str]) -> List[int]:
+    """Where ``phrase_words`` stand as consecutive tokens of one clause."""
+    n = len(phrase_words)
+    if n == 0:
+        return []
+    found = []
+    for start in range(len(tokens) - n + 1):
+        window = tokens[start:start + n]
+        if [t.text for t in window] == phrase_words and window[0].clause == window[-1].clause:
+            found.append(start)
+    return found
+
+
+def _lookup_word(word: str, language: Optional[str]) -> Optional[Tuple[str, float]]:
+    """``(label, intensity)`` for one word, from EMOTION_KEYWORDS, or the
+    French lexicon (unless ``language`` is English), after an elision."""
+    english_only = _english_only(language)
+    candidates = [word]
+    if not english_only:
+        for elision in FRENCH_ELISIONS:
+            if word.startswith(elision) and len(word) > len(elision):
+                candidates.append(word[len(elision):])
+                break
+    for candidate in candidates:
+        if candidate in EMOTION_KEYWORDS:
+            return EMOTION_KEYWORDS[candidate]
+        if not english_only and candidate in FRENCH_KEYWORDS:
+            return EMOTION_KEYWORDS[FRENCH_KEYWORDS[candidate]]
+    return None
+
+
+def _english_only(language: Optional[str]) -> bool:
+    return bool(language) and str(language).lower().startswith("en")
+
+
+def _phrase_table(language: Optional[str]) -> List[Tuple[str, Tuple[str, float]]]:
+    table = list(EMOTION_PHRASES.items())
+    if not _english_only(language):
+        for french, english in FRENCH_PHRASES.items():
+            entry = EMOTION_PHRASES.get(english) or EMOTION_KEYWORDS.get(english)
+            if entry is not None:
+                table.append((french, entry))
+    return table
+
+
+def matched_cues(text: str, cues) -> List[str]:
+    """The ``cues`` (words or phrases, such as ``CONVERSATION_KEYWORD_MAP``'s
+    keys) ``text`` says, in ``cues``' order: each on word boundaries and not
+    negated, through the same tokenizer and negation window as
+    :meth:`TextEmotionAnalyzer.analyze_text` (ruling T16-R4) -- "I don't love
+    you" says no "love", "glove" says none. A negator inside a cue that
+    matched, before its last word ("don't worry"), negates nothing; one that
+    ends it ("that's not") still negates what follows."""
+    tokens = _tokens(normalize_text(text))
+    occurrences = []
+    protected: set = set()
+    for cue in cues:
+        words = [t.text for t in _tokens(normalize_text(cue))]
+        starts = _phrase_occurrences(tokens, words)
+        occurrences.append((cue, starts))
+        for start in starts:
+            protected.update(range(start, start + len(words) - 1))
+    return [cue for cue, starts in occurrences
+            if any(not _negated(tokens, start, protected) for start in starts)]
+
+
+def addresses_listener(text: str, language: Optional[str] = None) -> bool:
+    """True when ``text`` speaks to its listener -- her (:data:`LISTENER_WORDS`;
+    :data:`FRENCH_LISTENER_WORDS` and "t'" too unless ``language`` is
+    English, as :meth:`TextEmotionAnalyzer.analyze_text` reads it)."""
+    french = not _english_only(language)
+    for token in _tokens(normalize_text(text)):
+        if token.text in LISTENER_WORDS:
+            return True
+        if french and (token.text in FRENCH_LISTENER_WORDS or token.text.startswith("t'")):
+            return True
+    return False
+
 
 class TextEmotionAnalyzer:
     """
@@ -582,129 +815,116 @@ class TextEmotionAnalyzer:
     """
 
     @classmethod
-    def analyze_text(cls, text: str) -> List[EmotionSpike]:
+    def analyze_text(cls, text: str, language: Optional[str] = None) -> List[EmotionSpike]:
         """
         Analyze text and return detected emotions with positions.
 
+        Phrases first (EMOTION_PHRASES, then FRENCH_PHRASES), then single
+        words (EMOTION_KEYWORDS, then FRENCH_KEYWORDS), all on word
+        boundaries -- "dismiss you" holds no "miss you" -- with curly
+        apostrophes read as straight ones. A word or phrase that starts 1 to
+        NEGATION_WINDOW tokens after a negator in its clause is not felt
+        ("I'm not happy" holds no joy). Amplifiers ("so", "tellement") and
+        punctuation strengthen what follows, as before.
+
         Args:
             text: Text to analyze
+            language: ``None`` (the default) reads English and French; a
+                code starting with "en" reads English only.
 
         Returns:
             List of EmotionSpike objects
         """
         spikes = []
-        lower_text = text.lower()
+        normalized = normalize_text(text)
+        length = len(normalized)
+        tokens = _tokens(normalized)
 
-        # First, check for multi-word phrases
-        matched_positions = set()  # Track positions already matched by phrases
-        for phrase, (emotion, base_intensity) in EMOTION_PHRASES.items():
-            idx = lower_text.find(phrase)
-            while idx >= 0:
-                # Check if this position overlaps with already matched content
-                phrase_end = idx + len(phrase)
-                if not any(idx <= pos < phrase_end for pos in matched_positions):
-                    # Check for punctuation near the phrase
-                    intensity = base_intensity
-                    context_end = min(phrase_end + 5, len(text))
-                    nearby_text = text[idx:context_end]
-                    for punct, bonus in INTENSITY_MODIFIERS.items():
-                        if punct in nearby_text:
-                            intensity = min(1.0, intensity + bonus)
+        # Multi-word phrases first, on whole tokens; a phrase never overlaps
+        # one matched before it. Its words before its last negate nothing.
+        phrase_matches = []  # (start token, end token, emotion, intensity, phrase)
+        matched: set = set()
+        protected: set = set()
+        # A greeting first: its words are a formula, weighed by no table.
+        for greeting in GREETING_PHRASES:
+            words = [t.text for t in _tokens(normalize_text(greeting))]
+            for start in _phrase_occurrences(tokens, words):
+                matched.update(range(start, start + len(words)))
+        for phrase, (emotion, base_intensity) in _phrase_table(language):
+            words = [t.text for t in _tokens(normalize_text(phrase))]
+            for start in _phrase_occurrences(tokens, words):
+                span = range(start, start + len(words))
+                if any(i in matched for i in span):
+                    continue
+                matched.update(span)
+                protected.update(range(start, start + len(words) - 1))
+                phrase_matches.append((start, start + len(words), emotion, base_intensity, phrase))
 
-                    position = idx / len(text) if len(text) > 0 else 0.5
-                    spikes.append(EmotionSpike(
-                        position=position,
-                        emotion=emotion,
-                        intensity=intensity,
-                        word=phrase
-                    ))
-                    # Mark these positions as matched
-                    for p in range(idx, phrase_end):
-                        matched_positions.add(p)
+        for start, end, emotion, base_intensity, phrase in phrase_matches:
+            if _negated(tokens, start, protected):
+                continue
+            intensity = base_intensity
+            first, last = tokens[start], tokens[end - 1]
+            nearby_text = normalized[first.start:min(last.end + 5, length)]
+            for punct, bonus in INTENSITY_MODIFIERS.items():
+                if punct in nearby_text:
+                    intensity = min(1.0, intensity + bonus)
+            spikes.append(EmotionSpike(
+                position=first.start / length if length > 0 else 0.5,
+                emotion=emotion,
+                intensity=intensity,
+                word=phrase,
+            ))
 
-                # Look for next occurrence
-                idx = lower_text.find(phrase, phrase_end)
-
-        # Split into words for single-word matching
-        words = re.split(r'[\s,;:.!?]+', lower_text)
-        word_positions = []
-
-        # Calculate word positions in original text
-        pos = 0
-        for word in words:
-            idx = lower_text.find(word, pos)
-            if idx >= 0:
-                word_positions.append(idx)
-                pos = idx + len(word)
-            else:
-                word_positions.append(pos)
-
-        # Check for emotion keywords (skip if already matched by phrase)
+        # Single words (a word inside a matched phrase is skipped)
         amplifier_active = False
-        for i, word in enumerate(words):
-            word = word.strip()
-            if not word:
+        for i, token in enumerate(tokens):
+            if i in matched:
                 continue
-
-            # Skip if this word was part of a matched phrase
-            if i < len(word_positions) and word_positions[i] in matched_positions:
-                continue
-
-            # Check for amplifiers
-            if word in AMPLIFIERS:
+            word = token.text
+            if word in AMPLIFIERS or (not _english_only(language) and word in FRENCH_AMPLIFIERS):
                 amplifier_active = True
                 continue
-
-            # Check for emotion keywords
-            if word in EMOTION_KEYWORDS:
-                emotion, base_intensity = EMOTION_KEYWORDS[word]
-                intensity = base_intensity
-
-                # Apply amplifier bonus
-                if amplifier_active:
-                    intensity = min(1.0, intensity * 1.3)
-
-                # Check for punctuation modifiers nearby
-                nearby_text = ""
-                if i < len(word_positions):
-                    start = word_positions[i]
-                    end = word_positions[i + 1] if i + 1 < len(word_positions) else len(text)
-                    nearby_text = text[start:end]
-
-                for punct, bonus in INTENSITY_MODIFIERS.items():
-                    if punct in nearby_text:
-                        intensity = min(1.0, intensity + bonus)
-
-                # Calculate position
-                position = word_positions[i] / len(text) if i < len(word_positions) and len(text) > 0 else 0.5
-
-                spikes.append(EmotionSpike(
-                    position=position,
-                    emotion=emotion,
-                    intensity=intensity,
-                    word=word
-                ))
-
-                amplifier_active = False
-            else:
+            entry = _lookup_word(word, language)
+            if entry is None:
                 # Reset amplifier if not followed by emotion word
-                if word not in AMPLIFIERS:
-                    amplifier_active = False
+                amplifier_active = False
+                continue
+            amplified, amplifier_active = amplifier_active, False
+            if _negated(tokens, i, protected):
+                continue
+            emotion, base_intensity = entry
+            intensity = base_intensity
+            if amplified:
+                intensity = min(1.0, intensity * 1.3)
+            # Punctuation modifiers between this word and the next
+            end = tokens[i + 1].start if i + 1 < len(tokens) else length
+            nearby_text = normalized[token.start:end]
+            for punct, bonus in INTENSITY_MODIFIERS.items():
+                if punct in nearby_text:
+                    intensity = min(1.0, intensity + bonus)
+            spikes.append(EmotionSpike(
+                position=token.start / length if length > 0 else 0.5,
+                emotion=emotion,
+                intensity=intensity,
+                word=word,
+            ))
 
         return spikes
 
     @classmethod
-    def get_emotional_tone(cls, text: str) -> Dict[str, float]:
+    def get_emotional_tone(cls, text: str, language: Optional[str] = None) -> Dict[str, float]:
         """
         Get the overall emotional tone of text.
 
         Args:
             text: Text to analyze
+            language: as for :meth:`analyze_text`
 
         Returns:
             Dict mapping emotion -> average intensity
         """
-        spikes = cls.analyze_text(text)
+        spikes = cls.analyze_text(text, language=language)
         if not spikes:
             return {}
 
@@ -721,17 +941,18 @@ class TextEmotionAnalyzer:
         }
 
     @classmethod
-    def get_dominant_emotion(cls, text: str) -> Optional[Tuple[str, float]]:
+    def get_dominant_emotion(cls, text: str, language: Optional[str] = None) -> Optional[Tuple[str, float]]:
         """
         Get the dominant emotion from text.
 
         Args:
             text: Text to analyze
+            language: as for :meth:`analyze_text`
 
         Returns:
             Tuple of (emotion, intensity) or None
         """
-        tone = cls.get_emotional_tone(text)
+        tone = cls.get_emotional_tone(text, language=language)
         if not tone:
             return None
 

@@ -3,9 +3,15 @@
 
 7 core emotions with ~35 secondary and 80+ tertiary emotions.
 Based on psychological emotion research for nuanced emotional representation.
+
+A name the wheel does not list belongs to the core family whose members sit
+nearest to it in the emotion vocabulary's valence x arousal space
+(``aura_life.emotion.vocabulary``), not to "happy" by default.
 """
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
+
+from . import vocabulary
 
 
 class EmotionTier(Enum):
@@ -99,19 +105,48 @@ class FeelingsWheel:
     # Build reverse lookup maps
     _secondary_to_core: Dict[str, str] = {}
     _tertiary_to_secondary: Dict[str, str] = {}
+    # Each core family's centre in the vocabulary's (valence, arousal) space.
+    _family_centroids: Dict[str, Tuple[float, float]] = {}
 
     @classmethod
     def _build_lookups(cls):
-        """Build reverse lookup maps on first use."""
+        """Build reverse lookup maps on first use. Each is built whole and then
+        assigned, so no caller ever sees one half-filled."""
         if not cls._secondary_to_core:
-            for core, secondaries in SECONDARY_EMOTIONS.items():
-                for sec in secondaries:
-                    cls._secondary_to_core[sec] = core
+            cls._secondary_to_core = {
+                sec: core for core, secondaries in SECONDARY_EMOTIONS.items() for sec in secondaries
+            }
 
         if not cls._tertiary_to_secondary:
-            for sec, tertiaries in TERTIARY_EMOTIONS.items():
-                for tert in tertiaries:
-                    cls._tertiary_to_secondary[tert] = sec
+            cls._tertiary_to_secondary = {
+                tert: sec for sec, tertiaries in TERTIARY_EMOTIONS.items() for tert in tertiaries
+            }
+
+    @classmethod
+    def _nearest_core(cls, emotion: str) -> str:
+        """The core family for a name the wheel does not list: the one whose
+        members' mean (valence, arousal) in the vocabulary is nearest the
+        name's own point. A name the vocabulary does not know either sits at
+        its neutral point, so it lands in whichever family is nearest that --
+        never "happy" by default."""
+        if not cls._family_centroids:
+            # Built whole, then assigned: a concurrent first call, or one that
+            # fails part-way, never leaves a half-built table to be trusted.
+            centroids = {}
+            for core in sorted(CORE_EMOTIONS):
+                points = [vocabulary.valence_arousal(name)
+                          for name in cls.get_emotion_family(core) if vocabulary.is_known(name)]
+                centroids[core] = (
+                    sum(v for v, _ in points) / len(points),
+                    sum(a for _, a in points) / len(points),
+                )
+            cls._family_centroids = centroids
+        valence, arousal = vocabulary.valence_arousal(emotion)
+        return min(
+            sorted(cls._family_centroids),
+            key=lambda core: (cls._family_centroids[core][0] - valence) ** 2
+            + (cls._family_centroids[core][1] - arousal) ** 2,
+        )
 
     @classmethod
     def get_tier(cls, emotion: str) -> EmotionTier:
@@ -159,9 +194,11 @@ class FeelingsWheel:
         # Tertiary -> Secondary -> Core
         if emotion in cls._tertiary_to_secondary:
             secondary = cls._tertiary_to_secondary[emotion]
-            return cls._secondary_to_core.get(secondary, "happy")
+            if secondary in cls._secondary_to_core:
+                return cls._secondary_to_core[secondary]
 
-        return "happy"  # Default fallback
+        # Not on the wheel: place it by the vocabulary (see _nearest_core).
+        return cls._nearest_core(emotion)
 
     @classmethod
     def get_secondary_emotion(cls, emotion: str) -> Optional[str]:

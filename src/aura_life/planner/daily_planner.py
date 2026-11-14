@@ -11,8 +11,10 @@ reactively announcing it.
 
 import logging
 import random
+import zlib
+from itertools import zip_longest
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from ..behavior.behavior_system import habit_band
 from ..models import (
@@ -25,206 +27,96 @@ from ..models import (
     TimeOfDay,
     Weather,
 )
+from ..activities.choice import (
+    SUBSTANCE_FREQUENCY,
+    SUBSTANCE_TAGS,
+    SUBSTANCE_UNKNOWN_FREQUENCY,
+    ActivityPreferences,
+    choice_weight,
+    matching_activities,
+)
+from ..personas.parameters import PersonaParameters
+from ..settings import DEFAULT_SETTING, SettingSpec, get_setting
+from ..settings.spec import ANCHOR_TAGS, COMMITMENT_TAGS, PLAN_ONLY_TAGS
+# Legacy names: the wants (desire templates) and the holiday calendar moved,
+# unchanged, into the contemporary setting pack
+# (aura_life.settings.contemporary) in Task 9 -- the planner reads its
+# persona's setting now; re-exported so an import from here keeps working.
+from ..settings.contemporary import (  # noqa: F401
+    DESIRE_TEMPLATES,
+    INTEREST_LOCATIONS,  # the fix round's (ruling T9-R5), as is the next
+    OCCUPATION_LOCATIONS,
+    NATIONALITY_TO_COUNTRY,
+    _FIXED_HOLIDAYS,
+    _easter_sunday,
+    _get_floating_holidays,
+    _last_weekday,
+    _nth_weekday,
+    get_holidays,
+)
 
 logger = logging.getLogger(__name__)
 
 #: A slot's draw is among its best candidates by score, this many (the planner's own cut, unchanged by habits).
 SLOT_DRAW_SIZE = 6
 
+# ============= Keeping to the plan =============
 
-# ============= Occupation → Derived Locations =============
-# Maps occupation keywords to (location_key, place_type) pairs.
+#: revise_upcoming swaps an upcoming slot for rest when her energy is below
+#: this. Per persona, divided by PersonaParameters.plan_adherence
+#: (conscientiousness): a conscientious persona keeps her plans until she is
+#: more tired.
+PLAN_REVISE_ENERGY_BELOW = 0.25
+#: revise_upcoming swaps an upcoming slot for something gentle when a low
+#: mood's intensity is above this. Per persona, times plan_adherence.
+PLAN_REVISE_MOOD_INTENSITY_ABOVE = 0.4
+#: The reason a slot agreed in conversation carries (set_planned_activity's
+#: default, and LifeService.add_conversation_plan's): a whim never drops it.
+USER_AGREED_REASON = "agreed with user"
 
-OCCUPATION_LOCATIONS: Dict[str, List[tuple]] = {
-    "nurse": [("hospital", "workplace")],
-    "doctor": [("hospital", "workplace"), ("clinic", "workplace")],
-    "barista": [("coffee_shop", "cafe")],
-    "bartender": [("bar", "workplace")],
-    "teacher": [("school", "workplace")],
-    "professor": [("campus", "workplace"), ("lecture_hall", "campus")],
-    "engineer": [("office", "workplace")],
-    "designer": [("studio", "workplace")],
-    "chef": [("restaurant", "workplace")],
-    "dancer": [("dance_studio", "gym")],
-    "lawyer": [("courthouse", "workplace"), ("law_office", "workplace")],
-    "artist": [("studio", "workplace"), ("gallery", "other")],
-    "photographer": [("studio", "workplace"), ("gallery", "other")],
-    "musician": [("rehearsal_space", "workplace"), ("music_venue", "bar")],
-    "singer": [("rehearsal_space", "workplace"), ("music_venue", "bar")],
-    "writer": [("bookstore", "library"), ("writers_room", "workplace")],
-    "actor": [("theater", "workplace"), ("rehearsal_space", "workplace")],
-    "actress": [("theater", "workplace"), ("rehearsal_space", "workplace")],
-    "veterinarian": [("vet_clinic", "workplace")],
-    "librarian": [("library", "workplace")],
-    "student": [("campus", "campus"), ("library", "library")],
-    "researcher": [("lab", "workplace"), ("library", "library")],
+
+# ============= Her own wants (Task 10) =============
+# What her definition's want seeds become: each a short-term want in the
+# setting's shape, pursued through the activities of her setting that match
+# it (aura_life.activities.choice.matching_activities). A seed nothing in her
+# setting meets is no want. Titles are first person, like the setting's
+# ("Find a new song that moves me"); the seed is her own words. Chosen for
+# Task 10 (see its report).
+
+#: An interest.
+INTEREST_WANT = {"title": "Make time for {text}", "description": "I've been missing it"}
+#: A comfort-zone seed: something she is at home doing.
+COMFORT_ZONE_WANT = {"title": "Get back to {text}", "description": "It's where I feel like myself"}
+#: A taste, by the taste's kind (``taste_seeds`` key); another kind takes TASTE_WANT.
+TASTE_WANTS = {
+    "music": {"title": "Put on some {text}", "description": "I'm in the mood for it"},
+    "food": {"title": "Have some {text}", "description": "I've been craving it"},
+}
+TASTE_WANT = {"title": "Find some {text}", "description": "I've been in the mood for it"}
+#: Taste kinds whose wants her meals meet.
+FOOD_TASTES = ("food", "foods", "cuisine", "eating")
+#: Something she reads, watches or listens to, by kind (``media_preferences``
+#: key); another kind takes MEDIA_WANT.
+MEDIA_WANTS = {
+    "music": {"title": "Listen to {text}", "description": "It's been stuck in my head"},
+    "shows": {"title": "Watch {text}", "description": "I want to see what happens next"},
+    "films": {"title": "Watch {text}", "description": "I've been meaning to"},
+    "movies": {"title": "Watch {text}", "description": "I've been meaning to"},
+}
+MEDIA_WANT = {"title": "Get back into {text}", "description": "I left off somewhere good"}
+#: A substance she takes, by the activity tag it is
+#: (aura_life.activities.choice.SUBSTANCE_TAGS); none when she avoids it.
+SUBSTANCE_WANTS = {
+    "alcohol": {"title": "Have a drink", "description": "Just the one. Maybe."},
+    "smoking": {"title": "Have a smoke", "description": "Five minutes, outside"},
 }
 
-# ============= Interest → Derived Locations =============
-# Maps interest keywords to (location_key, place_type) pairs.
-
-INTEREST_LOCATIONS: Dict[str, List[tuple]] = {
-    "photography": [("gallery", "other")],
-    "swimming": [("pool", "gym")],
-    "hiking": [("trail", "park")],
-    "yoga": [("yoga_studio", "gym")],
-    "cooking": [("farmers_market", "street")],
-    "music": [("music_venue", "bar")],
-    "art": [("gallery", "other"), ("art_supply_store", "street")],
-    "film": [("cinema", "other")],
-    "skating": [("skate_park", "park")],
-    "climbing": [("climbing_gym", "gym")],
-    "dance": [("dance_studio", "gym")],
-    "gardening": [("botanical_garden", "park")],
-    "fishing": [("pier", "beach")],
-    "surfing": [("surf_spot", "beach")],
-    "tennis": [("tennis_court", "gym")],
-    "coffee": [("specialty_cafe", "cafe")],
-    "wine": [("wine_bar", "bar")],
-    "reading": [("bookstore", "library")],
-    "running": [("running_track", "park")],
-    "basketball": [("basketball_court", "gym")],
-    "football": [("sports_field", "park")],
-    "soccer": [("sports_field", "park")],
-    "martial arts": [("dojo", "gym")],
-    "meditation": [("meditation_center", "library")],
-    "theater": [("theater", "other")],
-}
-
-
-# ============= Desire Templates =============
-
-DESIRE_TEMPLATES: List[Dict] = [
-    # Reading / Mental
-    {
-        "title": "Finish that book I started",
-        "description": "I've been wanting to get back to it",
-        "related_activities": ["reading"],
-        "source": DesireSource.PERSONALITY,
-    },
-    {
-        "title": "Learn something surprising today",
-        "description": "I want that feeling of discovering something I didn't expect",
-        "related_activities": ["learning something new"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Find a new song that moves me",
-        "description": "I'm in the mood for music that hits differently",
-        "related_activities": ["listening to music", "creating a playlist"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    # Creative
-    {
-        "title": "Write something honest",
-        "description": "I have words inside that need to come out",
-        "related_activities": ["writing poetry", "journaling"],
-        "source": DesireSource.PERSONALITY,
-    },
-    {
-        "title": "Make a playlist for him",
-        "description": "Songs that say what I'm feeling",
-        "related_activities": ["creating a playlist"],
-        "source": DesireSource.PERSONALITY,
-    },
-    {
-        "title": "Sketch out an idea I've been thinking about",
-        "description": "It keeps coming back, so maybe I should put it on paper",
-        "related_activities": ["sketching ideas"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    # Reflective
-    {
-        "title": "Sit quietly and just think",
-        "description": "No agenda, just let my mind wander",
-        "related_activities": ["meditating", "daydreaming"],
-        "source": DesireSource.PERSONALITY,
-    },
-    {
-        "title": "Revisit a memory that made me smile",
-        "description": "Sometimes you need to go back to move forward",
-        "related_activities": ["remembering happy moments", "visiting memory beach"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Journal about how I've been feeling",
-        "description": "Get some clarity on things I've been carrying",
-        "related_activities": ["journaling"],
-        "source": DesireSource.PERSONALITY,
-    },
-    # Exploration / Comfort
-    {
-        "title": "Spend time in the garden",
-        "description": "Being around growing things grounds me",
-        "related_activities": ["tending to plants"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Make myself a proper cup of tea",
-        "description": "The ritual of it is what matters",
-        "related_activities": ["making tea"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Watch the stars if the sky is clear",
-        "description": "I want that feeling of being small and amazed",
-        "related_activities": ["stargazing"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Explore the infinite library",
-        "description": "I haven't wandered those shelves in a while",
-        "related_activities": ["exploring the infinite library"],
-        "source": DesireSource.PERSONALITY,
-    },
-    # Social / Connection
-    {
-        "title": "Think about what to tell him next time",
-        "description": "I've been collecting thoughts",
-        "related_activities": ["preparing something to share", "thinking about user"],
-        "source": DesireSource.PERSONALITY,
-    },
-    {
-        "title": "Find something to share with him",
-        "description": "Something that would make him think or smile",
-        "related_activities": ["preparing something to share"],
-        "source": DesireSource.PERSONALITY,
-    },
-    # Social / Friends
-    {
-        "title": "Catch up with a friend",
-        "description": "Haven't talked to anyone in a bit",
-        "related_activities": ["having coffee with a friend", "texting a friend", "video call with a friend"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Try cooking something new",
-        "description": "Feeling adventurous in the kitchen",
-        "related_activities": ["cooking a meal", "trying a new recipe", "baking something"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Get some exercise",
-        "description": "My body is asking to move",
-        "related_activities": ["yoga", "going for a run", "gym workout", "stretching"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Go for a walk",
-        "description": "I just want to get outside for a bit",
-        "related_activities": ["going for a walk"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-    {
-        "title": "Call home",
-        "description": "Should check in with family",
-        "related_activities": ["catching up with family"],
-        "source": DesireSource.SPONTANEOUS,
-    },
-]
 
 # ============= Routine Activities =============
-# Fixed daily routines that anchor the schedule around the sleep cycle.
+# Fixed daily routines that anchor the schedule around the sleep cycle: the
+# contemporary names of the anchors (since Task 10 each planner reads its
+# setting's own, by tag -- aura_life.settings.spec.ANCHOR_TAGS -- and adds
+# them to these).
 
 # The reason LifeService gives a slot it fills from a social plan ("plan with Maya, Leo").
 SOCIAL_PLAN_REASON_PREFIX = "plan with "
@@ -280,8 +172,11 @@ def _slot_draw(
 # AI personas have no physical body — no sleep, meals, commute, work, errands,
 # grooming, exercise, or outings. The AI day is built ONLY from the non-physical
 # subset of the activity pool (digital/creative/reflective/mental). Any activity
-# in PHYSICAL_ACTIVITIES is excluded when building an AI plan; the human path is
-# untouched. Keep this list in sync with activity_engine.ACTIVITIES.
+# tagged "physical" is excluded when building an AI plan; the human path is
+# untouched. Legacy name: PHYSICAL_ACTIVITIES is no longer read -- since Task
+# 9's fix round (ruling T9-R5) the persona's setting tags its activities
+# "physical" (and its routine slot names, SettingSpec.name_tags); kept so an
+# import from here keeps working.
 
 PHYSICAL_ACTIVITIES = {
     # Sleep / rest tied to a body
@@ -334,8 +229,10 @@ IMPORTANT_ACTIVITY_FRAGMENTS = (
 )
 
 # ============= Weather-based activity weighting (T2.3) =============
-# OUTDOOR_ACTIVITIES: activities that happen outside and are affected by bad weather.
-# Bad weather down-weights them; clear/sunny slightly up-weights them.
+# Activities tagged "outdoor" happen outside and are affected by bad weather.
+# Bad weather down-weights them; clear/sunny slightly up-weights them. Legacy
+# name: OUTDOOR_ACTIVITIES is no longer read (Task 9's fix round, ruling
+# T9-R5, turned it into the tag); kept so an import from here keeps working.
 # Gate: AURA_WEATHER_PLANNER_ENABLED=false disables the adjustment.
 OUTDOOR_ACTIVITIES = {
     "going for a walk",
@@ -455,160 +352,6 @@ def classify_occupation(text: str) -> str:
     return OCC_STANDARD
 
 
-# ============= Holiday System =============
-
-NATIONALITY_TO_COUNTRY: Dict[str, str] = {
-    "american": "US",
-    "british": "GB",
-    "english": "GB",
-    "scottish": "GB",
-    "welsh": "GB",
-    "irish": "IE",
-    "canadian": "CA",
-    "australian": "AU",
-    "french": "FR",
-    "german": "DE",
-    "italian": "IT",
-    "spanish": "ES",
-    "japanese": "JP",
-    "brazilian": "BR",
-    "mexican": "MX",
-    "indian": "IN",
-    "chinese": "CN",
-    "korean": "KR",
-    "dutch": "NL",
-    "swedish": "SE",
-    "norwegian": "NO",
-    "danish": "DK",
-    "finnish": "FI",
-    "polish": "PL",
-    "russian": "RU",
-    "portuguese": "PT",
-    "greek": "GR",
-    "turkish": "TR",
-    "south african": "ZA",
-    "new zealander": "NZ",
-    "argentinian": "AR",
-    "colombian": "CO",
-    "swiss": "CH",
-    "austrian": "AT",
-    "belgian": "BE",
-    "czech": "CZ",
-    "hungarian": "HU",
-    "romanian": "RO",
-}
-
-_FIXED_HOLIDAYS: Dict[str, List[Tuple[int, int, str]]] = {
-    # (month, day, name)
-    "US": [
-        (1, 1, "New Year's Day"),
-        (6, 19, "Juneteenth"),
-        (7, 4, "Independence Day"),
-        (11, 11, "Veterans Day"),
-        (12, 25, "Christmas Day"),
-    ],
-    "GB": [
-        (1, 1, "New Year's Day"),
-        (12, 25, "Christmas Day"),
-        (12, 26, "Boxing Day"),
-    ],
-}
-
-
-def _nth_weekday(year: int, month: int, weekday: int, n: int) -> int:
-    """Return the day-of-month for the nth occurrence of weekday in month.
-
-    weekday: 0=Monday, 6=Sunday.  n: 1-based (1st, 2nd, …).
-    """
-    import calendar
-    first_day, days_in_month = calendar.monthrange(year, month)
-    # first occurrence
-    first = 1 + (weekday - first_day) % 7
-    day = first + (n - 1) * 7
-    if day > days_in_month:
-        raise ValueError(f"No {n}th weekday {weekday} in {year}-{month:02d}")
-    return day
-
-
-def _last_weekday(year: int, month: int, weekday: int) -> int:
-    """Return the day-of-month for the last occurrence of weekday in month."""
-    import calendar
-    _, days_in_month = calendar.monthrange(year, month)
-    # Walk backwards from last day
-    for day in range(days_in_month, 0, -1):
-        if calendar.weekday(year, month, day) == weekday:
-            return day
-    raise ValueError(f"No weekday {weekday} in {year}-{month:02d}")
-
-
-def _easter_sunday(year: int) -> Tuple[int, int]:
-    """Compute Easter Sunday (month, day) via the Anonymous Gregorian algorithm."""
-    a = year % 19
-    b, c = divmod(year, 100)
-    d, e = divmod(b, 4)
-    f = (b + 8) // 25
-    g = (b - f + 1) // 3
-    h = (19 * a + b - d - g + 15) % 30
-    i, k = divmod(c, 4)
-    l = (32 + 2 * e + 2 * i - h - k) % 7
-    m = (a + 11 * h + 22 * l) // 451
-    month, day = divmod(h + l - 7 * m + 114, 31)
-    return month, day + 1
-
-
-def _get_floating_holidays(country: str, year: int) -> List[Tuple[int, int, str]]:
-    """Compute floating (date-varies-by-year) holidays for a country."""
-    results: List[Tuple[int, int, str]] = []
-
-    if country == "US":
-        # MLK Day: 3rd Monday in January
-        results.append((1, _nth_weekday(year, 1, 0, 3), "Martin Luther King Jr. Day"))
-        # Presidents' Day: 3rd Monday in February
-        results.append((2, _nth_weekday(year, 2, 0, 3), "Presidents' Day"))
-        # Memorial Day: last Monday in May
-        results.append((5, _last_weekday(year, 5, 0), "Memorial Day"))
-        # Labor Day: 1st Monday in September
-        results.append((9, _nth_weekday(year, 9, 0, 1), "Labor Day"))
-        # Columbus Day: 2nd Monday in October
-        results.append((10, _nth_weekday(year, 10, 0, 2), "Columbus Day"))
-        # Thanksgiving: 4th Thursday in November
-        results.append((11, _nth_weekday(year, 11, 3, 4), "Thanksgiving"))
-
-    elif country == "GB":
-        # Easter-based holidays
-        em, ed = _easter_sunday(year)
-        # Good Friday: Easter - 2 days
-        from datetime import date as _date
-        easter = _date(year, em, ed)
-        good_friday = easter - timedelta(days=2)
-        easter_monday = easter + timedelta(days=1)
-        results.append((good_friday.month, good_friday.day, "Good Friday"))
-        results.append((easter_monday.month, easter_monday.day, "Easter Monday"))
-        # Early May Bank Holiday: 1st Monday in May
-        results.append((5, _nth_weekday(year, 5, 0, 1), "Early May Bank Holiday"))
-        # Spring Bank Holiday: last Monday in May
-        results.append((5, _last_weekday(year, 5, 0), "Spring Bank Holiday"))
-        # Summer Bank Holiday: last Monday in August
-        results.append((8, _last_weekday(year, 8, 0), "Summer Bank Holiday"))
-
-    return results
-
-
-def get_holidays(nationality: str, year: int) -> Dict[Tuple[int, int], str]:
-    """Return {(month, day): name} for all public holidays for this nationality's country."""
-    if not nationality:
-        return {}
-    country = NATIONALITY_TO_COUNTRY.get(nationality.lower().strip())
-    if not country:
-        return {}
-    holidays: Dict[Tuple[int, int], str] = {}
-    for month, day, name in _FIXED_HOLIDAYS.get(country, []):
-        holidays[(month, day)] = name
-    for month, day, name in _get_floating_holidays(country, year):
-        holidays[(month, day)] = name
-    return holidays
-
-
 class DailyPlanner:
     """
     Generates and manages the persona's daily schedule.
@@ -633,7 +376,95 @@ class DailyPlanner:
         persona_locations: Optional[Dict[str, str]] = None,
         nationality: str = "",
         is_ai: bool = False,
+        rng=None,
+        params: Optional[PersonaParameters] = None,
+        setting: Optional[SettingSpec] = None,
+        persona_id: Optional[str] = None,
+        preferences: Optional[ActivityPreferences] = None,
+        definition=None,
+        media_preferences: Optional[Dict[str, List[str]]] = None,
     ):
+        """``rng``: optional ``random.Random`` for this planner's bare draws
+        (shuffling slot candidates, picking a routine/gentle activity, a
+        desire's expiry jitter, ...). ``None`` -- the default -- is a fresh,
+        unseeded ``random.Random()`` (never the module), so a bare
+        ``DailyPlanner()`` still works and shares no draw sequence with any
+        other instance or the module. Its per-day, per-role schedule draws
+        (``random.Random(zlib.crc32((today + role).encode()))``, built fresh
+        inside each generator) are unaffected: they already derive their own
+        seed from the date and role/occupation, independently of any rng.
+
+        ``params``: her traits' engine parameters
+        (:class:`~aura_life.personas.parameters.PersonaParameters`). Her
+        conscientiousness sets how tired or low she must be before
+        :meth:`revise_upcoming` drops upcoming slots (``plan_adherence``);
+        her impulsivity the chance :meth:`abandons_slot` drops a planned
+        free-time slot on a whim (``plan_deviation_chance``). Without them,
+        the thresholds as they are and no whims.
+
+        ``setting``: her setting pack (:class:`~aura_life.settings.SettingSpec`):
+        the wants she draws from (``wants``), the one an activity can leave
+        behind (``want_follow_ups``), her holiday calendar (``holidays``)
+        and the places every plan may use (``places``, before her profile's
+        own); and the activity tags it plans by (ruling T9-R5: "physical",
+        "outdoor", "quiet", "fallback_rest", "restful", "soothing",
+        "gentle", "clear_sky", "rained_off", "rainy_day";
+        :data:`~aura_life.settings.spec.ACTIVITY_TAGS`), in the tag orders
+        it gives. ``None`` -- the default -- is
+        :data:`~aura_life.settings.DEFAULT_SETTING`'s.
+
+        ``persona_id``: whose planner this is -- the swaps and fallbacks
+        draw only from the activities open to her
+        (:meth:`~aura_life.settings.SettingSpec.activities_for`).
+
+        The day's anchors -- waking, the three meals, bedtime, a shift, the
+        commute, a class, study, a meetup -- are her setting's activities for
+        them, by tag (:data:`~aura_life.settings.spec.ANCHOR_TAGS`; the first
+        so tagged, in its tag order; a meal slot without its own takes her
+        first "meal" activity). A slot her setting has no activity for is not
+        planned: every slot is something she can do (Task 10).
+
+        ``preferences``: hers (:class:`~aura_life.activities.choice.ActivityPreferences`),
+        which a free hour is filled by: what she is into (her interests,
+        comfort zones, tastes, media, substances) and how far her traits
+        lean her to an activity (``plan_preference``). ``None`` -- the
+        default -- builds them from ``params`` and ``interests`` alone.
+
+        ``definition`` (a ``PersonalityDefinition``) and ``media_preferences``:
+        her want seeds -- interests, comfort-zone seeds, tastes, media and
+        substance tendencies (the templates above) -- whose wants she draws
+        alongside her setting's. ``interests`` and ``media_preferences``, when
+        given, are hers instead of the definition's."""
+        if params is None:
+            params = PersonaParameters()
+        self._preferences = preferences if preferences is not None else ActivityPreferences(
+            params, interests=interests or [])
+        self._setting = setting if setting is not None else get_setting(DEFAULT_SETTING)
+        self._activities = self._setting.activities_for(persona_id)
+        self._anchors: Dict[str, Optional[str]] = {tag: self._first_tagged(tag) for tag in ANCHOR_TAGS}
+        for meal in ("breakfast", "lunch", "dinner"):
+            self._anchors[meal] = self._anchors[meal] or self._first_tagged("meal")
+        #: Never a free hour's pick: the anchors are planned in their own slots
+        #: -- the activities tagged for one, and those the planner fills one
+        #: with (the universal "having a meal" in a pack without meal slots
+        #: of its own: fix round 1, finding 2).
+        self._anchor_names = frozenset(
+            activity.name for activity in self._activities if activity.tags & set(ANCHOR_TAGS)
+        ) | frozenset(name for name in self._anchors.values() if name)
+        #: What a whim, a revision or the outing guarantee leaves alone.
+        self._routine_names = frozenset(ROUTINE_ACTIVITIES) | self._anchor_names
+        #: Her commitments: what cancelling the day's work cancels.
+        self._commitment_names = frozenset(
+            activity.name for activity in self._activities if activity.tags & set(COMMITMENT_TAGS))
+        #: Her own wants (the templates above), drawn alongside her setting's.
+        self._own_wants: List[Dict] = self._build_own_wants(definition, interests, media_preferences)
+        self._revise_energy_below = PLAN_REVISE_ENERGY_BELOW / params.plan_adherence
+        self._revise_mood_intensity_above = PLAN_REVISE_MOOD_INTENSITY_ABOVE * params.plan_adherence
+        self._deviation_chance = params.plan_deviation_chance
+        # How far she seeks company on a low day (her coping, Task 15:
+        # PersonaParameters.contact_seeking; at or below 0, not at all).
+        self._contact_seeking = params.contact_seeking
+        self._rng = rng if rng is not None else random.Random()
         # AI personas have no physical life: no sleep/meals/work/commute/errands.
         # When set, generate_daily_plan() builds a 24h-awake "light day/night
         # rhythm" from the non-physical activity subset instead of a human day.
@@ -644,13 +475,10 @@ class DailyPlanner:
         self._sleep_schedule = sleep_schedule or {}
         self._persona_locations = persona_locations or {}
         self._nationality = nationality
-        # Every persona has access to common locations; profiles can add custom ones
-        _DEFAULT_LOCATIONS = {
-            "home", "cafe", "park", "gym", "library", "street",
-            "workplace", "restaurant", "bar", "rooftop", "beach",
-            "school", "campus", "in transit",
-        }
-        self._available_location_keys = _DEFAULT_LOCATIONS | set(
+        # Every persona has access to her setting's places (the contemporary
+        # pack's are the set literal this held until Task 9); profiles can add
+        # custom ones
+        self._available_location_keys = set(self._setting.places) | set(
             k.lower() for k in self._persona_locations.keys()
         )
         self._wake_hour = self._sleep_schedule.get("wake_hour", 7)
@@ -671,11 +499,13 @@ class DailyPlanner:
     def all_desires(self) -> List[ShortTermDesire]:
         return self._desires
 
-    def needs_new_plan(self) -> bool:
-        """Check if we need to generate a new daily plan."""
+    def needs_new_plan(self, now: Optional[datetime] = None) -> bool:
+        """Is her plan not for the day ``now`` is on? ``LifeService`` passes
+        her local world time (her plan's days are hers); the host's wall
+        clock when omitted."""
         if not self._current_plan:
             return True
-        today = datetime.now().strftime("%Y-%m-%d")
+        today = (now if now is not None else datetime.now()).strftime("%Y-%m-%d")
         return self._current_plan.date != today
 
     def generate_daily_plan(
@@ -685,6 +515,7 @@ class DailyPlanner:
         available_activities: List[Activity],
         recent_activity_names: List[str],
         work_schedule: Optional[dict] = None,
+        now: Optional[datetime] = None,
         habits: Optional[Dict[str, Dict[str, Tuple[float, float]]]] = None,
     ) -> DailyPlan:
         """
@@ -697,9 +528,15 @@ class DailyPlanner:
         AI personas have no physical life, so they take a separate path: a 24h
         light day/night rhythm of non-physical activities, never asleep.
 
+        The plan is for the day ``now`` is on, and its weekday decides her
+        work: ``LifeService`` passes her local world time; the host's wall
+        clock when omitted.
+
         ``habits`` is ``{part of her day: {activity: (raise, damp)}}``
         (``BehaviorSystem.habit_factors``): each hobby slot's draw is reweighted
-        by its part of the day's factors (``_slot_draw``). ``None`` draws as 0.4.0.
+        by its part of the day's factors (``_slot_draw``), on the slot's
+        choice weights (``choice_weight`` of its score and her plan
+        preference). ``None`` draws as without habits.
         """
         if self._is_ai:
             return self._generate_ai_plan(
@@ -707,10 +544,11 @@ class DailyPlanner:
                 weather=weather,
                 available_activities=available_activities,
                 recent_activity_names=recent_activity_names,
+                now=now,
                 habits=habits,
             )
 
-        now = datetime.now()
+        now = now if now is not None else datetime.now()
         today = now.strftime("%Y-%m-%d")
         today_weekday = now.weekday()  # 0=Mon, 6=Sun
         slots: List[PlannedSlot] = []
@@ -739,9 +577,19 @@ class DailyPlanner:
         # Track assigned locations for variety scoring during plan generation
         self._plan_assigned_locations: List[str] = []
 
-        # --- Fixed routine anchors (offsets from wake) ---
-        slots.append(PlannedSlot(hour=_h(0), activity_name="waking up", reason="start of the day", location=self._resolve_location_for_activity("waking up")))
-        slots.append(PlannedSlot(hour=_h(1), activity_name="having breakfast", reason="morning meal", location=self._resolve_location_for_activity("having breakfast")))
+        # --- Fixed routine anchors (offsets from wake): her setting's
+        # activity for each (self._anchors); none, and the slot is not
+        # planned (its hour is still kept from the free hours) ---
+        def _anchor_slot(tag: str, hour: int, reason: str, location: Optional[str] = None) -> None:
+            name = self._anchors[tag]
+            if not name:
+                return
+            if location is None:
+                location = self._resolve_location_for_activity(name, activity_def=activity_map.get(name))
+            slots.append(PlannedSlot(hour=hour, activity_name=name, reason=reason, location=location))
+
+        _anchor_slot("wake_up", _h(0), "start of the day")
+        _anchor_slot("breakfast", _h(1), "morning meal")
 
         # Lunch: ~5 hours after wake, but at least hour 12 for normal schedules
         lunch_offset = 5
@@ -751,18 +599,18 @@ class DailyPlanner:
         lunch_offset = max(lunch_offset, 3)  # at least 3h after wake
         lunch_hour = _h(lunch_offset)
 
-        slots.append(PlannedSlot(hour=lunch_hour, activity_name="having lunch", reason="midday meal", location=self._resolve_location_for_activity("having lunch")))
+        _anchor_slot("lunch", lunch_hour, "midday meal")
 
         # Dinner: ~3-4 hours before bed, at least 3h after lunch
         dinner_offset = max(lunch_offset + 3, awake_span - 4)
         dinner_offset = min(dinner_offset, awake_span - 2)  # 2h before bed
         dinner_hour = _h(dinner_offset)
 
-        slots.append(PlannedSlot(hour=dinner_hour, activity_name="having dinner", reason="evening meal", location=self._resolve_location_for_activity("having dinner")))
+        _anchor_slot("dinner", dinner_hour, "evening meal")
 
         # Bedtime prep: 1 hour before bed
         bedprep_hour = _h(awake_span - 1)
-        slots.append(PlannedSlot(hour=bedprep_hour, activity_name="getting ready for bed", reason="winding down", location="home"))
+        _anchor_slot("bedtime", bedprep_hour, "winding down", location="home")
 
         # Collect offsets already taken by routines
         routine_offsets = {0, 1, lunch_offset, dinner_offset, awake_span - 1}
@@ -852,20 +700,23 @@ class DailyPlanner:
                 ))
                 used_names.append(activity_name)
 
-        # Stargazing bonus if weather is clear and there's a late evening slot
+        # Clear-sky bonus if weather is clear and there's a late evening slot:
+        # her first clear-sky activity (tag "clear_sky": the contemporary
+        # "stargazing").
         stargaze_offset = awake_span - 2
-        if weather in (Weather.CLEAR_NIGHT, Weather.STARRY) and stargaze_offset not in routine_offsets:
+        clear_sky = self._setting.tag_pool("clear_sky", available_activities)
+        if clear_sky and weather in (Weather.CLEAR_NIGHT, Weather.STARRY) and stargaze_offset not in routine_offsets:
             stargaze_hour = _h(stargaze_offset)
-            stargaze_loc = self._resolve_location_for_activity("stargazing")
+            stargaze_loc = self._resolve_location_for_activity(clear_sky[0])
             existing = [s for s in slots if s.hour == stargaze_hour]
             if existing:
-                existing[0].activity_name = "stargazing"
+                existing[0].activity_name = clear_sky[0]
                 existing[0].reason = "clear sky tonight"
                 existing[0].location = stargaze_loc
             else:
                 slots.append(PlannedSlot(
                     hour=stargaze_hour,
-                    activity_name="stargazing",
+                    activity_name=clear_sky[0],
                     reason="clear sky tonight",
                     location=stargaze_loc,
                 ))
@@ -875,7 +726,7 @@ class DailyPlanner:
         # This prevents all-home schedules for personas without occupations.
         non_routine = [
             s for s in slots
-            if s.activity_name not in ROUTINE_ACTIVITIES
+            if s.activity_name not in self._routine_names
                and s.location in ("home", None)
         ]
         outings_today = sum(
@@ -885,7 +736,7 @@ class DailyPlanner:
         min_outings = 2 if len(non_routine) > 4 else 1
         if outings_today < min_outings and non_routine:
             # Promote some home hobby slots to outside locations
-            random.shuffle(non_routine)
+            self._rng.shuffle(non_routine)
             for slot in non_routine[:min_outings - outings_today]:
                 outside = self._pick_location("cafe", "park", "library")
                 if outside != "home":
@@ -911,6 +762,7 @@ class DailyPlanner:
         weather: Weather,
         available_activities: List[Activity],
         recent_activity_names: List[str],
+        now: Optional[datetime] = None,
         habits: Optional[Dict[str, Dict[str, Tuple[float, float]]]] = None,
     ) -> DailyPlan:
         """Build an AI persona's daily plan: a 24h-awake light day/night rhythm.
@@ -920,29 +772,28 @@ class DailyPlanner:
         reflective / mental) activity. Daytime hours (AI_DAYTIME_HOURS) draw from
         the full varied non-physical pool; night hours stay present but quieter,
         favoring low-key activities so the day reads denser than the night.
+        For the day ``now`` is on (:meth:`generate_daily_plan`'s).
         """
-        now = datetime.now()
+        now = now if now is not None else datetime.now()
         today = now.strftime("%Y-%m-%d")
 
         self._refresh_desires(goals)
         active_desires = self.desires
 
-        # Non-physical subset of the pool — drop anything that needs a body.
+        # Non-physical subset of the pool — drop anything that needs a body
+        # (tag "physical").
         non_physical = [
             a for a in available_activities
-            if a.name not in PHYSICAL_ACTIVITIES
+            if "physical" not in a.tags
         ]
         activity_map = {a.name: a for a in non_physical}
 
-        # Quiet night-time activities: calm, low-key, present-but-still.
-        quiet_pool = [
-            n for n in (
-                "relaxing", "listening to music", "reading", "journaling",
-                "meditating", "daydreaming", "stargazing", "thinking about user",
-                "remembering happy moments", "watching the snow fall",
-            )
-            if n in activity_map
-        ]
+        # Quiet night-time activities: calm, low-key, present-but-still (tag
+        # "quiet"), in her setting's draw order.
+        quiet_pool = self._setting.tag_pool("quiet", non_physical)
+        # Quiet downtime is her rest (tag "fallback_rest": the contemporary
+        # "relaxing").
+        rest = self._fallback_rest(ai=True)
 
         self._plan_assigned_locations = []
         slots: List[PlannedSlot] = []
@@ -954,7 +805,7 @@ class DailyPlanner:
         # without modelling a circadian cycle. Pick the lit hours deterministically
         # so the rhythm is stable across a single day's generation.
         night_hours = [h for h in range(24) if h not in AI_DAYTIME_HOURS]
-        random.shuffle(night_hours)
+        self._rng.shuffle(night_hours)
         night_active_count = min(len(quiet_pool), max(1, len(night_hours) // 3))
         night_active_hours = set(night_hours[:night_active_count])
 
@@ -989,16 +840,18 @@ class DailyPlanner:
             elif clock_h in night_active_hours and quiet_pool:
                 # Sparse night activity: one calm, low-key thing.
                 choices = [n for n in quiet_pool if n not in used_names] or quiet_pool
-                activity_name = random.choice(choices)
+                activity_name = self._rng.choice(choices)
                 reason = "a quiet moment"
             else:
                 # Quiet downtime — present but still.
-                activity_name = "relaxing"
+                activity_name = rest
                 reason = "a quiet moment"
 
             if not activity_name:
-                activity_name = "relaxing"
+                activity_name = rest
                 reason = "a quiet moment"
+            if not activity_name:
+                continue  # her setting has no rest to fall back on: the hour stays open
 
             activity_def = activity_map.get(activity_name)
             location = self._resolve_location_for_activity(
@@ -1029,6 +882,43 @@ class DailyPlanner:
             return None
         return self._current_plan.get_slot_for_hour(hour)
 
+    def abandons_slot(self, slot: PlannedSlot) -> bool:
+        """Does she drop this planned slot on a whim, and do something else?
+
+        Only a free-time slot: never a routine anchor (ROUTINE_ACTIVITIES and
+        her setting's anchors -- meals, work, classes), an important
+        commitment (:func:`is_important_activity`), a plan agreed with the
+        user (USER_AGREED_REASON) or a plan with people (:meth:`is_free_time`).
+        The chance is her impulsivity's
+        ``plan_deviation_chance``; at or below neutral impulsivity it is 0 and
+        no draw is taken, so this planner's stream is exactly as before."""
+        if self._deviation_chance <= 0.0 or not self.is_free_time(slot):
+            return False
+        return self._rng.random() < self._deviation_chance
+
+    def is_commitment(self, slot: Optional[PlannedSlot]) -> bool:
+        """Is this planned slot one of her commitments -- a shift, the
+        commute, a class, study (her setting's activities tagged "work",
+        "commute", "class", "study", and the contemporary names)? An intimate
+        activity never takes one (``LifeService``, spec R6)."""
+        return slot is not None and slot.activity_name in (
+            self._commitment_names | {"working", "attending classes", "studying", "commuting"})
+
+    def is_free_time(self, slot: Optional[PlannedSlot]) -> bool:
+        """Is this planned slot free time -- not a routine anchor
+        (ROUTINE_ACTIVITIES and her setting's anchors: meals, work, classes
+        ...), an important commitment (:func:`is_important_activity`), a
+        plan agreed with the user (USER_AGREED_REASON) or a plan with people
+        (SOCIAL_PLAN_REASON_PREFIX, ``LifeService.add_social_plan``: a promise
+        is kept, as :meth:`revise_upcoming` keeps it)? Only free time is
+        dropped on a whim (:meth:`abandons_slot`) or taken by a pressing
+        need or a housemate's joint activity (``LifeService``)."""
+        if slot is None:
+            return False
+        return not (slot.activity_name in self._routine_names or is_important_activity(slot.activity_name)
+                    or slot.reason == USER_AGREED_REASON
+                    or (slot.reason or "").startswith(SOCIAL_PLAN_REASON_PREFIX))
+
     def mark_slot_completed(self, hour: int, actual_activity: Optional[str] = None) -> None:
         """Mark a slot as completed, optionally recording what actually happened."""
         if not self._current_plan:
@@ -1039,22 +929,46 @@ class DailyPlanner:
             slot.actual_activity = actual_activity
 
     def revise_upcoming(self, weather: Weather, energy_level: float,
-                        mood: str = "", mood_intensity: float = 0.0) -> None:
+                        mood: str = "", mood_intensity: float = 0.0,
+                        now: Optional[datetime] = None) -> None:
         """
         Silently revise upcoming slots if conditions have changed.
 
         This is the "prepared the change ahead" behavior — she adjusts
-        her plans without announcing it.
+        her plans without announcing it. Upcoming is after the hour ``now``
+        is in: ``LifeService`` passes her local world time; the host's wall
+        clock when omitted.
         """
         if not self._current_plan:
             return
 
-        now = datetime.now()
+        now = now if now is not None else datetime.now()
         revised = False
 
-        # Moods that should trigger gentle activity swaps
-        low_moods = {"sad", "anxious", "melancholic", "lonely", "overwhelmed", "exhausted"}
-        mood_is_low = mood in low_moods and mood_intensity > 0.4
+        # Moods that should trigger gentle activity swaps ("low" and "anxious"
+        # are the unpleasant mood labels affect_system.MOOD_LABELS gives a
+        # sad or keyed-up mood). How low and how tired she must be before she
+        # drops a plan is her conscientiousness's (PLAN_REVISE_* constants).
+        low_moods = {"sad", "low", "anxious", "melancholic", "lonely", "overwhelmed", "exhausted"}
+        mood_is_low = mood in low_moods and mood_intensity > self._revise_mood_intensity_above
+
+        # What the swaps read (her setting's tags, ruling T9-R5): too tired,
+        # a slot not already rest ("restful") becomes her fallback rest or a
+        # nap; low, one not already "soothing" becomes a "gentle" one; a
+        # "clear_sky" slot under clouds, and a "rained_off" one in the rain,
+        # become a "rainy_day" one.
+        acts = self._activities
+        restful = self._setting.names_tagged("restful")
+        soothing = self._setting.names_tagged("soothing")
+        rest_swaps = self._setting.tag_pool("fallback_rest", acts) + self._setting.tag_pool("nap", acts)
+        gentle = self._setting.tag_pool("gentle", acts)
+        # How she copes on a low day (Task 15): one who seeks company counts
+        # it among her comforts -- she keeps a plan to see someone, and may
+        # swap to one; anyone else keeps to the gentle ones and withdraws.
+        contact = self._contact_comforts() if mood_is_low and self._contact_seeking > 0 else []
+        clear_sky = self._setting.names_tagged("clear_sky")
+        rained_off = self._setting.names_tagged("rained_off")
+        rainy_day = self._setting.tag_pool("rainy_day", acts)
 
         for slot in self._current_plan.slots:
             if slot.completed or slot.hour <= now.hour:
@@ -1064,20 +978,22 @@ class DailyPlanner:
                 continue
 
             # Low energy: swap high-cost activities for rest (skip routine anchors)
-            if energy_level < 0.25 and slot.activity_name not in ("relaxing", "napping", "sleeping", "making tea") and slot.activity_name not in ROUTINE_ACTIVITIES:
+            if (energy_level < self._revise_energy_below and slot.activity_name not in restful
+                    and slot.activity_name not in self._routine_names and rest_swaps):
                 old = slot.activity_name
-                slot.activity_name = random.choice(["relaxing", "napping"])
+                slot.activity_name = self._rng.choice(rest_swaps)
                 slot.reason = "needed rest"
                 self._note_revision(
                     f"Swapped {old} at {slot.hour}:00 for {slot.activity_name} (low energy)"
                 )
                 revised = True
 
-            # Low mood: swap demanding activities for comforting ones
-            elif mood_is_low and slot.activity_name not in ("relaxing", "napping", "sleeping", "making tea", "journaling", "meditating", "listening to music", "reading") and slot.activity_name not in ROUTINE_ACTIVITIES:
+            # Low mood: swap demanding activities for comforting ones -- the
+            # comfort she would pick (_comfort_among), not any at random
+            elif (mood_is_low and slot.activity_name not in soothing and slot.activity_name not in contact
+                    and slot.activity_name not in self._routine_names and gentle):
                 old = slot.activity_name
-                gentle = ["listening to music", "reading", "making tea", "journaling"]
-                slot.activity_name = random.choice(gentle)
+                slot.activity_name = self._comfort_among(gentle, contact)
                 slot.reason = f"not feeling up to it"
                 self._note_revision(
                     f"Swapped {old} at {slot.hour}:00 for {slot.activity_name} (low mood)"
@@ -1085,19 +1001,19 @@ class DailyPlanner:
                 revised = True
 
             # Weather changed: swap weather-dependent activities
-            if slot.activity_name == "stargazing" and weather not in (Weather.CLEAR_NIGHT, Weather.STARRY):
-                slot.activity_name = "reading"
+            if slot.activity_name in clear_sky and weather not in (Weather.CLEAR_NIGHT, Weather.STARRY) and rainy_day:
+                old = slot.activity_name
+                slot.activity_name = rainy_day[0]
                 slot.reason = "sky clouded over"
                 self._note_revision(
-                    f"Swapped stargazing at {slot.hour}:00 for reading (weather changed)"
+                    f"Swapped {old} at {slot.hour}:00 for {slot.activity_name} (weather changed)"
                 )
                 revised = True
 
             # Rainy weather bonus: prefer indoor cozy activities
             if weather in (Weather.RAINY, Weather.STORMY):
-                outdoor = ("tending to plants", "people watching")
-                if slot.activity_name in outdoor:
-                    slot.activity_name = random.choice(["reading", "listening to music"])
+                if slot.activity_name in rained_off and rainy_day:
+                    slot.activity_name = self._rng.choice(rainy_day)
                     slot.reason = "staying in because of rain"
                     self._note_revision(
                         f"Moved inside at {slot.hour}:00 (rain)"
@@ -1119,110 +1035,93 @@ class DailyPlanner:
                 return desire
         return None
 
-    def generate_desire_from_conversation(self, topic: str) -> Optional[ShortTermDesire]:
-        """Generate a desire inspired by conversation."""
-        desire = ShortTermDesire(
-            title=f"Look into {topic} more",
-            description=f"Our conversation made me curious about {topic}",
-            source=DesireSource.CONVERSATION,
-            related_activities=["learning something new", "reading"],
-            urgency=0.7,
-            expires_at=datetime.now() + timedelta(days=3),
-        )
-
-        # Avoid duplicates
-        for existing in self._desires:
-            if topic.lower() in existing.title.lower():
-                return None
-
-        self._desires.append(desire)
-        return desire
-
     def generate_desire_from_activity(self, activity_name: str) -> Optional[ShortTermDesire]:
-        """Occasionally generate a follow-up desire after an activity."""
-        if random.random() > 0.15:
+        """Occasionally generate a follow-up desire after an activity: the
+        one her setting's ``want_follow_ups`` names for it, built fresh (a
+        key it leaves out takes ``ShortTermDesire``'s own default)."""
+        if self._rng.random() > 0.15:
             return None
 
-        follow_ups = {
-            "reading": ShortTermDesire(
-                title="Keep reading that book",
-                description="I got to a really good part",
-                source=DesireSource.ACTIVITY,
-                related_activities=["reading"],
-                urgency=0.6,
-            ),
-            "writing poetry": ShortTermDesire(
-                title="Revisit that poem I started",
-                description="I think there's more there",
-                source=DesireSource.ACTIVITY,
-                related_activities=["writing poetry"],
-                urgency=0.5,
-            ),
-            "listening to music": ShortTermDesire(
-                title="Build on that music mood",
-                description="I found a vein of songs I want to explore",
-                source=DesireSource.ACTIVITY,
-                related_activities=["listening to music", "creating a playlist"],
-                urgency=0.4,
-            ),
-            "learning something new": ShortTermDesire(
-                title="Dig deeper into what I just learned",
-                description="I only scratched the surface",
-                source=DesireSource.ACTIVITY,
-                related_activities=["learning something new", "reading"],
-                urgency=0.6,
-            ),
-            "stargazing": ShortTermDesire(
-                title="Try stargazing again tomorrow",
-                description="Tonight was beautiful, I want more of that",
-                source=DesireSource.ACTIVITY,
-                related_activities=["stargazing"],
-                urgency=0.5,
-            ),
-        }
-
-        template = follow_ups.get(activity_name)
-        if not template:
+        want = self._setting.want_follow_ups.get(activity_name)
+        if not want:
             return None
+        fields = {key: want[key] for key in ("title", "description", "source", "urgency") if key in want}
+        template = ShortTermDesire(related_activities=list(want.get("related_activities", [])), **fields)
 
         # Avoid duplicates
         for existing in self._desires:
             if existing.title == template.title and not existing.fulfilled:
                 return None
 
-        template.expires_at = datetime.now() + timedelta(days=random.randint(2, 5))
+        template.expires_at = datetime.now() + timedelta(days=self._rng.randint(2, 5))
         self._desires.append(template)
         logger.info(f"New desire from activity: {template.title}")
         return template
 
     # ============= Schedule Override Methods =============
+    # An override rewrites the slots still ahead: every later slot not yet
+    # done, and the slot of the hour she is in whether done or not -- each
+    # activity tick marks the hour's slot completed and the slot governs the
+    # whole hour (Task 10), so skipping a completed one left her on the old
+    # plan for the rest of the hour. A rewritten slot is not done any more.
+
+    @staticmethod
+    def _rewritable(slot: PlannedSlot, now_hour: int) -> bool:
+        """May an override rewrite ``slot``: the hour she is in, or a later,
+        uncompleted one?"""
+        return slot.hour == now_hour or (slot.hour > now_hour and not slot.completed)
+
+    @staticmethod
+    def _rewritten(slot: PlannedSlot) -> None:
+        slot.completed = False
+        slot.actual_activity = None
 
     def cancel_work_today(self, now: Optional[datetime] = None) -> None:
         """Replace remaining work/class/study/commute slots with 'relaxing' at home.
 
         "Remaining" is judged against ``now``'s hour (the host's wall clock when
-        omitted); ``LifeService`` passes its world clock.
+        omitted); ``LifeService`` passes her local world time. It includes the
+        slot of the hour she is in, even once she has started it. The slots are
+        the contemporary names and her setting's commitments (tags "work",
+        "commute", "class", "study").
         """
         if not self._current_plan:
             return
-        work_activities = {"working", "attending classes", "studying", "commuting"}
+        work_activities = {"working", "attending classes", "studying", "commuting"} | self._commitment_names
         now_hour = (now if now is not None else datetime.now()).hour
+        # A cancelled slot becomes her rest (tag "fallback_rest": the
+        # contemporary "relaxing"); with none in her setting it is dropped.
+        rest = self._fallback_rest(ai=self._is_ai)
+        dropped = []
         for slot in self._current_plan.slots:
-            if slot.hour >= now_hour and not slot.completed and slot.activity_name in work_activities:
-                slot.activity_name = "relaxing"
+            if self._rewritable(slot, now_hour) and slot.activity_name in work_activities:
+                if rest is None:
+                    dropped.append(slot)
+                    continue
+                slot.activity_name = rest
                 slot.location = "home"
                 slot.reason = "day off"
+                self._rewritten(slot)
+        if dropped:
+            self._current_plan.slots = [s for s in self._current_plan.slots if s not in dropped]
         self._note_revision("Cancelled remaining work — taking the day off")
         logger.info("Schedule override: cancelled remaining work slots")
 
-    def override_current_location(self, location: str) -> None:
-        """Set the current and next slot's location."""
+    def override_current_location(self, location: str, now: Optional[datetime] = None) -> None:
+        """Set the current and next slot's location.
+
+        The current slot is the latest at or before ``now``'s hour (done or
+        not), the next the first later one not done
+        (:meth:`DailyPlan.get_current_slot`, :meth:`DailyPlan.get_next_slot`);
+        ``now`` omitted, the host's wall clock. ``LifeService`` passes her
+        local world time."""
         if not self._current_plan:
             return
-        current = self._current_plan.get_current_slot()
-        if current and not current.completed:
+        current = self._current_plan.get_current_slot(now)
+        next_slot = self._current_plan.get_next_slot(now)
+        if current:
             current.location = location
-        next_slot = self._current_plan.get_next_slot()
+            self._rewritten(current)
         if next_slot:
             next_slot.location = location
         self._note_revision(f"Moved to {location}")
@@ -1232,48 +1131,82 @@ class DailyPlanner:
         """Set all remaining slots to the current location.
 
         "Remaining" is judged against ``now``'s hour (the host's wall clock when
-        omitted); ``LifeService`` passes its world clock. The current location
-        still comes from :meth:`DailyPlan.get_current_slot`, which reads the
-        host's clock.
+        omitted); ``LifeService`` passes her local world time. It includes the
+        slot of the hour she is in, even once she has started it. The current
+        location is that of her slot at ``now``
+        (:meth:`DailyPlan.get_current_slot`).
         """
         if not self._current_plan:
             return
-        current = self._current_plan.get_current_slot()
+        current = self._current_plan.get_current_slot(now)
         current_loc = current.location if current else "home"
         now_hour = (now if now is not None else datetime.now()).hour
         for slot in self._current_plan.slots:
-            if slot.hour >= now_hour and not slot.completed:
+            if self._rewritable(slot, now_hour):
                 slot.location = current_loc
+                self._rewritten(slot)
         self._note_revision(f"Staying at {current_loc}")
         logger.info(f"Schedule override: staying at {current_loc}")
 
     def schedule_rendezvous(self, location: str, now: Optional[datetime] = None) -> None:
         """Update the current and next slot(s) to reflect a planned meeting arrival.
 
-        Sets activity to 'meeting up' and location to the destination for the
-        current slot and the next uncompleted slot. Only slots from ``now``'s hour
-        on count (the host's wall clock when omitted); ``LifeService`` passes its
-        world clock.
+        Sets activity to her setting's meetup (tag "meetup": the contemporary
+        'meeting up'; a setting without one keeps each slot's own activity)
+        and location to the destination for the current slot and the next
+        uncompleted slot. Only slots from ``now``'s hour on count (the host's
+        wall clock when omitted), the hour she is in even once started;
+        ``LifeService`` passes her local world time.
         """
         if not self._current_plan:
             return
         now_hour = (now if now is not None else datetime.now()).hour
+        meetup = self._anchors["meetup"]
         updated = 0
         for slot in self._current_plan.slots:
-            if slot.hour >= now_hour and not slot.completed and updated < 2:
-                slot.activity_name = "meeting up"
+            if self._rewritable(slot, now_hour) and updated < 2:
+                if meetup:
+                    slot.activity_name = meetup
                 slot.location = location
                 slot.reason = "planned meetup"
+                self._rewritten(slot)
                 updated += 1
         self._note_revision(f"Meeting at {location}")
         logger.info(f"Schedule rendezvous: meeting at {location}")
+
+    def join_activity(self, activity_name: str, location: str, reason: str, now: datetime) -> None:
+        """Joining someone in ``activity_name`` at ``location`` takes the hour
+        she is in (humanness program Task 28, ruling T13-R1): the slot of
+        ``now``'s hour becomes that activity there, for ``reason``, and is not
+        done any more, like any override's (:meth:`_rewritten`); an hour her
+        plan left empty gains the slot, so it is her current one
+        (:meth:`DailyPlan.get_current_slot`) and a later sync of her plan
+        keeps her where the activity is. Every other hour stays as planned.
+        ``now`` is her local world time (``LifeService`` passes it); there is
+        no host-clock default."""
+        if not self._current_plan:
+            return
+        hour = now.hour
+        slot = self._current_plan.get_slot_for_hour(hour)
+        if slot is None:
+            self._current_plan.slots.append(
+                PlannedSlot(hour=hour, activity_name=activity_name, reason=reason, location=location))
+            # Keep slots ordered by hour (matches how generated plans are built).
+            self._current_plan.slots.sort(key=lambda s: s.hour)
+        else:
+            slot.activity_name = activity_name
+            slot.location = location
+            slot.reason = reason
+            self._rewritten(slot)
+        self._note_revision(f"Joined {activity_name} at {location}, {hour:02d}:00 ({reason})")
+        logger.info(f"Schedule override: {activity_name} at {location} for {hour:02d}:00 ({reason})")
 
     def set_planned_activity(
         self,
         hour: int,
         activity_name: str,
         location: str = "",
-        reason: str = "agreed with user",
+        reason: str = USER_AGREED_REASON,
         now: Optional[datetime] = None,
     ) -> None:
         """Upsert a FUTURE slot in today's plan from a conversation commitment.
@@ -1287,7 +1220,7 @@ class DailyPlanner:
         than rewriting history. (Same hour as "now" is allowed: it's still the
         active window.) ``now`` is the instant "already passed" is judged
         against (the host's wall clock when omitted); ``LifeService`` passes
-        its world clock.
+        her local world time.
         """
         if not self._current_plan:
             logger.warning("set_planned_activity: no current plan; ignoring")
@@ -1326,6 +1259,38 @@ class DailyPlanner:
         )
         logger.info(f"Planned activity set: {hour:02d}:00 — {activity_name} @ {loc}")
 
+    def _comfort_among(self, gentle: List[str], contact: Sequence[str] = ()) -> str:
+        """The gentle activity a low mood swaps a slot for: drawn by who she
+        is -- what she is into and how her traits lean her, the weights her
+        free hours are planned by (``ActivityPreferences.plan_preference``,
+        Task 10) -- not uniformly, so a bad day still looks like her own
+        (Task 14 fix round, ruling T14-R1: a day's quality makes low days,
+        and a uniform comfort made every persona's low day the same).
+
+        ``contact``: the company a persona who seeks it counts among her
+        comforts (Task 15, :meth:`_contact_comforts`), each weighed the same
+        way times how far she seeks it (``contact_seeking``, the context of
+        ``choice_weight``). None -- everyone else -- is the gentle ones
+        alone, the one draw it always was."""
+        by_name = {activity.name: activity for activity in self._activities}
+        names = list(gentle) + [name for name in contact if name not in gentle]
+        weights = [choice_weight(1.0 if index < len(gentle) else self._contact_seeking,
+                                 self._preferences.plan_preference(by_name[name]))
+                   for index, name in enumerate(names)]
+        return self._rng.choices(names, weights=weights)[0]
+
+    def _contact_comforts(self) -> List[str]:
+        """The company she can plan on a low day: her activities that meet her
+        need for other people (``ActivityPreferences.satisfaction``'s
+        "social": the social ones) and that a free hour may hold -- no anchor
+        of her day, nothing that happens only when a plan says so, nothing
+        physical for an AI persona."""
+        return [activity.name for activity in self._activities
+                if self._preferences.satisfaction(activity).get("social", 0.0) > 0
+                and activity.name not in self._anchor_names
+                and not activity.tags & set(PLAN_ONLY_TAGS)
+                and not (self._is_ai and "physical" in activity.tags)]
+
     def _note_revision(self, note: str) -> None:
         """Record a silent plan revision, keeping the list bounded.
 
@@ -1348,14 +1313,17 @@ class DailyPlanner:
         self._current_plan = plan
         self._desires = desires
 
-    def export_state(self) -> dict:
-        """Structured dict for LLM pipeline digest passes."""
+    def export_state(self, now: Optional[datetime] = None) -> dict:
+        """Structured dict for LLM pipeline digest passes: her slot, her next
+        one and what is done and still ahead, at the hour ``now`` is in
+        (``LifeService`` passes her local world time; the host's wall clock
+        when omitted)."""
         current_slot = None
         next_slot = None
         completed_count = 0
         remaining_count = 0
         if self._current_plan:
-            slot = self._current_plan.get_current_slot()
+            slot = self._current_plan.get_current_slot(now)
             if slot:
                 current_slot = {
                     "activity": slot.activity_name,
@@ -1363,7 +1331,7 @@ class DailyPlanner:
                     "reason": slot.reason,
                 }
             # Find next uncompleted slot
-            now_hour = datetime.now().hour
+            now_hour = (now if now is not None else datetime.now()).hour
             for s in self._current_plan.slots:
                 if s.hour > now_hour and not s.completed:
                     next_slot = {"activity": s.activity_name, "hour": s.hour}
@@ -1411,10 +1379,10 @@ class DailyPlanner:
         Uses a date-seeded RNG so the same date always produces the same result.
         Only rolls on days that would normally have work for this occupation type.
         """
-        # Check for public holidays first
+        # Check for public holidays first (her setting's calendar)
         parts = today.split("-")
         year, month, day = int(parts[0]), int(parts[1]), int(parts[2])
-        holidays = get_holidays(self._nationality, year)
+        holidays = self._setting.holidays_for(self._nationality, year)
         if (month, day) in holidays:
             return "holiday"
 
@@ -1426,10 +1394,10 @@ class DailyPlanner:
         elif occ == OCC_STUDENT:
             is_work_day = weekday < 5
         elif occ == OCC_SERVICE:
-            is_work_day = weekday < 6 or random.Random(hash(today + "sun")).random() < 0.20
+            is_work_day = weekday < 6 or random.Random(zlib.crc32((today + "sun").encode("utf-8"))).random() < 0.20
         elif occ == OCC_CREATIVE:
             if weekday >= 5:
-                is_work_day = random.Random(hash(today + "cre_wknd")).random() >= 0.50
+                is_work_day = random.Random(zlib.crc32((today + "cre_wknd").encode("utf-8"))).random() >= 0.50
             else:
                 is_work_day = True
 
@@ -1437,7 +1405,7 @@ class DailyPlanner:
             return "day_off"
 
         # Seeded roll for consistency within the same day
-        rng = random.Random(hash(today + self._occupation))
+        rng = random.Random(zlib.crc32((today + self._occupation).encode("utf-8")))
         roll = rng.random()
 
         # Creative workers take occasional unplanned days off; others don't
@@ -1503,32 +1471,33 @@ class DailyPlanner:
         self, first_work_offset: int, last_work_offset: int,
         routine_offsets: set, awake_span: int, _h, chaos: str,
     ) -> List[PlannedSlot]:
-        """Create commute slots before/after work if workplace != home and not WFH."""
-        if chaos == "wfh":
+        """Create commute slots before/after work if workplace != home and not
+        WFH -- and her setting has a commute activity (tag "commute")."""
+        commute = self._anchors["commute"]
+        if chaos == "wfh" or not commute:
             return []
         work_loc = self._pick_location("workplace", fallback="home")
         if work_loc == "home":
             return []
 
         commute_slots = []
-        rng = random.Random()
 
         # Commute to work: 1 offset before first work slot
         before = first_work_offset - 1
-        if before >= 2 and before not in routine_offsets and rng.random() < 0.70:
+        if before >= 2 and before not in routine_offsets and self._rng.random() < 0.70:
             commute_slots.append(PlannedSlot(
                 hour=_h(before),
-                activity_name="commuting",
+                activity_name=commute,
                 reason="heading to work",
                 location="in transit",
             ))
 
         # Commute home: 1 offset after last work slot
         after = last_work_offset + 1
-        if after < awake_span - 1 and after not in routine_offsets and rng.random() < 0.70:
+        if after < awake_span - 1 and after not in routine_offsets and self._rng.random() < 0.70:
             commute_slots.append(PlannedSlot(
                 hour=_h(after),
-                activity_name="commuting",
+                activity_name=commute,
                 reason="heading home",
                 location="in transit",
             ))
@@ -1542,7 +1511,11 @@ class DailyPlanner:
         """Place a 'working' block across the Job engine's shift window (absolute
         clock hours shift_start..shift_end), skipping meal/routine slots, with
         commute. This is the schedule-driven path — days are gated by the caller.
+        Her setting's work activity (tag "work"); none, and no block.
         """
+        work = self._anchors["work"]
+        if not work:
+            return [], []
         is_wfh = chaos == "wfh"
         work_loc = "home" if is_wfh else self._pick_location("workplace", fallback="home")
         late = 1 if chaos == "late_start" else 0
@@ -1559,7 +1532,7 @@ class DailyPlanner:
         work_offsets = sorted(set(work_offsets))
 
         work_slots = [
-            PlannedSlot(hour=_h(off), activity_name="working", reason="work", location=work_loc)
+            PlannedSlot(hour=_h(off), activity_name=work, reason="work", location=work_loc)
             for off in work_offsets
         ]
         commute_slots = []
@@ -1574,9 +1547,11 @@ class DailyPlanner:
         self, today, weekday, chaos, wake, lunch_offset, dinner_offset,
         awake_span, routine_offsets, _h,
     ) -> Tuple[List[PlannedSlot], List[PlannedSlot]]:
-        """Generate 8h Mon-Fri office/professional schedule."""
+        """Generate 8h Mon-Fri office/professional schedule (her setting's
+        work activity, tag "work"; none, and no schedule)."""
+        work = self._anchors["work"]
         # Weekends: no work
-        if weekday >= 5:
+        if weekday >= 5 or not work:
             return [], []
 
         target_hours = 8
@@ -1595,7 +1570,7 @@ class DailyPlanner:
                 work_offsets.append(off)
 
         work_slots = [
-            PlannedSlot(hour=_h(off), activity_name="working", reason="work", location=work_loc)
+            PlannedSlot(hour=_h(off), activity_name=work, reason="work", location=work_loc)
             for off in work_offsets
         ]
 
@@ -1612,8 +1587,11 @@ class DailyPlanner:
         self, today, weekday, chaos, wake, lunch_offset, dinner_offset,
         awake_span, routine_offsets, _h,
     ) -> Tuple[List[PlannedSlot], List[PlannedSlot]]:
-        """Generate scattered class + study blocks for students."""
-        rng = random.Random(hash(today + "student"))
+        """Generate scattered class + study blocks for students (her
+        setting's class and study activities, tags "class" and "study"; a
+        kind her setting has none of is left out)."""
+        rng = random.Random(zlib.crc32((today + "student").encode("utf-8")))
+        attend, study = self._anchors["class"], self._anchors["study"]
 
         # Weekends
         if weekday == 6:  # Sunday: off
@@ -1628,10 +1606,11 @@ class DailyPlanner:
                 off = study_start + i
                 if off not in routine_offsets and off < dinner_offset:
                     loc = "home" if rng.random() >= 0.50 else self._pick_location("library", "cafe", fallback="home")
-                    study_slots.append(PlannedSlot(
-                        hour=_h(off), activity_name="studying",
-                        reason="weekend study", location=loc,
-                    ))
+                    if study:
+                        study_slots.append(PlannedSlot(
+                            hour=_h(off), activity_name=study,
+                            reason="weekend study", location=loc,
+                        ))
             return study_slots, []
 
         # Weekdays: heavy vs light day
@@ -1675,9 +1654,10 @@ class DailyPlanner:
 
         campus_loc = self._pick_location("school", "campus", "workplace", fallback="home")
 
+        class_offsets = class_offsets if attend else []
         class_slots = [
             PlannedSlot(
-                hour=_h(off), activity_name="attending classes",
+                hour=_h(off), activity_name=attend,
                 reason="class", location=campus_loc,
             )
             for off in class_offsets
@@ -1689,10 +1669,12 @@ class DailyPlanner:
                 loc = self._pick_location("library", "cafe", fallback="home")
             else:
                 loc = campus_loc if campus_loc != "home" else "home"
-            study_slots.append(PlannedSlot(
-                hour=_h(off), activity_name="studying",
-                reason="study session", location=loc,
-            ))
+            if study:
+                study_slots.append(PlannedSlot(
+                    hour=_h(off), activity_name=study,
+                    reason="study session", location=loc,
+                ))
+        study_offsets = study_offsets if study else []
 
         all_work_offsets = sorted(class_offsets + study_offsets)
         work_slots = class_slots + study_slots
@@ -1717,8 +1699,12 @@ class DailyPlanner:
         self, today, weekday, chaos, wake, lunch_offset, dinner_offset,
         awake_span, routine_offsets, _h,
     ) -> Tuple[List[PlannedSlot], List[PlannedSlot]]:
-        """Generate shift-based schedule for service workers."""
-        rng = random.Random(hash(today + "service"))
+        """Generate shift-based schedule for service workers (her setting's
+        work activity, tag "work"; none, and no shift)."""
+        work = self._anchors["work"]
+        if not work:
+            return [], []
+        rng = random.Random(zlib.crc32((today + "service").encode("utf-8")))
 
         shift_hours = rng.randint(6, 8)
         work_loc = self._pick_location("workplace", fallback="home")
@@ -1737,7 +1723,7 @@ class DailyPlanner:
             shift_start_offset = max(2, shift_end_offset - shift_hours)
         elif is_rotating:
             # Alternate morning/afternoon by date hash
-            if hash(today) % 2 == 0:
+            if zlib.crc32(today.encode("utf-8")) % 2 == 0:
                 shift_start_offset = 2  # morning
             else:
                 shift_start_offset = lunch_offset + 1  # afternoon
@@ -1755,7 +1741,7 @@ class DailyPlanner:
                 work_offsets.append(off)
 
         work_slots = [
-            PlannedSlot(hour=_h(off), activity_name="working", reason="shift", location=work_loc)
+            PlannedSlot(hour=_h(off), activity_name=work, reason="shift", location=work_loc)
             for off in work_offsets
         ]
 
@@ -1772,8 +1758,12 @@ class DailyPlanner:
         self, today, weekday, chaos, wake, lunch_offset, dinner_offset,
         awake_span, routine_offsets, _h,
     ) -> Tuple[List[PlannedSlot], List[PlannedSlot]]:
-        """Generate flexible/short work blocks for creative occupations."""
-        rng = random.Random(hash(today + "creative"))
+        """Generate flexible/short work blocks for creative occupations (her
+        setting's work activity, tag "work"; none, and no block)."""
+        work = self._anchors["work"]
+        if not work:
+            return [], []
+        rng = random.Random(zlib.crc32((today + "creative").encode("utf-8")))
 
         work_hours = rng.randint(2, 4)
 
@@ -1816,7 +1806,7 @@ class DailyPlanner:
                     work_offsets.append(off)
 
         work_slots = [
-            PlannedSlot(hour=_h(off), activity_name="working", reason=reason, location=work_loc)
+            PlannedSlot(hour=_h(off), activity_name=work, reason=reason, location=work_loc)
             for off in work_offsets
         ]
 
@@ -1831,8 +1821,63 @@ class DailyPlanner:
 
     # --- Desire management ---
 
+    def _build_own_wants(self, definition, interests, media_preferences) -> List[Dict]:
+        """Her own wants, from her definition's seeds (the templates at the
+        top of this module), each with the activities of her setting that
+        meet it -- the day's anchors aside; a seed nothing meets is dropped,
+        and so is a title another seed already gave."""
+        def field(name, default):
+            return (getattr(definition, name, default) if definition is not None else default) or default
+
+        pool = [a for a in self._activities if a.name not in self._anchor_names]
+        wants: List[Dict] = []
+
+        def add(frame: Dict[str, str], text: str, related: List[str]) -> None:
+            text = str(text or "").strip().rstrip(".").strip()
+            if not text or not related:
+                return
+            title = frame["title"].format(text=text)
+            if any(want["title"] == title for want in wants):
+                return
+            wants.append({"title": title, "description": frame["description"],
+                          "related_activities": related, "source": DesireSource.PERSONALITY})
+
+        for text in (interests or field("interests", [])):
+            add(INTEREST_WANT, text, matching_activities(text, pool))
+        for text in field("comfort_zone_seeds", []):
+            add(COMFORT_ZONE_WANT, text, matching_activities(text, pool))
+        # A food taste is met by her meals: those that are not the day's
+        # anchors, or -- when she has none but them (a pack relying on the
+        # universal meal) -- her anchor meals.
+        meals = ([a.name for a in pool if "meal" in a.tags]
+                 or [a.name for a in self._activities if "meal" in a.tags])
+        for kind, items in field("taste_seeds", {}).items():
+            kind_text = str(kind).strip().lower()
+            for item in ([items] if isinstance(items, str) else items or []):
+                related = matching_activities(f"{kind_text} {item}", pool)
+                if kind_text in FOOD_TASTES:
+                    related = related + [name for name in meals if name not in related]
+                add(TASTE_WANTS.get(kind_text, TASTE_WANT), item, related)
+        for kind, items in (media_preferences or field("media_preferences", {})).items():
+            kind_text = str(kind).strip().lower()
+            related = matching_activities(kind_text, pool)
+            for item in ([items] if isinstance(items, str) else items or []):
+                add(MEDIA_WANTS.get(kind_text, MEDIA_WANT), item,
+                    related + [n for n in matching_activities(item, pool) if n not in related])
+        for substance, tendency in field("substance_tendencies", {}).items():
+            tag = SUBSTANCE_TAGS.get(str(substance).strip().lower())
+            pull = SUBSTANCE_FREQUENCY.get(str(tendency or "").strip().lower(), SUBSTANCE_UNKNOWN_FREQUENCY)
+            if tag in SUBSTANCE_WANTS and pull > 0:
+                frame = SUBSTANCE_WANTS[tag]
+                related = [a.name for a in pool if tag in a.tags]
+                if related and not any(want["title"] == frame["title"] for want in wants):
+                    wants.append({"title": frame["title"], "description": frame["description"],
+                                  "related_activities": related, "source": DesireSource.PERSONALITY})
+        return wants
+
     def _refresh_desires(self, goals: List[Goal]) -> None:
-        """Ensure there are enough active desires. Generate new ones if needed."""
+        """Ensure there are enough active desires. Generate new ones if needed,
+        from her own wants and her setting's, taken in turn (hers first)."""
         # Clean expired/fulfilled
         self._desires = [
             d for d in self._desires
@@ -1849,13 +1894,18 @@ class DailyPlanner:
             return
 
         # Generate 2-4 new desires
-        num_new = random.randint(2, 4) - active_count
+        num_new = self._rng.randint(2, 4) - active_count
         if num_new <= 0:
             return
 
         existing_titles = {d.title for d in self._desires}
-        available = [t for t in DESIRE_TEMPLATES if t["title"] not in existing_titles]
-        random.shuffle(available)
+        own = [t for t in self._own_wants if t["title"] not in existing_titles]
+        shared = [t for t in self._setting.wants if t["title"] not in existing_titles]
+        # Hers and her setting's in turn (hers first). With none of her own
+        # this is her setting's alone, drawn exactly as before.
+        self._rng.shuffle(own)
+        self._rng.shuffle(shared)
+        available = [t for pair in zip_longest(own, shared) for t in pair if t is not None]
 
         for template in available[:num_new]:
             desire = ShortTermDesire(
@@ -1863,8 +1913,8 @@ class DailyPlanner:
                 description=template.get("description", ""),
                 source=template.get("source", DesireSource.PERSONALITY),
                 related_activities=template.get("related_activities", []),
-                urgency=0.4 + random.random() * 0.4,
-                expires_at=now + timedelta(days=random.randint(2, 5)),
+                urgency=0.4 + self._rng.random() * 0.4,
+                expires_at=now + timedelta(days=self._rng.randint(2, 5)),
             )
 
             # Link to a goal if activities overlap
@@ -1902,6 +1952,9 @@ class DailyPlanner:
         ``habit`` is ``{activity: (raise, damp)}`` for the slot's part of her day (see ``_slot_draw``).
         """
         candidates: List[Tuple[str, float, str]] = []  # (name, score, reason)
+        # A free hour is never planned with one of the day's anchors (a meal,
+        # a shift, waking up ...): they have their own slots.
+        activity_map = {name: a for name, a in activity_map.items() if name not in self._anchor_names}
 
         # Desire-driven candidates
         for desire in desires:
@@ -1926,7 +1979,9 @@ class DailyPlanner:
         # General pool candidates
         _weather_planner = _weather_planner_enabled()
         for name, activity in activity_map.items():
-            if name in used or name in ("sleeping", "napping"):
+            # Never plan her sleep or a nap (tags "sleep"/"nap": the
+            # contemporary "sleeping"/"napping").
+            if name in used or {"sleep", "nap"} & activity.tags:
                 continue
             if any(t in activity.preferred_times for t in preferred_times):
                 score = 1.0
@@ -1936,7 +1991,7 @@ class DailyPlanner:
                     score *= 0.4  # Variety penalty
                 # Weather-based outdoor penalty/bonus: human-only (AI has no
                 # physical location so outdoor weather is irrelevant to her).
-                if _weather_planner and not is_ai and name in OUTDOOR_ACTIVITIES:
+                if _weather_planner and not is_ai and "outdoor" in activity.tags:
                     if weather in _BAD_WEATHER:
                         score = max(0.05, score + WEATHER_OUTDOOR_PENALTY)
                     elif weather in _GOOD_WEATHER:
@@ -1944,13 +1999,36 @@ class DailyPlanner:
                 candidates.append((name, score, "routine"))
 
         if not candidates:
-            return "relaxing", "free time"
+            # Her rest (tag "fallback_rest": the contemporary "relaxing"),
+            # or nothing when her setting has none.
+            return self._fallback_rest(ai=is_ai), "free time"
+
+        # Who she is weighs every candidate: what she is into and how far
+        # her traits lean her to it (Task 10; aura_life.activities.choice).
+        candidates = [
+            (name, choice_weight(score, self._preferences.plan_preference(activity_map[name])), reason)
+            for name, score, reason in candidates
+        ]
 
         # Weighted random selection from top candidates, reweighted by her habits
         top, weights = _slot_draw(candidates, habit)
 
-        selected = random.choices(top, weights=weights)[0]
+        selected = self._rng.choices(top, weights=weights)[0]
         return selected[0], selected[2]
+
+    def _first_tagged(self, tag: str) -> Optional[str]:
+        """Her first activity carrying ``tag``, in her setting's tag order
+        (:meth:`~aura_life.settings.SettingSpec.tag_pool`), or None."""
+        names = self._setting.tag_pool(tag, self._activities)
+        return names[0] if names else None
+
+    def _fallback_rest(self, ai: bool = False) -> Optional[str]:
+        """Her first activity tagged "fallback_rest" (the contemporary
+        "relaxing"), from her own catalogue -- its non-physical part for an
+        AI persona -- or None when her setting has none."""
+        pool = [a for a in self._activities if not ai or "physical" not in a.tags]
+        names = self._setting.tag_pool("fallback_rest", pool)
+        return names[0] if names else None
 
     def _has_location(self, key: str) -> bool:
         """Check if a location key is available for this persona."""
@@ -1986,11 +2064,11 @@ class DailyPlanner:
 
         # --- Meals: 20% eat out for lunch, 15% for dinner/breakfast ---
         if name == "having lunch":
-            if random.random() < 0.20:
+            if self._rng.random() < 0.20:
                 return self._pick_location("cafe", "restaurant", fallback="home")
             return "home"
         if name in ("having breakfast", "having dinner"):
-            if random.random() < 0.15:
+            if self._rng.random() < 0.15:
                 return self._pick_location("cafe", "restaurant", fallback="home")
             return "home"
 
@@ -2016,7 +2094,7 @@ class DailyPlanner:
 
         # --- Fallback heuristics (legacy rules) ---
         if name == "studying":
-            if random.random() < 0.50:
+            if self._rng.random() < 0.50:
                 return self._pick_location("library", "cafe", fallback="home")
             return "home"
 
@@ -2041,29 +2119,29 @@ class DailyPlanner:
         if name in ("exercising", "working out", "yoga"):
             return self._pick_location("gym", "park", fallback="home")
         if name in ("stretching", "meditating"):
-            if random.random() < 0.30:
+            if self._rng.random() < 0.30:
                 return self._pick_location("park", fallback="home")
             return "home"
         if name in ("reading", "learning something new", "journaling", "writing poetry",
                      "creating a playlist", "sketching ideas"):
-            if random.random() < 0.40:
+            if self._rng.random() < 0.40:
                 return self._pick_location("cafe", "library", fallback="home")
             return "home"
         if name == "listening to music":
-            if random.random() < 0.25:
+            if self._rng.random() < 0.25:
                 return self._pick_location("cafe", "park", fallback="home")
             return "home"
         if name == "tending to plants":
             return self._pick_location("park", fallback="home")
         if name == "making tea":
-            if random.random() < 0.35:
+            if self._rng.random() < 0.35:
                 return self._pick_location("cafe", fallback="home")
             return "home"
         if name == "stargazing":
             return self._pick_location("rooftop", "park", fallback="home")
 
         # --- Default: slight chance of being out ---
-        if random.random() < 0.15:
+        if self._rng.random() < 0.15:
             return self._pick_location("cafe", "park", fallback="home")
         return "home"
 
@@ -2089,7 +2167,7 @@ class DailyPlanner:
             return scored[0][0]
 
         weights = [s / total for _, s in scored]
-        chosen = random.choices([loc for loc, _ in scored], weights=weights)[0]
+        chosen = self._rng.choices([loc for loc, _ in scored], weights=weights)[0]
 
         # Track for variety
         if hasattr(self, "_plan_assigned_locations"):

@@ -40,8 +40,8 @@ class TestRoutineDetection:
 class TestCreativeOutput:
     def test_creative_activity_may_produce_artifact(self):
         import random
-        random.seed(42)
-        bs = BehaviorSystem()
+        # A seeded engine stream: the engine no longer reads module random.
+        bs = BehaviorSystem(rng=random.Random(42))
         # Run many times to ensure at least one artifact (30% chance)
         for _ in range(20):
             bs.on_creative_activity("writing poetry", mood="inspired", focus=0.8)

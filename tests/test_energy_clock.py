@@ -26,6 +26,7 @@ The two properties asserted here are the ones the fix has to be worth:
   2. the default still reads the wall clock.
 """
 
+import random
 from datetime import datetime, timedelta
 
 import pytest
@@ -137,13 +138,20 @@ def test_every_clock_read_in_the_system_follows_the_injected_one():
 
     A seam that covers one of eight call sites still leaves the engine reading
     the host clock, so each one is pinned. ``sleep()`` stamps the clock,
-    ``should_sleep``/``is_asleep`` read its *hour* when no override is given,
+    ``update_sleep``/``should_sleep`` read its time when given no local time,
     ``adjust_for_time`` reads both, and ``hours_since_wake`` measures against it.
     """
     # 02:00 -- inside the default sleep window (bed 23:00, wake 07:00).
     clock = ScriptedClock(datetime(2026, 3, 14, 2, 0, 0))
     energy = EnergySystem(now=clock)
 
+    # Sleep is a state, not the hour: a fresh system is awake until
+    # update_sleep, reading the injected clock, finds her inside tonight's
+    # window with the pressure to sleep. (It used to answer True here from the
+    # hour alone.)
+    assert energy.is_asleep() is False
+    energy.state.fatigue = 1.0
+    assert energy.update_sleep(rng=random.Random(0)) == "fell_asleep"
     assert energy.is_asleep() is True
     energy.sleep(hours=8.0)
     assert energy.state.last_sleep_time == clock.instant
@@ -241,6 +249,16 @@ def test_the_default_world_still_tracks_real_time():
 # 3. The clock is reachable from the world, which is the point
 # ----------------------------------------------------------------------
 
+#: Up at 04:00, in bed at 20:00, no weekend shift: at EPOCH (a Saturday, 06:00)
+#: a new persona on it has been awake two hours by the world clock. A new
+#: ``LifeService`` starts her on her own schedule at the world's time
+#: (``EnergySystem.start_on_schedule``), not on a fixed eight hours awake.
+EARLY_RISER = {
+    "bedtime_hour": 20, "bedtime_minute": 0, "wake_hour": 4, "wake_minute": 0,
+    "weekend_bedtime_shift": 0, "weekend_wake_shift": 0,
+}
+
+
 def test_the_world_carries_the_clock_and_energy_follows_it(tmp_path):
     """A shared world on a simulated clock hands that clock to every agent.
 
@@ -255,17 +273,19 @@ def test_the_world_carries_the_clock_and_energy_follows_it(tmp_path):
         persona_id="agent0",
         world_environment=world,
         occupation="baker",
+        sleep_schedule=EARLY_RISER,
     )
 
     assert svc.energy.clock == world.now
     assert svc.energy.state.last_update == EPOCH
+    assert svc.energy.hours_awake == pytest.approx(2.0)  # up since 04:00, by the world clock
 
     clock.advance(6)
     world.tick()
     svc.energy.tick(world.time_of_day)
 
     assert world.state.virtual_time == EPOCH + timedelta(hours=6)
-    assert svc.energy.hours_awake == pytest.approx(14.0)
+    assert svc.energy.hours_awake == pytest.approx(8.0)
 
 
 def test_a_subclass_may_override_now_instead_of_passing_a_callable(tmp_path):
@@ -293,11 +313,12 @@ def test_a_subclass_may_override_now_instead_of_passing_a_callable(tmp_path):
         persona_id="agent0",
         world_environment=world,
         occupation="baker",
+        sleep_schedule=EARLY_RISER,
     )
     world.hours = 9
     svc.energy.tick(TimeOfDay.AFTERNOON)
 
-    assert svc.energy.hours_awake == pytest.approx(17.0)
+    assert svc.energy.hours_awake == pytest.approx(11.0)  # 2 at EPOCH, 9 more on the override
 
 
 def test_a_duck_typed_world_without_a_clock_does_not_lose_the_engine(tmp_path):
@@ -323,3 +344,20 @@ def test_a_duck_typed_world_without_a_clock_does_not_lose_the_engine(tmp_path):
         occupation="baker",
     )
     assert svc.energy.clock == datetime.now
+
+
+def test_her_last_wake_is_found_for_a_night_shift_whose_weekend_wake_crosses_midnight():
+    """A night-shift schedule (asleep 15:00-23:00) with the default 90-minute
+    weekend wake shift: after a weekend night her wake lands at 00:30, so just
+    past midnight the two nights before have not woken her yet -- her last
+    wake is the third night back's. Every quarter hour of a week has one."""
+    energy = EnergySystem(sleep_schedule={"bedtime_hour": 15, "wake_hour": 23,
+                                          "bedtime_variance": 0, "wake_variance": 0})
+    t = datetime(2026, 10, 5, 0, 0)
+    for _ in range(7 * 24 * 4):
+        wake = energy.last_wake(t)
+        assert wake <= t and t - wake < timedelta(hours=26), t
+        t += timedelta(minutes=15)
+    # Monday 00:00 is inside the weekend-shifted sleep that ends at 00:30, so
+    # her last wake was the one before it, Sunday 00:30.
+    assert energy.last_wake(datetime(2026, 10, 5, 0, 0)) == datetime(2026, 10, 4, 0, 30)

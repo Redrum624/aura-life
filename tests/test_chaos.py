@@ -7,8 +7,7 @@ from aura_life.chaos.chaos_engine import ChaosEngine
 
 class TestChaosRoll:
     def test_roll_can_produce_event(self):
-        random.seed(42)
-        ce = ChaosEngine()
+        ce = ChaosEngine(rng=random.Random(42))  # the engine no longer reads module random
         events = []
         for _ in range(50):
             e = ce.roll("reading", energy=0.5, regulation=0.5)
@@ -17,8 +16,7 @@ class TestChaosRoll:
         assert len(events) > 0
 
     def test_event_has_required_fields(self):
-        random.seed(1)
-        ce = ChaosEngine()
+        ce = ChaosEngine(rng=random.Random(1))  # the engine no longer reads module random
         for _ in range(50):
             e = ce.roll("reading", energy=0.5, regulation=0.5)
             if e:
@@ -40,15 +38,16 @@ class TestChaosRoll:
         assert len(events) <= 5
 
     def test_low_regulation_increases_chaos(self):
+        # ChaosEngine() now defaults to a fresh, unseeded random.Random() of
+        # its own (ruling T26-R2), not the module -- random.seed() no longer
+        # reaches it, so each comparison gets its own explicit, matching rng.
         events_low_reg = 0
         events_high_reg = 0
         for seed in range(100):
-            random.seed(seed)
-            ce = ChaosEngine()
+            ce = ChaosEngine(rng=random.Random(seed))
             if ce.roll("reading", energy=0.5, regulation=0.0):
                 events_low_reg += 1
-            random.seed(seed)
-            ce = ChaosEngine()
+            ce = ChaosEngine(rng=random.Random(seed))
             if ce.roll("reading", energy=0.5, regulation=1.0):
                 events_high_reg += 1
         assert events_low_reg >= events_high_reg
@@ -80,8 +79,7 @@ class TestActivityChaos:
 
 class TestSerendipity:
     def test_serendipity_always_share_worthy(self):
-        random.seed(42)
-        ce = ChaosEngine()
+        ce = ChaosEngine(rng=random.Random(42))  # the engine no longer reads module random
         e = ce._serendipity()
         assert e["share_worthy"] is True
         assert e["type"] == "serendipity"
@@ -89,8 +87,7 @@ class TestSerendipity:
 
 class TestMessageDelay:
     def test_delay_can_occur(self):
-        random.seed(42)
-        ce = ChaosEngine()
+        ce = ChaosEngine(rng=random.Random(42))  # the engine no longer reads module random
         delays = []
         for _ in range(50):
             d = ce.roll_message_delay("reading", energy=0.2, regulation=0.3)
@@ -99,8 +96,7 @@ class TestMessageDelay:
         assert len(delays) > 0
 
     def test_delay_has_required_fields(self):
-        random.seed(1)
-        ce = ChaosEngine()
+        ce = ChaosEngine(rng=random.Random(1))  # the engine no longer reads module random
         for _ in range(50):
             d = ce.roll_message_delay("reading", energy=0.1, regulation=0.1)
             if d:
@@ -112,8 +108,7 @@ class TestMessageDelay:
 
 class TestSerialization:
     def test_roundtrip(self):
-        random.seed(42)
-        ce = ChaosEngine()
+        ce = ChaosEngine(rng=random.Random(42))  # the engine no longer reads module random
         ce.roll("reading", energy=0.5, regulation=0.5)
         ce.roll("reading", energy=0.5, regulation=0.5)
 

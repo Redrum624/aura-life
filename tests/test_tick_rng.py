@@ -168,12 +168,24 @@ def test_the_tick_takes_no_draw_from_module_random_while_an_rng_is_injected(tmp_
 
 def test_the_injected_rng_survives_reset_state(tmp_path):
     """`reset_state()` rebuilds every engine; the rebuilt ones must draw from
-    the same injected rng, not fall back to the module."""
+    the same injected-rng-derived streams, not fall back to the module.
+
+    Ruling T26-R2 (Task 26 fix round 1): every engine now draws from a
+    stream of its own, derived once from the injected rng's *state* -- a
+    read, never a draw -- so the raw injected rng itself is never drawn from
+    again after construction and its state does not move on its own. What
+    must still move, and would not if `reset_state()` silently fell back to
+    the module, is `self._service_rng` -- the derived stream backing the
+    service's own direct draws (struggle-to-rumination, the life-trigger
+    picks, the shareable priority) -- which `reset_state()` does not
+    recompute (it is set once, in `__init__`, and every engine `reset_state()`
+    rebuilds is handed the same already-derived stream back).
+    """
     clock = ScriptedClock(EPOCH)
     rng = random.Random(7)
     svc, world = _svc(tmp_path, "reset", clock, rng)
     svc.reset_state()
-    state_before = rng.getstate()
+    state_before = svc._service_rng.getstate()
 
     def sealed_tick(s):
         b = random.getstate()
@@ -181,7 +193,7 @@ def test_the_injected_rng_survives_reset_state(tmp_path):
         assert random.getstate() == b
 
     _drive([svc], world, clock, hours=48, on_tick=sealed_tick)
-    assert rng.getstate() != state_before
+    assert svc._service_rng.getstate() != state_before
 
 
 # ----------------------------------------------------------------------
@@ -191,10 +203,16 @@ def test_the_injected_rng_survives_reset_state(tmp_path):
 def _run_on_module_random(tmp_path, pid, seed):
     """No rng injected; the module stream reseeded identically before every
     tick so two runs consume the same draws -- the only way a consumer could
-    replay before `rng=` existed, and the way the sanity tests still do."""
+    replay before `rng=` existed, and the way the sanity tests still do.
+    The world is given its own explicit, matching seed (ruling T26-R2:
+    WorldEnvironment owns its own rng, shared across personas, never derived
+    from module random), so the two worlds this test compares still agree on
+    weather -- without it, two separately-constructed worlds would each fall
+    back to their own fresh, unseeded Random() and diverge."""
     clock = ScriptedClock(EPOCH)
     random.seed(seed)
-    svc, world = _svc(tmp_path, pid, clock, None)
+    world = WorldEnvironment(now=clock, seed=seed)
+    svc, world = _svc(tmp_path, pid, clock, None, world)
     for hour in range(1, 49):
         clock.advance(1)
         world.tick()

@@ -98,6 +98,23 @@ class TestAnticipation:
             mt.add_anticipation(f"event_{i}")
         assert len(mt._anticipations) <= 5
 
+    def test_the_same_event_is_looked_forward_to_once(self):
+        """Task 40: the goal tick adds a goal with a deadline within two
+        days at every tick, an hour apart, and each was appended: the same
+        goal twice or more in every capture of every persona (Task 19b's
+        review), and five of them pushed the user's own event out of the
+        five places. The same event is one anticipation, kept current."""
+        from datetime import datetime, timedelta
+        mt = MemoryTimeSystem()
+        due = datetime(2026, 10, 7, 18, 0)
+        mt.add_anticipation("the recital", "curious", 0.9, date=due + timedelta(days=3))
+        for hour in range(8):
+            mt.add_anticipation("Learn one new thing", "anxious", 0.3 + hour / 100, date=due)
+        events = [a.event for a in mt._anticipations]
+        assert events == ["the recital", "Learn one new thing"], events
+        kept = mt._anticipations[-1]
+        assert (kept.feeling, kept.intensity, kept.date) == ("anxious", 0.37, due)  # the newest reading of it
+
 
 class TestTick:
     def test_tick_increments_counter(self):

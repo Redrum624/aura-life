@@ -59,11 +59,18 @@ class HabitationSystem:
 
         self._recompute_comfort()
 
-    def on_activity(self, activity_name: str) -> None:
+    @staticmethod
+    def tidies(activity_name: str) -> bool:
+        """Whether doing ``activity_name`` tidies her home (CLEAN_ACTIVITIES):
+        what on_activity acts on, and what her coping reaches for when the mess
+        weighs on her (Task 15)."""
         if not activity_name:
-            return
+            return False
         key = activity_name.lower().replace(" ", "_")
-        if any(k in key for k in CLEAN_ACTIVITIES):
+        return any(k in key for k in CLEAN_ACTIVITIES)
+
+    def on_activity(self, activity_name: str) -> None:
+        if self.tidies(activity_name):
             self._state.tidiness = min(1.0, self._state.tidiness + TIDY_RESTORE)
             self._recompute_comfort()
 

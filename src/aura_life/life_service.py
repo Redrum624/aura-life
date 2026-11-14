@@ -8,12 +8,14 @@ Coordinates world, energy, activities, goals, and scheduling.
 import contextlib
 import json
 import logging
+import math
 import random
 import re
 import sqlite3
 import threading
+from dataclasses import replace
 from datetime import datetime, timedelta
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from .models import (
     ActivityLog,
@@ -31,28 +33,72 @@ from .models import (
     NPC,
     PlaceLocationState,
     RoomState,
+    Season,
     ShareableExperience,
     ShortTermDesire,
     SkillProgress,
+    SocialEvent,
     TimeOfDay,
     TransitPhase,
     TransitState,
 )
 from .world import WorldEnvironment
+from .world.environment import PersonaWorldView
 from .energy import EnergySystem
 from .activities import ActivityEngine
+from .activities.activity_engine import outcome_chances
+from .activities.choice import ActivityPreferences, ChoiceState, pressing_needs
+from .emotion.appraisal import (
+    FAIL,
+    OUTCOMES,
+    SUCCESS,
+    AppraisalEvent,
+    appraise,
+    appraised_valence,
+    emotions_of,
+    llm_appraisal_prompt,
+    parse_llm_appraisal,
+    spikes_from_llm,
+)
+from .emotion.text_emotion_analyzer import (
+    EmotionSpike,
+    TextEmotionAnalyzer,
+    addresses_listener,
+    matched_cues,
+)
+from .emotion.user_appraisal import (
+    AMUSEMENT_EMOTION, CONCERN_EMOTION, GLAD_EMOTION, appraisal_valence, appraise_user_turn,
+)
 from .goals import GoalEngine
 from .planner import DailyPlanner
-from .planner.daily_planner import NOT_HABIT_FORMING, PHYSICAL_ACTIVITIES, SOCIAL_PLAN_REASON_PREFIX
+from .planner.daily_planner import NOT_HABIT_FORMING, SOCIAL_PLAN_REASON_PREFIX
 from .behavior.behavior_system import habit_band
 from aura_life.conversation_session import ConversationSession
-from aura_life.planner.daily_planner import is_important_activity
+from aura_life.planner.daily_planner import USER_AGREED_REASON, is_important_activity
 from .scheduler import LifeScheduler
 from .context import LifeContextBuilder
+from .context.moment import Moment, build_moment
 from .intimacy import DesireSystem
 from .social import SocialSystem
+from .social.household import JOINT_LINES, Household, HousemateState, JointSide, name_list
+from .social.social_system import (
+    MEANINGFUL_CONTACT_TYPES,
+    NPC_EVENT_CHANCE,
+    UNWELCOME_KIND_EMOTIONS,
+    UNWELCOME_STRESSOR,  # noqa: F401 -- legacy name; the "unwelcome" stressor's words
+)
 from .identity import IdentitySystem
 from .affect import AffectSystem
+# Mood-model constants live in affect_system's "Mood model" block, the
+# stressors in its "Stress" block.
+from .affect.affect_system import (
+    ANTICIPATION_MOOD_PER_HOUR,
+    GOAL_COMPLETION_EMOTIONS,
+    MOOD_VALENCE_BAND,
+    STRESSOR_KINDS,
+    WORK_EVENT_EMOTIONS,
+    mood_label,
+)
 from .body import BodySystem
 from .cognitive import CognitiveSystem
 from .shadow import ShadowSystem
@@ -65,14 +111,68 @@ from .continuity import ContinuitySystem
 from .persona_evolution import CharacterEvolution
 from .chaos import ChaosEngine
 from .life_events import LifeEventSystem
+from .memory import Episode, MemoryStream, contact_phrase, mean_valence
+from .memory.episodes import conversation_phrase, place_phrase
+# A gist's own cleaning (first sentence, numbers in words, no snake_case) and
+# its number words, for the words of a proactive hint (Task 17, ruling T17-R4).
+from .memory.episodes import _number_words, _plain
+from .expression.relationship import (
+    ABSENCE_AFTER_HOURS,
+    IN_CONVERSATION_MINUTES,
+    AfterAbsence,
+    after_absence as absence_state,
+    silent_days,
+)
+from .memory.reflection import (
+    BELIEF_INTENSITY,
+    BELIEF_REPEAT_COOLDOWN_DAYS,
+    REFLECTION_THRESHOLD,
+    belief_key_from_tag,
+    belief_key_tag,
+    generate_beliefs,
+    validate_llm_belief,
+)
 from .money import FinanceSystem
+from .money.finance_system import MAX_FINANCIAL_STRESS, STARTING_RUNWAY
 from .job import CareerSystem
 from .habitation import HabitationSystem
+from .habitation.habitation_system import COMFORT_BLEAK
 from .sustenance import SustenanceSystem
+from .sustenance.sustenance_system import TICK_HOURS as SUSTENANCE_TICK_HOURS
 from .skills import SkillsSystem
 from .errands import ErrandsSystem
+from .errands.errands_system import MAX_TOTAL as ERRANDS_MAX_TOTAL
 from .location import LocationSystem
 from .transportation import TransportSystem
+from .personas.parameters import PersonaParameters
+from .personas.pronoun_render import (
+    render_line as _render_pronoun_line,
+    render_second_person as _render_second_person,
+    user_tokens as _user_ref_tokens,
+)
+from .settings import DEFAULT_SETTING, get_setting
+from .settings.spec import COMMITMENT_TAGS, DEFAULT_NPC_KIND
+from .settings.contemporary import PLACES as _CONTEMPORARY_PLACES
+# Legacy names: the micro-events, the skill tables, the dream templates and the
+# catch-up and gap narratives moved, unchanged, into the contemporary setting
+# pack (aura_life.settings.contemporary) in Task 9 -- the service reads its
+# persona's setting now; re-exported so an import from here keeps working.
+from .settings.contemporary import (  # noqa: F401
+    CATCHUP_AFTERNOON_NARRATIVES,
+    CATCHUP_EVENING_NARRATIVES,
+    CATCHUP_LATE_NARRATIVE,
+    CATCHUP_MIDDAY_NARRATIVES,
+    CATCHUP_MORNING_ACTIVITY_NARRATIVES,
+    CATCHUP_MORNING_ROUTINE_NARRATIVES,
+    CATCHUP_SLEEP_NARRATIVE,
+    DREAM_TEMPLATES,
+    GAP_NARRATIVE_DAYS,
+    GAP_NARRATIVE_SHORT,
+    GAP_NARRATIVE_WEEK,
+    MICRO_EVENTS,
+    SKILL_MAPPINGS,
+    SKILL_MILESTONES,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -137,21 +237,27 @@ CALENDAR_RETENTION_DAYS = 30
 # the engine), so a host that couples to ``SanitySystem.state`` and a host that
 # reads affect or shadow directly see one story. The words are the contract;
 # the amounts live here.
-SANITY_STRESS_SOURCE = "sanity"             # affect stressor while strained or worse
+#: The affect stressor while strained or worse: what she is stressed about, in
+#: words (Task 15: "keeping it together", the "sanity" kind of affect's
+#: STRESSOR_KINDS; it was the engine's name, "sanity", until then).
+SANITY_STRESS_SOURCE = STRESSOR_KINDS["sanity"].words
 SANITY_FRAYING_RESTRAINT_PRESSURE = 0.2     # shadow restraint pull while fraying or worse
 SANITY_BREAKING_REGULATION_COLLAPSE = 1.0   # regulation capacity drained on entering breaking
 # Affect stress *level* at or above which the sanity tick reads the persona as
-# stressed. The level is what affect keeps live (it decays every tick); the
-# ``stress.sources`` labels are a capped summary that the service never
-# resolves (``struggle:*``, ``money worries`` ...), so reading *them* would make
-# every persona with a struggle erode to ``broken`` in days without a single
-# blow. 0.2 is the floor of affect's own ``get_stress_description()`` -- below
-# it, affect has nothing to say about stress.
+# stressed -- the level, not whether any stressor is listed: every persona has
+# something small on her mind most of the time (money a little tight, errands
+# piling up, things put off -- about 0.1 together, each at most affect's
+# STRESSOR_SEVERITY), so a listed stressor alone would erode every persona to
+# ``broken`` in days without a single blow. 0.2 is the floor of affect's own
+# ``get_stress_description()`` -- below it, affect has nothing to say about
+# stress -- and it takes four hassles at their fullest to reach it.
 SANITY_STRESSED_LEVEL = 0.2
 
 # Small one-shot nudge applied via AffectSystem.on_weather_nudge() on WEATHER CHANGE
-# (not every tick), so the push is bounded. Scale factors are unitless weights on
-# _shift_mood_positive / _shift_mood_negative internally.
+# (not every tick), so the push is bounded. Scale factors are unitless: the nudge
+# moves mood's valence that share of the way toward +1 or -1
+# (AffectSystem._nudge_valence). The affect engine scales it again by her weather
+# sensitivity (PersonaParameters.weather_mood_scale).
 WEATHER_MOOD_WEIGHT = 0.03  # overall scale — keep tiny so weather is atmospheric, not dominant
 
 # Trip length: a real "travelling abroad" span (about one to just-over-two weeks),
@@ -175,86 +281,16 @@ _WEATHER_MOOD_DELTA: dict = {
 
 # ============= Micro-Events Pool =============
 
-MICRO_EVENTS = [
-    {"text": "She spilled coffee on her shirt", "emotion": {"amused": 0.1}, "share_worthy": True},
-    {"text": "A cute cat appeared on the windowsill", "emotion": {"joyful": 0.15}, "share_worthy": True},
-    {"text": "The power flickered for a moment", "emotion": {"startled": 0.1}, "share_worthy": False},
-    {"text": "A package arrived that she forgot she ordered", "emotion": {"excited": 0.1, "surprised": 0.1}, "share_worthy": True},
-    {"text": "She found a really good song by accident", "emotion": {"joyful": 0.15}, "share_worthy": True},
-    {"text": "Her pen ran out of ink mid-sentence", "emotion": {"amused": 0.05}, "share_worthy": False},
-    {"text": "She noticed the sunset was particularly beautiful", "emotion": {"awed": 0.15}, "share_worthy": True},
-    {"text": "A neighbor's dog barked hello at her", "emotion": {"amused": 0.1}, "share_worthy": True},
-    {"text": "She tripped on absolutely nothing", "emotion": {"amused": 0.1}, "share_worthy": True},
-    {"text": "The wind blew her hair into her face", "emotion": {"amused": 0.05}, "share_worthy": False},
-    {"text": "She overheard a stranger say something hilarious", "emotion": {"amused": 0.15}, "share_worthy": True},
-    {"text": "Her phone buzzed with a notification she didn't care about", "emotion": {}, "share_worthy": False},
-    {"text": "She caught a whiff of something delicious from somewhere", "emotion": {"curious": 0.1}, "share_worthy": False},
-    {"text": "A bird landed right next to her", "emotion": {"wonder": 0.1}, "share_worthy": True},
-    {"text": "She realized she'd been humming a song without noticing", "emotion": {"content": 0.1}, "share_worthy": False},
-    {"text": "She found some money in her jacket pocket", "emotion": {"surprised": 0.1, "joyful": 0.1}, "share_worthy": True},
-    {"text": "The first drops of rain hit the window", "emotion": {"peaceful": 0.1}, "share_worthy": False},
-    {"text": "She got a compliment from a stranger", "emotion": {"warm": 0.15}, "share_worthy": True},
-    {"text": "Her favorite mug was clean when she needed it", "emotion": {"content": 0.05}, "share_worthy": False},
-    {"text": "She caught her reflection and liked what she saw", "emotion": {"content": 0.1}, "share_worthy": False},
-]
+#: The chance, per activity tick, of one small moment from her setting's
+#: micro_events (SettingSpec). Per persona, times
+#: PersonaParameters.micro_event_scale (openness).
+MICRO_EVENT_CHANCE = 0.20
 
-
-# ============= Skill Mappings =============
-
-SKILL_MAPPINGS: Dict[str, tuple] = {
-    "reading": ("knowledge", 0.005),
-    "writing poetry": ("writing", 0.008),
-    "sketching ideas": ("art", 0.008),
-    "cooking a meal": ("cooking", 0.005),
-    "baking something": ("cooking", 0.006),
-    "trying a new recipe": ("cooking", 0.008),
-    "yoga": ("flexibility", 0.005),
-    "going for a run": ("fitness", 0.008),
-    "gym workout": ("fitness", 0.01),
-    "meditating": ("mindfulness", 0.005),
-    "journaling": ("writing", 0.004),
-    "learning something new": ("knowledge", 0.008),
-    "creating a playlist": ("music_curation", 0.004),
-}
-
-SKILL_MILESTONES: Dict[str, List[tuple]] = {
-    "knowledge": [
-        (0.1, "Started getting into a groove with reading"),
-        (0.3, "Feels more well-read lately"),
-        (0.6, "Has opinions about literary styles now"),
-    ],
-    "cooking": [
-        (0.1, "Made something that actually tasted good"),
-        (0.3, "Getting confident in the kitchen"),
-        (0.6, "Experimenting with her own recipes"),
-    ],
-    "fitness": [
-        (0.1, "Starting to feel stronger"),
-        (0.3, "Exercise is becoming a habit"),
-        (0.6, "Noticeably fitter and more energetic"),
-    ],
-    "writing": [
-        (0.1, "Found her voice on paper"),
-        (0.3, "Writing comes more naturally now"),
-        (0.6, "Proud of what she's been creating"),
-    ],
-    "mindfulness": [
-        (0.1, "Meditation is getting easier"),
-        (0.3, "Feels more present in daily life"),
-        (0.6, "Inner calm is becoming her default"),
-    ],
-}
-
-
-# ============= Dream Templates =============
-
-DREAM_TEMPLATES = [
-    "Dreamed she was {0} in some place made of {1}",
-    "Had a weird dream where {0} and {1} got mixed together",
-    "Had a dream where {0} kept turning into {1}",
-    "Dreamed about {0} and woke up feeling {1}",
-    "Her dream had {0} and {1} mixed up in some weird way",
-]
+#: A gap between two sustenance ticks longer than this is a paused host,
+#: walked an energy interval at a time (LifeService._tick_sustenance): the
+#: scheduler ticks every 5 minutes, the legacy simulations every 15 or 30,
+#: so an hour is well past any tick's own spacing. Chosen (Task 10 fix round).
+SUSTENANCE_GAP_HOURS = 1.0
 
 
 # ============= Multi-Engine Conversation Keyword Map =============
@@ -289,13 +325,16 @@ CONVERSATION_KEYWORD_MAP = {
     "interesting": [("cognitive", "intellectual_topic"), ("drive", "interesting_topic")],
     "why do you": [("cognitive", "philosophical_question")],
     "what if": [("cognitive", "philosophical_question"), ("drive", "new_idea")],
-    "i disagree": [("cognitive", "disagreement"), ("affect", "healthy_debate")],
-    "you're wrong": [("affect", "healthy_debate"), ("cognitive", "defending_opinion")],
-    "no way": [("affect", "healthy_debate"), ("cognitive", "defending_opinion")],
-    "don't you think": [("cognitive", "philosophical_question"), ("affect", "healthy_debate")],
-    "but what about": [("cognitive", "intellectual_topic"), ("affect", "healthy_debate")],
-    "agree to disagree": [("affect", "healthy_debate"), ("identity", "standing_ground")],
-    "that's not": [("cognitive", "defending_opinion"), ("affect", "healthy_debate")],
+    # Disagreement cues no longer get healthy_debate's mood boost -- disagreeing
+    # with the user is not, on its own, a positive event. "you're wrong" reads
+    # as criticism instead; the rest keep only their non-affect effect.
+    "i disagree": [("cognitive", "disagreement")],
+    "you're wrong": [("affect", "criticism"), ("cognitive", "defending_opinion")],
+    "no way": [("cognitive", "defending_opinion")],
+    "don't you think": [("cognitive", "philosophical_question")],
+    "but what about": [("cognitive", "intellectual_topic")],
+    "agree to disagree": [("identity", "standing_ground")],
+    "that's not": [("cognitive", "defending_opinion")],
     "smart": [("cognitive", "compliment_intelligence"), ("identity", "validation")],
     "clever": [("cognitive", "compliment_intelligence"), ("identity", "validation")],
     "imagine": [("cognitive", "creative_prompt"), ("drive", "new_idea")],
@@ -357,11 +396,187 @@ BASE_LIFE_TRIGGER_COOLDOWNS = {
 # Activities too routine to generate a moment-share trigger
 MOMENT_SHARE_ROUTINE_SKIP = {"sleep", "commut", "work"}
 
+# ============= Reflection & Nostalgia from real history (Task 13) =============
+
+#: Nostalgia draws from an episode this many simulated days old or more
+#: (the Task 13 brief, verbatim); younger than that, only the setting's ten
+#: templates (aura_life.settings.contemporary.NOSTALGIA_MEMORIES) are drawn.
+NOSTALGIA_MIN_EPISODE_AGE_DAYS = 7.0
+
 # Relationship stages (ExpressionSystem) considered "close". An AI persona only
 # unlocks human-like spontaneous/emotional proactive behavior once the bond is
 # this deep; before then she stays in practical/reminder territory. Humans are
 # never gated by this.
 CLOSE_RELATIONSHIP_STAGES = {"comfortable", "deep"}
+
+
+def _conversation_kind(appraisal, disclosure: float, felt_most, topics) -> Optional[str]:
+    """Which :data:`aura_life.memory.episodes.CONVERSATION_PHRASES` line a
+    user's turn is to her (humanness Task 16b step 0, ruling T16a-R2):
+    hostility aimed at her, then a disclosure, then warmth aimed at her, then
+    the feeling she has most (concern, amusement, gladness for them), then
+    plain talk when the host gave topics or she felt something else; ``None``
+    for a turn that left no trace -- no topics, no disclosure, nothing felt."""
+    if appraisal.hostility > 0.0:
+        return "hostile"
+    if disclosure > 0.0:
+        return "disclosure"
+    if appraisal.warmth > 0.0:
+        return "sweet"
+    if felt_most is not None:
+        name = {CONCERN_EMOTION: "concerned", AMUSEMENT_EMOTION: "amused", GLAD_EMOTION: "warm"}.get(felt_most[0])
+        return name or "talk"
+    return "talk" if topics else None
+
+
+def _move_persona_to(service, location: str) -> None:
+    """Move *service*'s persona to *location* (Task 27 / ruling T8-R1).
+
+    Before this existed, every call site below called
+    ``service._world.move_to(location)`` directly, which relocates a world
+    :class:`LifeService` shares with other personas for every one of them --
+    the shared world held one ``current_location``, and one persona's move
+    changed it for everyone reading it (measured: another persona moved the
+    shared world after a persona's own tick in 82 of 288 steps). Every one of
+    those call sites now goes through this instead.
+
+    Always sets *service*'s own ``_current_location`` (a plain attribute
+    assignment; harmless if *service* is a duck-typed stand-in that never
+    reads it back). The world itself is only told to move when *service* is
+    not sharing it (``getattr(service, "_shared_world", False)`` -- falsy for
+    both a private world and a stand-in with no such attribute at all), so a
+    private world keeps today's behaviour exactly, and a shared one is never
+    written by one persona's move.
+
+    A free function taking *service* explicitly, rather than a method looked
+    up on ``self`` (e.g. ``self._move_to(location)``), on purpose: three of
+    the call sites below (``apply_schedule_override``,
+    ``schedule_meeting_arrival``, ``advance_transit_phase``) can run bound to
+    a duck-typed stand-in that is not a ``LifeService`` at all and defines no
+    such method (see ``tests/test_planner_clock.py``'s ``_ScheduleStandIn``);
+    looking up ``self._move_to`` there would raise ``AttributeError`` before
+    this function's own tolerance ever ran. Passing *service* as an argument
+    never does.
+    """
+    service._current_location = location
+    if not getattr(service, "_shared_world", False):
+        service._world.move_to(location)
+
+
+def _plan_instant(service) -> Optional[datetime]:
+    """The instant *service*'s day plan is read and rewritten at: her local
+    world time (:meth:`LifeService._local_world_now`) -- her plan's hours
+    are her local hours (humanness program Task 28, ruling T13-R1).
+
+    A free function taking *service*, like :func:`_move_persona_to` and for
+    its reason: ``apply_schedule_override``, ``schedule_meeting_arrival``,
+    ``add_conversation_plan`` and ``advance_transit_phase`` can run bound to
+    a duck-typed stand-in (aura tests ``add_conversation_plan`` on one; see
+    ``tests/test_planner_clock.py``). A stand-in without
+    ``_local_world_now`` gets ``None``, which the planner reads as the
+    host's wall clock, as before.
+    """
+    local_now = getattr(service, "_local_world_now", None)
+    return local_now() if callable(local_now) else None
+
+
+def _add_sentence(text: str, sentence: str) -> str:
+    """``text`` with ``sentence`` after it, each ending a sentence: an
+    activity's narrative is written without a closing stop (the lines
+    appended after it bring their own)."""
+    text = text.rstrip()
+    if text and text[-1] not in ".!?":
+        text += "."
+    return f"{text} {sentence}." if text else f"{sentence}."
+
+
+def _share_ids(*items) -> tuple:
+    """The stable share ids (spec section 4.9: "share:<n>", "event:<n>") of
+    whichever of ``items`` -- shareable experiences, life events, ``None``
+    for one not made -- there are: how an episode of her memory stream is
+    tied to what she may share of it (Task 12)."""
+    return tuple(item.share_id for item in items if item is not None and getattr(item, "share_id", ""))
+
+
+#: The prefixes of the stable share ids (spec section 4.9) an episode's tags
+#: carry, put there by :func:`_share_ids`.
+SHARE_ID_PREFIXES = ("share:", "event:")
+
+
+def _share_ids_of(episode) -> tuple:
+    """The share ids an episode's tags carry, in the order :func:`_share_ids`
+    put them there (a shareable before its life event)."""
+    return tuple(tag for tag in getattr(episode, "tags", ()) if str(tag).startswith(SHARE_ID_PREFIXES))
+
+
+def _told(episode) -> str:
+    """An episode's gist as a proactive hint goes on with it after a colon:
+    its first letter lowered, unless what happened begins with a capital (a
+    name, "You")."""
+    gist = episode.gist()
+    return gist if _plain(episode.what)[:1].isupper() else gist[:1].lower() + gist[1:]
+
+
+#: The words in -ing that name a time, not a verb: a time of day or a season
+#: (:class:`~aura_life.models.TimeOfDay`, :class:`~aura_life.models.Season`)
+#: -- "morning shower" is a thing she has, not something she is "morning".
+_TIME_WORDS = frozenset(t.value for t in TimeOfDay) | frozenset(s.value for s in Season)
+#: The articles a setting's activity name can start with ("a concert").
+_ARTICLES = ("a", "an", "the")
+
+
+def _doing(activity: str, place: str = "") -> str:
+    """What she is doing, as a proactive hint says it (ruling T17-R4: a plan
+    slot's name is phrased, never pasted after "You're"): an activity named
+    by its verb ("reading", "going for a run") is "You're reading", one named
+    by a thing ("yoga", "picnic in the park", "morning shower": a first word
+    in -ing that is a time, :data:`_TIME_WORDS`, is no verb) "You're in the
+    middle of your yoga" -- of "a concert", with its own article, "You're in
+    the middle of a concert"; then where, as a gist says it ("at the
+    gym")."""
+    words = " ".join(str(activity or "").split())
+    doing = "You're " + _doing_lead(words).replace("{poss}", "your") + words
+    where = place_phrase(place)
+    return f"{doing} {where}" if where else doing
+
+
+def _doing_lead(activity: str) -> str:
+    """The words :func:`_doing`'s rule puts before an activity's name: ""
+    for one named by its verb ("reading"), "in the middle of " for one with
+    its own article ("a concert"), else "in the middle of {poss} " ("yoga",
+    "morning shower") -- ``{poss}`` her possessive token, left for the
+    renderer the text goes through (a dream's text is told both in the third
+    person and to her, ruling T18-R8)."""
+    words = " ".join(str(activity or "").split())
+    first = words.split(" ", 1)[0].lower() if words else ""
+    if first.endswith("ing") and first not in _TIME_WORDS:
+        return ""
+    if first in _ARTICLES:
+        return "in the middle of "
+    return "in the middle of {poss} "
+
+
+def _phrase_after_was(template: str, fields: Dict[str, str]) -> str:
+    """``template`` with each ingredient it puts right after ``{was}`` led
+    by :func:`_doing_lead` (ruling T18-R8: "Dreamed you were yoga" is "Dreamed
+    you were in the middle of your yoga"); the fields themselves unchanged."""
+    for key, value in fields.items():
+        slot = "{was} {" + key + "}"
+        if slot in template:
+            template = template.replace(slot, "{was} " + _doing_lead(value) + "{" + key + "}")
+    return template
+
+
+def _create_follow_up(fm, *, share_id: str = "", **fields) -> None:
+    """``fm.create_trigger(**fields)`` -- plus ``share_id`` when the hint is
+    about something she may share and the host's follow-up object declares
+    ``accepts_share_id = True`` (ruling T17-R1). Neither aura's nor
+    aura-desk's takes one today, and aura's adapter forwards an unknown
+    keyword to a manager that would raise, so without that declaration the
+    call is exactly what it was."""
+    if share_id and getattr(fm, "accepts_share_id", False) is True:
+        fields["share_id"] = share_id
+    fm.create_trigger(**fields)
 
 
 class LifeService:
@@ -377,6 +592,13 @@ class LifeService:
     - Shareable experiences
     - Background scheduling
     """
+
+    #: This service decays the ``emotion_engine`` a host injects, on the world
+    #: clock, from its energy tick (``_decay_emotion_engine``). A host that sees
+    #: this ``True`` must not decay that engine itself as well (``decay_tick()``
+    #: on its own schedule), or the engine decays twice. Absent on aura-life
+    #: before 0.6, where the host had to decay it.
+    decays_emotion_engine = True
 
     def __init__(
         self,
@@ -401,6 +623,9 @@ class LifeService:
         datastore: Optional[object] = None,
         sanity_rng=None,
         rng=None,
+        household: Optional[Household] = None,
+        reflection_llm: bool = False,
+        appraisal_llm: bool = False,
     ):
         """
         Initialize the life service.
@@ -412,7 +637,10 @@ class LifeService:
                 ``<get_config().data_dir>/<persona_id>/life.db``. There is no
                 relative default: see :meth:`_resolve_db_path`.
             emotion_engine: Optional emotion engine for integration
-            memory_service: Optional memory service for integration
+            memory_service: Optional memory service for integration: the
+                host's, kept for it and not read here. Her own memory of
+                her life is her memory stream (:meth:`recall`,
+                :mod:`aura_life.memory`), in ``db_path``.
             world_environment: Optional shared WorldEnvironment. When provided,
                 world ticks are skipped internally (caller is responsible for ticking).
             sleep_schedule: Optional sleep schedule dict from persona profile.
@@ -424,6 +652,10 @@ class LifeService:
                 from the persona profile (e.g. {"home": "cozy apartment..."}).
             persona_id: Persona identifier (for visual description updates).
             definition: PersonalityDefinition object (for visual description updates).
+                Its ``setting`` names the setting pack her engines draw their
+                catalogues from (:mod:`aura_life.settings`; empty, or no
+                definition, is the default ``contemporary`` pack). An unknown
+                key raises ``ValueError`` naming it and every registered key.
             datastore: Optional host datastore for the user-calendar tables. When
                 supplied it must expose ``get_connection()`` as a context manager
                 yielding a live sqlite3 connection (the same contract
@@ -439,20 +671,118 @@ class LifeService:
                 When ``rng`` is given and this is not, it defaults to ``rng``:
                 one injected source then replays the whole persona, jitter
                 included. Pass both to keep them apart.
-            rng: Optional ``random.Random`` for every draw on the energy-tick
-                path (identity's struggles, defects and tendencies; desire,
+            rng: Optional ``random.Random`` seeding every draw this persona's
+                engines make. Every engine that draws randomness -- desire,
                 habitation, cognitive, drive, career, finance, errands,
-                memory-time and life-event draws; the service's own
-                struggle-to-rumination roll, shareable priority and
-                life-trigger pick). ``None`` -- the default -- leaves every
-                draw on the module-level ``random`` exactly as before, so an
-                existing consumer is byte-identical. Given, no draw on that
-                path touches module ``random``, so a host that ticks two
-                services from two equal-seeded rngs gets two identical runs.
-                Draws off the tick path (persona generation, the daily
-                planner, activities, chaos, the world's weather) are not
-                routed here.
+                identity, memory-time, life-events, sleep (the energy-tick
+                path ruling T4-R1 first gave its own stream), plus activity
+                selection, chaos, the daily planner's own bare draws (not its
+                per-day, per-role ``crc32``-seeded ones -- see
+                :class:`~aura_life.planner.daily_planner.DailyPlanner`), the
+                body's sleep/daily-health rolls, social, behaviour, goals and
+                transport (ruling T26-R2, which generalised the sleep-stream
+                pattern from "the energy-tick path" to every engine, full
+                stop), her household's joint activities (Task 11), how
+                each of her activities goes and each day's quality (Task 14)
+                -- draws from a stream of its own
+                (:meth:`_derive_stream`), derived from this rng's state at
+                construction plus that engine's name as a label (``"desire"``,
+                ``"habitation"``, ``"finance"``, ``"career"``, ``"errands"``,
+                ``"identity"``, ``"cognitive"``, ``"drive"``, ``"memory_time"``,
+                ``"life_events"``, ``"sleep"``, ``"activity"``, ``"chaos"``,
+                ``"daily_planner"``, ``"body"``, ``"social"``, ``"behavior"``,
+                ``"goal_engine"``, ``"transport"``, ``"household"``,
+                ``"outcome"``, ``"day_quality"``): **a draw-count change in
+                one engine never moves another engine's draws**, because
+                deriving a label's stream only reads this rng's state and
+                never consumes it, so it makes no difference which engine's
+                stream is derived first or how many draws any engine takes
+                afterward. The service's own direct draws (the
+                struggle-to-rumination roll, the shareable priority, the
+                life-trigger picks, the trip roll) draw from a stream of its
+                own too, ``self._service_rng`` (label ``"service"``), derived
+                exactly the same way -- so drawing from the raw ``rng`` itself
+                after construction (as a host inspecting or reusing it might)
+                cannot move any engine's draws either, service included.
+                ``None`` -- the default -- leaves every draw on the
+                module-level ``random`` exactly as before, so an existing
+                consumer is byte-identical. Given, no draw touches module
+                ``random``, so a host that ticks two services from two
+                equal-seeded rngs gets two identical runs.
+                A :class:`~aura_life.world.WorldEnvironment` handed in
+                (``world_environment=``) is excluded: a world can be shared
+                by every persona in a household, so it is never derived from
+                any one persona's ``rng`` -- it owns its own ``rng``/``seed``
+                constructor argument instead. The private world this service
+                builds when none is handed in takes the label ``"world"``
+                stream, and module ``random`` when ``rng`` is ``None``, like
+                every engine (ruling T35-R1). Persona
+                generation (:mod:`~aura_life.personas.genre_randomizer`,
+                :mod:`~aura_life.personas.place_generation`) already takes
+                its own rng through a separate, one-shot path and is not
+                routed here either.
+            household: Optional :class:`~aura_life.social.household.Household`
+                shared by the services of personas who live together (spec
+                section 4.5; ``PersonalityDefinition.household`` lists the
+                members she expects). The service joins it under
+                ``persona_id`` -- required then -- once it is built, leaves
+                it in :meth:`stop` and joins it again in :meth:`start`: a
+                runtime link, nothing of which is saved. Her view of each
+                housemate is the housemate's live state (asleep, where, doing
+                what), and her social-circle entry for a housemate draws no
+                ordinary NPC event; one she expects who is not joined is an
+                ordinary NPC. ``None`` -- the default -- is a persona living
+                alone, exactly as before.
+            reflection_llm: Whether her reflections (Task 13, spec section
+                4.6) may ask the host's LLM (``get_llm_service``, guarded --
+                a missing or raising hook leaves the deterministic beliefs
+                exactly as they are, with no ERROR) for one more belief on
+                top of the deterministic ones :meth:`_reflect` always
+                derives from her memory stream. ``False`` -- the default --
+                never calls it: ruling R4, every optional LLM path in
+                aura-life is off unless the host turns it on. The client is
+                called synchronously on her tick -- under the household's
+                lock when she has housemates -- and must return or raise
+                within a bounded time: that bound is the host client's, not
+                aura-life's (ruling T14-R2; a raise falls back as above).
+            appraisal_llm: Whether what she feels about how an activity went
+                (Task 14, :mod:`aura_life.emotion.appraisal`) may be asked of
+                the host's LLM (``get_llm_service``, guarded) instead of the
+                deterministic appraisal: its reply is validated -- a feeling
+                the emotion vocabulary does not know is dropped, so is one
+                that contradicts how it went (a failure felt as joy), each
+                intensity clamped to 0..1, at most three kept -- and scaled
+                by her volatility; a missing or raising hook, or a reply with
+                nothing usable, leaves the deterministic appraisal exactly as
+                it is, with no ERROR. ``False`` -- the default -- never calls
+                it (ruling R4). The client is called synchronously on her
+                activity tick -- under the household's lock when she has
+                housemates -- and must return or raise within a bounded time:
+                that bound is the host client's, not aura-life's (ruling
+                T14-R2; a raise falls back as above).
         """
+        # The world she lives in: every engine below reads its catalogues from
+        # this setting pack (aura_life.settings; an empty
+        # ``definition.setting`` is the default, "contemporary"). Resolved
+        # first, so an unknown key raises ValueError -- naming it and every
+        # registered key -- before anything touches the disk.
+        self._setting = get_setting(getattr(definition, "setting", None) if definition is not None else None)
+        if household is not None and not persona_id:
+            raise ValueError("A LifeService in a household needs a persona_id: members are known by it")
+        # The people she lives with (Task 11): joined at the end of
+        # construction, once she is whole for a housemate to read. In memory
+        # only, like the rest of it: until when a housemate's activity she
+        # joined takes her activity tick (_join_housemate), and the world
+        # instant of her last activity tick.
+        self._household = household
+        self._joint_until: Optional[datetime] = None
+        # Her local world time when she joined it: what she is doing is read
+        # from her plan at it until _joint_until (_activity_instant, Task 19).
+        self._joint_at: Optional[datetime] = None
+        self._activity_tick_at: Optional[datetime] = None
+        # What the people she lives with see of her, as of her last tick
+        # (_publish_household_state).
+        self._household_state: Optional[HousemateState] = None
         self._db_path = self._resolve_db_path(db_path, persona_id)
         self._emotion_engine = emotion_engine
         self._memory_service = memory_service
@@ -463,9 +793,18 @@ class LifeService:
         self._datastore = datastore
         self._calendar_schema_ready = False
         self._sleep_schedule = sleep_schedule
-        self._occupation = occupation
-        self._interests = interests or []
+        # Her occupation and interests: the host's when it passes them, else
+        # her definition's -- one source for every engine that reads them
+        # (the career, the planner, the places they add; Task 10). They were
+        # the host's arguments only, so a host that handed over a definition
+        # alone got a career with an occupation and a planner without one.
+        self._occupation = occupation or ((getattr(definition, "occupation", "") or "") if definition is not None else "")
+        self._interests = list(interests or ((getattr(definition, "interests", None) or []) if definition is not None else []))
         self._persona_locations = persona_locations or {}
+        # This persona's own current location -- never the (possibly shared)
+        # world's, see _move_persona_to(). "home" matches
+        # WorldEnvironment.__init__'s own default for a fresh instance.
+        self._current_location: str = "home"
         self._persona_id = persona_id
         self._user_model_provider = user_model_provider
         self._follow_up_provider = follow_up_provider
@@ -474,43 +813,132 @@ class LifeService:
         self._media_preferences = media_preferences or {}
         self._user_info = user_info
 
-        # Initialize subsystems — pass persona_locations and sleep_schedule to world and planner
-        if world_environment:
-            world_environment._persona_locations = self._persona_locations
-            world_environment._sleep_schedule = sleep_schedule
+        # Initialize subsystems — pass persona_locations and sleep_schedule to world and planner.
+        # A world this service was handed (world_environment is not None) may be
+        # shared with other LifeService instances, so it is never written to here
+        # -- doing so would make whichever persona is constructed last decide the
+        # room description and time-of-day phase for everyone sharing it (see
+        # PersonaWorldView and _persona_time_of_day for how each persona still
+        # gets her own instead).
+        # A private world takes its own stream derived from an injected rng
+        # (label "world"), so a seeded service gets reproducible weather too;
+        # without an injected rng it draws from module ``random``, as every
+        # engine does then (_derive_stream(None, ...)) and as every released
+        # version's world did (ruling T35-R1). A world the host builds itself
+        # keeps its own stream (WorldEnvironment's rng/seed).
         self._world = world_environment or WorldEnvironment(
             persona_locations=self._persona_locations,
             sleep_schedule=sleep_schedule,
+            rng=self._derive_stream(rng, "world"),
+            setting=self._setting,
         )
         self._shared_world = world_environment is not None
         # Extract core_traits once for all engines
         self._core_traits = getattr(definition, 'core_traits', []) if definition else []
+        # Her traits, compiled once (explicit traits win, the rest inferred
+        # from core_traits, 0.5 otherwise), and the engine parameters they set
+        # (the table in aura_life.personas.parameters). Every engine that
+        # reads a trait takes them from here; no definition is every trait
+        # 0.5, which is every engine exactly as before.
+        self._params = PersonaParameters.from_definition(definition)
+        self._micro_event_chance = MICRO_EVENT_CHANCE * self._params.micro_event_scale
+        # The chance, per activity tick, that she asks the people she lives
+        # with into a joint activity she is about to do (Task 11): chosen as
+        # the chance one of her people gets in touch on an activity tick
+        # (SocialSystem's NPC_EVENT_CHANCE, times her sociability's
+        # npc_event_scale).
+        self._joint_chance = NPC_EVENT_CHANCE * self._params.npc_event_scale
+        # Her standing preferences over her setting's activities (Task 10,
+        # aura_life.activities.choice): what her traits make of each need,
+        # and what she is into -- her interests, comfort zones, tastes,
+        # media and substances, from her definition (the interests and media
+        # a host passed win, as they do everywhere else). Her activity
+        # choice and her plan's free hours both read them.
+        self._preferences = ActivityPreferences.from_definition(
+            definition, self._params, interests=self._interests, media_preferences=self._media_preferences)
+        # Her activities that end each kind of stressor she can end herself
+        # (Task 15; _resolving_activities), found once per kind.
+        self._resolving_cache: Dict[str, FrozenSet[str]] = {}
         # The tick-path rng. ``_rng`` is what the host gave (None or a Random)
         # and is threaded into every engine that draws on the energy tick;
         # ``_random`` is what this class itself draws from (module ``random``
         # when nothing was injected, so the default is byte-identical).
         self._rng = rng
-        self._random = rng if rng is not None else random
+        self._service_rng = self._derive_stream(rng, "service")
+        # Each night's sleep window comes from a stream of its own (see
+        # _sleep_stream), taken before any engine below draws.
+        self._sleep_rng = self._sleep_stream(rng)
+        # Every other engine on the energy-tick path gets a stream of its own
+        # the same way (see _derive_stream) -- derived here, before any of
+        # them is constructed and before the service's own draws on
+        # self._service_rng happen, so a change to how many draws one engine
+        # makes can never move another's (see the rng parameter docstring).
+        self._desire_rng = self._derive_stream(rng, "desire")
+        self._habitation_rng = self._derive_stream(rng, "habitation")
+        self._finance_rng = self._derive_stream(rng, "finance")
+        self._career_rng = self._derive_stream(rng, "career")
+        self._errands_rng = self._derive_stream(rng, "errands")
+        self._identity_rng = self._derive_stream(rng, "identity")
+        self._cognitive_rng = self._derive_stream(rng, "cognitive")
+        self._drive_rng = self._derive_stream(rng, "drive")
+        self._memory_time_rng = self._derive_stream(rng, "memory_time")
+        self._life_events_rng = self._derive_stream(rng, "life_events")
+        # Ruling T26-R2: every engine that draws randomness gets its own
+        # stream this way, not only the ones that used to share self._rng
+        # directly -- these eight used to read module random with no rng
+        # parameter at all. WorldEnvironment is excluded: it is shared across
+        # personas (a household), so it does not take a persona stream --
+        # see its own rng/seed constructor argument instead.
+        self._activity_rng = self._derive_stream(rng, "activity")
+        self._chaos_rng = self._derive_stream(rng, "chaos")
+        self._daily_planner_rng = self._derive_stream(rng, "daily_planner")
+        self._body_rng = self._derive_stream(rng, "body")
+        self._social_rng = self._derive_stream(rng, "social")
+        self._behavior_rng = self._derive_stream(rng, "behavior")
+        self._goal_engine_rng = self._derive_stream(rng, "goal_engine")
+        self._transport_rng = self._derive_stream(rng, "transport")
+        # Task 11: whether she asks the people she lives with into what she
+        # does, and the lines that say so -- a stream of her own, so living
+        # with someone moves no other engine's draws.
+        self._household_rng = self._derive_stream(rng, "household")
+        # Task 14: how each of her activities goes, and the words for one
+        # that did not go well -- a stream of its own, so an outcome never
+        # moves the activity choice's draws or the service's.
+        self._outcome_rng = self._derive_stream(rng, "outcome")
+        # Task 14 fix round (ruling T14-R1): each day's quality -- one draw a
+        # persona-day (_draw_day_quality), on a stream of its own.
+        self._day_quality_rng = self._derive_stream(rng, "day_quality")
         if sanity_rng is None:
             sanity_rng = rng
+
+        _defn = self._definition
+        # AI personas have no body/finances/home/commute — gate the physical-life
+        # engines off so an AI companion doesn't "get hungry" or "pay rent".
+        # Known before the energy system is built, so an AI never sleeps and
+        # carries no sleep-physiology in its digest from its first state on.
+        self._is_ai = (getattr(_defn, 'persona_type', 'human') == 'ai') if _defn else False
 
         self._energy = EnergySystem(
             sleep_schedule=sleep_schedule,
             core_traits=self._core_traits,
+            is_ai=self._is_ai,
             now=self._world_clock(),
+            params=self._params,
         )
-        self._activity_engine = ActivityEngine()
-        self._goal_engine = GoalEngine()
-        self._desire_system = DesireSystem(core_traits=self._core_traits, rng=self._rng)
+        self._activity_engine = ActivityEngine(rng=self._activity_rng, setting=self._setting,
+                                               persona_id=persona_id, preferences=self._preferences,
+                                               outcome_rng=self._outcome_rng)
+        # Her goals are hers (Task 10): her personal goal, interests, values and
+        # struggles first, then the best fits of her setting's pools.
+        self._goal_engine = GoalEngine(rng=self._goal_engine_rng, setting=self._setting, definition=definition,
+                                       parameters=self._params, persona_id=persona_id,
+                                       interests=self._interests)
+        self._desire_system = DesireSystem(
+            core_traits=self._core_traits, rng=self._desire_rng, gender=self._persona_gender(),
+            params=self._params, setting=self._setting, intimacy_rate=self._intimacy_rate(),
+        )
 
         # New subsystems — seeded from the persona profile where applicable.
-        _defn = self._definition
-        # AI personas have no body/finances/home/commute — gate the physical-life
-        # engines off so an AI companion doesn't "get hungry" or "pay rent".
-        self._is_ai = (getattr(_defn, 'persona_type', 'human') == 'ai') if _defn else False
-        # Energy is built above (before persona_type is known) — thread the AI flag
-        # in now so an AI never sleeps and carries no sleep-physiology in its digest.
-        self._energy._is_ai = self._is_ai
         # Conversation-session tracking for the sign-off / wrap-up feature
         # (in-memory; resets on new session/day). Plus the server-side
         # "just woke up" latch for wake-aware first replies, and the explicit
@@ -524,28 +952,30 @@ class LifeService:
         self._basic_needs = self._sustenance.state  # back-compat alias (same object)
         self._habitation = HabitationSystem(
             home_type=getattr(_defn, 'home_type', '') if _defn else '',
-            rng=self._rng,
+            rng=self._habitation_rng,
         )
         self._room_state = self._habitation.state  # back-compat alias (same object)
-        self._finance = FinanceSystem(core_traits=self._core_traits, rng=self._rng, now=self._world_clock()())
+        self._finance = FinanceSystem(core_traits=self._core_traits, rng=self._finance_rng,
+                                      now=self._world_clock()(), params=self._params)
         if _defn and getattr(_defn, 'spending_habit', None) is not None:
             self._finance.state.spending_habit = _defn.spending_habit
         self._financial = self._finance.state  # back-compat alias (same state object)
-        _occupation = self._occupation or (getattr(_defn, 'occupation', '') if _defn else '')
         _salary = getattr(_defn, 'monthly_salary', None) if _defn else None
-        self._career = CareerSystem(occupation=_occupation, monthly_salary=_salary, rng=self._rng)
+        self._career = CareerSystem(occupation=self._occupation, monthly_salary=_salary, rng=self._career_rng,
+                                    setting=self._setting)
         # Align the Job engine's schedule with the planner's occupation type so
         # "on shift" matches when the planner schedules work.
-        self._apply_occupation_schedule(self._career, _occupation)
+        self._apply_occupation_schedule(self._career, self._occupation)
         # Job pays the bills: salary drives finance income.
         if self._career.monthly_salary > 0:
             self._finance.state.monthly_income = self._career.monthly_salary
         self._media = self._init_media_state()
         self._skills_system = SkillsSystem()
         self._skills: Dict[str, SkillProgress] = self._skills_system.skills  # alias
-        self._errands = ErrandsSystem(rng=self._rng)
+        self._errands = ErrandsSystem(rng=self._errands_rng)
         npcs = self._build_npcs(self._social_circle_defs)
-        self._social = SocialSystem(npcs=npcs)
+        self._social = SocialSystem(npcs=npcs, rng=self._social_rng, params=self._params,
+                                    setting=self._setting)
         self._identity = IdentitySystem(
             npcs=npcs, user_info=self._user_info, core_traits=self._core_traits,
             humor_style=getattr(definition, 'humor_style', '') if definition else '',
@@ -553,20 +983,29 @@ class LifeService:
             struggles=getattr(definition, 'struggles', []) if definition else [],
             character_defects=getattr(definition, 'character_defects', []) if definition else [],
             behavioral_tendencies=getattr(definition, 'behavioral_tendencies', {}) if definition else {},
-            rng=self._rng,
+            rng=self._identity_rng,
+            params=self._params,
         )
         self._affect = AffectSystem(
             core_traits=self._core_traits,
             emotional_baseline=getattr(definition, 'emotional_baseline', {}) if definition else {},
+            params=self._params,
         )
+        # The body's seeds from her definition: her body-image baseline from
+        # her struggles and core traits (PersonaParameters.body_image_struggle
+        # -- the service never handed the body the definition until Task 10).
         self._body = BodySystem(
             hormonal_enabled=getattr(definition, 'hormonal_enabled', False) if definition else False,
             substance_tendencies=getattr(definition, 'substance_tendencies', {}) if definition else {},
+            rng=self._body_rng,
+            params=self._params,
         )
         self._cognitive = CognitiveSystem(
             core_traits=self._core_traits,
             intrusive_thought_themes=getattr(definition, 'intrusive_thought_themes', []) if definition else [],
-            rng=self._rng,
+            rng=self._cognitive_rng,
+            params=self._params,
+            setting=self._setting,
         )
         self._shadow = ShadowSystem(
             behavioral_tendencies=(getattr(definition, 'behavioral_tendencies', {}) if definition else {}) or {},
@@ -575,6 +1014,7 @@ class LifeService:
             intrusive_thought_themes=(getattr(definition, 'intrusive_thought_themes', []) if definition else []) or [],
             substance_tendencies=(getattr(definition, 'substance_tendencies', {}) if definition else {}) or {},
             core_traits=(getattr(definition, 'core_traits', []) if definition else []) or [],
+            params=self._params,
         )
         self._sanity_rng = sanity_rng
         self._sanity = SanitySystem(
@@ -585,6 +1025,33 @@ class LifeService:
         )
         # Elapsed-time stamp for the sanity tick, on the world clock like energy.
         self._sanity_ticked_at = self._world_clock()()
+        # The same for the affect tick, whose mood half-lives run in world hours.
+        self._affect_ticked_at = self._world_clock()()
+        # Where her live affect ticks began (here, a reset, a reload): the
+        # downtime catch-up charges her affect the gap before it (Task 34b).
+        # Kept in memory only, never saved.
+        self._affect_live_since = self._affect_ticked_at
+        # And for decaying the host's EmotionEngine (see decays_emotion_engine).
+        self._emotion_decayed_at = self._world_clock()()
+        # And for hunger, which rises per world hour (ruling T4-R4); taken
+        # again on reload, so downtime is not charged as lived time.
+        self._sustenance_ticked_at = self._world_clock()()
+        # Where her live hunger ticks began (here, a reset, a reload): the
+        # downtime catch-up charges her hunger the downtime before it, and of
+        # a gap after it only the hours the live tick has not charged (Task
+        # 34c). Kept in memory only, never saved.
+        self._sustenance_live_since = self._sustenance_ticked_at
+        # The last paused host's hours the live tick charged at once (the PC
+        # slept, the process lived on): (their start, their end, her hunger
+        # and nutrition at their start), so a catch-up of the same gap lives
+        # them again in time order with its meals (Task 34c fix round 1). None
+        # once a catch-up, a live meal, a reset or a reload has passed. In
+        # memory only, never saved.
+        self._sustenance_gap_charge = None
+        # Elapsed-time stamp for periodic state persistence (see the end of
+        # `_on_energy_tick`): so a crash between explicit `_save_state()`
+        # calls loses at most an hour of simulated time.
+        self._last_periodic_save_at = self._world_clock()()
         # The word the couplings were last applied for. Recorded, never applied
         # here: the couplings fire on a *change* of word, so a persona whose
         # baseline already sits below ``sound`` is not coupled for existing.
@@ -592,21 +1059,40 @@ class LifeService:
         self._drive = DriveSystem(
             core_traits=self._core_traits,
             comfort_zone_seeds=getattr(self._definition, 'comfort_zone_seeds', []) if self._definition else [],
-            rng=self._rng,
+            rng=self._drive_rng,
+            params=self._params,
         )
-        self._behavior = BehaviorSystem()
-        self._memory_time = MemoryTimeSystem(rng=self._rng)
-        self._expression = ExpressionSystem()
+        self._behavior = BehaviorSystem(rng=self._behavior_rng)
+        self._memory_time = MemoryTimeSystem(rng=self._memory_time_rng, setting=self._setting)
+        self._expression = ExpressionSystem(communication_traits=self._communication_traits())
         self._continuity = ContinuitySystem()
         self._character_evolution = CharacterEvolution(
             original_baseline=getattr(self._definition, 'emotional_baseline', {}) if self._definition else {},
             core_traits=getattr(self._definition, 'core_traits', []) if self._definition else [],
         )
-        self._chaos = ChaosEngine()
-        self._life_events = LifeEventSystem(rng=self._rng)
+        self._chaos = ChaosEngine(rng=self._chaos_rng, params=self._params, setting=self._setting)
+        self._life_events = LifeEventSystem(rng=self._life_events_rng, setting=self._setting)
+        # Her memory stream (Task 12, spec section 4.6): the episodes of her
+        # life, in her database -- read once its tables exist (below), and
+        # saved as each is written.
+        self._memory = MemoryStream(self._db_path)
+        # Whether her reflections may also ask the host's LLM (Task 13):
+        # off by default (ruling R4).
+        self._reflection_llm = bool(reflection_llm)
+        # Whether what she feels about how an activity went may be asked of
+        # the host's LLM (Task 14): off by default (ruling R4).
+        self._appraisal_llm = bool(appraisal_llm)
+        # The world instant she last reflected at (Task 13 fix round 1,
+        # Minor 4): persisted explicitly (_save_reflection_state /
+        # _load_reflection_state) rather than derived from the most recent
+        # belief episode, which MemoryStream's 2,000-episode cap could
+        # prune -- a pruned anchor would let a later reflection re-count
+        # episodes already reflected on. Loaded in _load_state; None until
+        # her first reflection or a load finds one saved.
+        self._last_reflection_at: Optional[datetime] = None
         self._pipeline = None  # Set externally via set_pipeline()
         self._transit: Optional[TransitState] = None  # Active transit overlay
-        self._transport = TransportSystem()           # Travel estimation + mode
+        self._transport = TransportSystem(rng=self._transport_rng)  # Travel estimation + mode
         # Place-identity volatile state (current city / trip / weather)
         self._place_location: PlaceLocationState = PlaceLocationState()
 
@@ -633,19 +1119,34 @@ class LifeService:
         self._locations_visited_today_date: str = ""
 
         self._daily_planner = DailyPlanner(
-            occupation=occupation,
-            interests=interests or [],
+            occupation=self._occupation,
+            interests=self._interests,
             sleep_schedule=sleep_schedule,
             persona_locations=self._persona_locations,
             nationality=getattr(definition, 'nationality', '') if definition else '',
             is_ai=self._is_ai,
+            rng=self._daily_planner_rng,
+            params=self._params,
+            setting=self._setting,
+            persona_id=self._persona_id,
+            preferences=self._preferences,
+            definition=self._definition,
+            media_preferences=self._media_preferences,
         )
         # Supply the planner with derived location keys
         self._daily_planner._available_location_keys |= set(self._location_registry.keys())
 
-        # Context builder
+        # Context builder. A shared world gets wrapped in a PersonaWorldView so
+        # the location text it renders is this persona's own room, not
+        # whichever persona's data self._world (the raw, possibly-shared
+        # object -- kept as-is so callers holding a reference to it still see
+        # the same instance) happens to carry; a place her profile does not
+        # describe, and the weather, read from her setting. A private world already only
+        # ever holds this persona's own data, so it is passed through untouched.
         self._context_builder = LifeContextBuilder(
-            self._world,
+            PersonaWorldView(self._world, self._persona_locations, lambda: self._current_location,
+                             setting=self._setting)
+            if self._shared_world else self._world,
             self._energy,
             self._activity_engine,
             self._goal_engine,
@@ -710,6 +1211,12 @@ class LifeService:
         # trigger is reachable from the scheduler tick and from the init-tick
         # thread at once, so the is_alive() check alone would race.
         self._visual_thread_lock = threading.Lock()
+        # Guards one affect tick (_tick_affect): the live energy tick (the
+        # scheduler's thread, and start()'s init-tick thread) and the downtime
+        # catch-up (the host's own thread) both tick her affect, and each tick
+        # reads then writes her loneliness, mood and regulation -- interleaved,
+        # one would write over the other's change (the hours of a whole gap).
+        self._affect_tick_lock = threading.Lock()
 
         # Life-driven proactive trigger state (in-memory, not persisted)
         self._life_trigger_cooldowns: Dict[str, datetime] = {}
@@ -720,11 +1227,79 @@ class LifeService:
         self._last_seen_nostalgia_ref: Optional[str] = None
         self._last_moment_share_chaos_event: Optional[str] = None
         self._pending_moment_share_chaos_event: Optional[str] = None
+        # The dream and the goal completion a trigger was last made of (their
+        # episode ids, Task 17), so one is not offered again once it fired.
+        self._last_dream_share_episode: Optional[int] = None
+        self._last_goal_share_episode: Optional[int] = None
+        # Life events worth an EXCITEMENT_SHARE, by share id, waiting for her
+        # memory of them (_bridge_life_event, _share_excitement): the hint is
+        # made of that episode.
+        self._excitement_waiting: Dict[str, LifeEvent] = {}
+        # The moment's cues still recovering their novelty (Task 18, ruling
+        # T18-R6): key -> (penalty 0..1, world instant it was set); saved in
+        # life_moment_state by get_moment.
+        self._moment_novelty: Dict[str, Tuple[float, datetime]] = {}
+
+        # A new persona starts on her own schedule at the current time (asleep
+        # inside her night, else awake since that day's wake time), not on the
+        # eight hours awake a bare EnergySystem assumes. A saved state replaces
+        # this when start() loads it.
+        self._energy.start_on_schedule(self._local_world_now())
 
         # Initialize database
         self._init_database()
+        # What she remembers, as saved -- read now, before anything she does
+        # can add to it, so a service that never start()s (a host driving the
+        # ticks itself) goes on from the saved stream instead of writing over
+        # it. Every other engine loads in start().
+        self._memory.load()
+
+        # She is whole now: what a housemate sees of her is published, then
+        # she joins (Task 11).
+        if self._household is not None:
+            self._publish_household_state()
+            self._household.join(self._persona_id, self)
 
     # ============= Init Helpers =============
+
+    @staticmethod
+    def _derive_stream(rng, label: str):
+        """An independent ``random.Random`` for one engine's draws.
+
+        Seeded from the injected rng's state here plus ``label``, so a
+        draw-count change in one engine's stream never moves another
+        engine's draws: reading the state takes no draw, so deriving every
+        engine's stream up front -- before any engine is constructed, and
+        before the service's own direct draws on ``self._service_rng`` happen --
+        costs the injected source nothing and does not depend on the order
+        the streams are derived in or on how many draws anything else takes
+        afterward. Without an injected rng: module ``random``, as before,
+        for every label. A source with no ``getstate`` (a test double that
+        does not implement it) is returned as-is, so every label shares that
+        one object -- the same degraded-but-working behaviour a caller of
+        this method got before other labels existed.
+
+        This is the pattern ruling T4-R1 introduced for the sleep stream
+        (:meth:`_sleep_stream`) and ruling T5-R1 / Task 26 generalised to
+        every engine on the energy-tick path; see the ``rng`` parameter of
+        :meth:`__init__` for the full rule and the current label roster.
+        """
+        if rng is None:
+            return random
+        getstate = getattr(rng, "getstate", None)
+        if not callable(getstate):
+            return rng
+        return random.Random(f"{getstate()!r}:{label}")
+
+    @staticmethod
+    def _sleep_stream(rng):
+        """The source each night's sleep window is drawn from -- label
+        "sleep" on :meth:`_derive_stream`. Kept as its own method (rather
+        than a bare call at the use site) since it predates the general
+        helper (ruling T4-R1) and Task 3's pinned nights depend on this exact
+        label and derivation continuing unchanged.
+        """
+        return LifeService._derive_stream(rng, "sleep")
 
     @staticmethod
     def _resolve_db_path(db_path: Optional[str], persona_id: Optional[str]) -> str:
@@ -811,6 +1386,11 @@ class LifeService:
                 personality_brief=d.get("personality", ""),
                 shared_interests=interests,
                 contact_frequency=freq,
+                # Her "[kind]" tag (Task 7 carried it to the definition and
+                # the database; Task 11 to the NPC): none is the default kind
+                # (spec section 4.1). A kind outside NPC_KINDS is kept as
+                # written, the way the profile parser keeps it.
+                kind=str(d.get("kind") or "").strip().lower() or DEFAULT_NPC_KIND,
             ))
         return npcs
 
@@ -819,44 +1399,38 @@ class LifeService:
         media = MediaState()
         books = self._media_preferences.get("books", [])
         if books:
-            media.current_book = random.choice(books)
-            media.book_progress = random.uniform(0.1, 0.4)
+            media.current_book = self._service_rng.choice(books)
+            media.book_progress = self._service_rng.uniform(0.1, 0.4)
         music = self._media_preferences.get("music", [])
         if music:
-            media.current_music_obsession = random.choice(music)
+            media.current_music_obsession = self._service_rng.choice(music)
         shows = self._media_preferences.get("shows", [])
         if shows:
-            media.current_show = random.choice(shows)
-            media.show_progress = random.uniform(0.1, 0.5)
+            media.current_show = self._service_rng.choice(shows)
+            media.show_progress = self._service_rng.uniform(0.1, 0.5)
         return media
 
     # ============= Location Registry =============
 
-    # Default locations every persona starts with
-    _DEFAULT_LOCATIONS: Dict[str, str] = {
-        "home": "home", "cafe": "cafe", "park": "park", "gym": "gym",
-        "library": "library", "street": "street", "workplace": "workplace",
-        "restaurant": "restaurant", "bar": "bar", "rooftop": "other",
-        "beach": "beach", "school": "campus", "campus": "campus",
-        "in transit": "transit",
-    }
+    # Legacy name: the locations every persona starts with are her setting's
+    # places now (SettingSpec.places); this dict moved, unchanged, into the
+    # contemporary setting pack as PLACES in Task 9.
+    _DEFAULT_LOCATIONS: Dict[str, str] = _CONTEMPORARY_PLACES
 
     def _build_location_registry(self) -> None:
         """Build the location registry from multiple sources.
 
         Sources (in priority order):
-        1. Default locations (always present)
+        1. Default locations (always present): her setting's places
         2. Persona profile locations (from text profiles)
-        3. Occupation-derived locations
-        4. Interest-derived locations
+        3. Occupation-derived locations (her setting's occupation_places)
+        4. Interest-derived locations (her setting's interest_places)
         5. User/LLM-added locations (loaded from DB later in _load_state)
         """
-        from .planner.daily_planner import OCCUPATION_LOCATIONS, INTEREST_LOCATIONS
-
         registry = self._location_registry
 
         # 1. Defaults
-        for key, place_type in self._DEFAULT_LOCATIONS.items():
+        for key, place_type in self._setting.places.items():
             registry[key] = LocationProfile(
                 key=key,
                 name=key.replace("_", " ").title(),
@@ -884,7 +1458,7 @@ class LifeService:
 
         # 3. Occupation-derived
         occ_lower = self._occupation.lower() if self._occupation else ""
-        for keyword, loc_pairs in OCCUPATION_LOCATIONS.items():
+        for keyword, loc_pairs in self._setting.occupation_places.items():
             if keyword in occ_lower:
                 for loc_key, place_type in loc_pairs:
                     if loc_key not in registry:
@@ -898,7 +1472,7 @@ class LifeService:
 
         # 4. Interest-derived
         interests_lower = " ".join(i.lower() for i in self._interests)
-        for keyword, loc_pairs in INTEREST_LOCATIONS.items():
+        for keyword, loc_pairs in self._setting.interest_places.items():
             if keyword in interests_lower:
                 for loc_key, place_type in loc_pairs:
                     if loc_key not in registry:
@@ -943,7 +1517,8 @@ class LifeService:
         # so they never record real-world visits or accrue location-based effects.
         if self._is_ai:
             return
-        now = datetime.now()
+        # Her day of visits on her local world day (Task 19): it read the host's.
+        now = self._local_world_now().replace(tzinfo=None)
         loc = (location_key or "home").lower().replace(" ", "_")
 
         # Location engine: record the visit (familiarity + daily tracking) and
@@ -966,11 +1541,13 @@ class LifeService:
         if loc != self._last_location:
             self._energy.consume_energy(COMMUTE_ENERGY_COST)
 
-        # Affect: stress + social + nature
+        # Affect: stress + social + nature. Nature lifts her mood when she
+        # arrives, once: on every tick spent there, how far it carried her
+        # depended on how often the host ticked.
         self._affect.on_location_effects(
             stress_delta=effects["stress_delta"],
             social_drain=effects["social_drain"],
-            is_nature=is_nature,
+            is_nature=is_nature and loc != self._last_location,
         )
 
         # Variety bonus: new location visited today → small mood boost
@@ -1044,7 +1621,7 @@ class LifeService:
         if excess <= 0:
             return
 
-        current = (self._world.current_location or "").lower().replace(" ", "_")
+        current = (self._current_location or "").lower().replace(" ", "_")
         candidates = [(i, k) for i, k in enumerate(user_keys) if k != current]
         # Ascending by (visits, registration order) — least-attached first.
         candidates.sort(key=lambda ik: (registry[ik[1]].visit_count, ik[0]))
@@ -1069,8 +1646,14 @@ class LifeService:
         """Start the life service and background simulation."""
         if not self._is_initialized:
             self._load_state()
-            self._goal_engine.initialize_goals()
+            self._goal_engine.initialize_goals(now=self._world_clock()())
             self._is_initialized = True
+
+        # Back with the people she lives with, if stop() took her away, as
+        # she was loaded.
+        if self._household is not None:
+            self._publish_household_state()
+            self._household.join(self._persona_id, self)
 
         # Backfill home location once for human personas that have none yet.
         # No-op for AI, feature-flag-off, or already-assigned personas.
@@ -1138,23 +1721,35 @@ class LifeService:
         mutate engine state, so saving first would persist a snapshot they then
         moved on from, and returning with them still running leaves work racing a
         service the caller believes is stopped.
+
+        For the same reason she leaves her household, if she has one, before
+        saving: once a housemate's running activity tick is done
+        (``Household.leave``), nothing can pull her into a joint activity, and
+        until :meth:`start` the people she lives with see her missing (Task 11).
+        She leaves even when stopping the scheduler or a thread fails: a host
+        that catches the failure and builds her again must find her place free.
         """
-        self._scheduler.stop()
+        try:
+            self._scheduler.stop()
 
-        for label, thread in (
-            ("init-ticks", self._init_ticks_thread),
-            ("visual-description", self._visual_thread),
-        ):
-            if thread is not None and thread.is_alive():
-                thread.join(self._THREAD_JOIN_TIMEOUT)
-                if thread.is_alive():
-                    logger.warning(
-                        "%s thread did not finish within %.0fs of stop()",
-                        label, self._THREAD_JOIN_TIMEOUT,
-                    )
-        self._init_ticks_thread = None
-        self._visual_thread = None
-
+            for label, thread in (
+                ("init-ticks", self._init_ticks_thread),
+                ("visual-description", self._visual_thread),
+            ):
+                if thread is not None and thread.is_alive():
+                    thread.join(self._THREAD_JOIN_TIMEOUT)
+                    if thread.is_alive():
+                        logger.warning(
+                            "%s thread did not finish within %.0fs of stop()",
+                            label, self._THREAD_JOIN_TIMEOUT,
+                        )
+            self._init_ticks_thread = None
+            self._visual_thread = None
+        finally:
+            # A stopped life is not read as a live one, nor written into by a
+            # housemate after it is saved (Task 11).
+            if self._household is not None:
+                self._household.leave(self)
         self._save_state()
         logger.info("Life service stopped")
 
@@ -1261,11 +1856,14 @@ class LifeService:
 
         Conversation-driven activity (from a [DOING:] tag) wins over the scheduled
         slot for a window after the last user message, so a stale planner slot
-        doesn't bleed into status, pictures, or proactive messages.
+        doesn't bleed into status, pictures, or proactive messages. The
+        scheduled slot is her plan's at her local world time -- or, inside a
+        housemate's activity she joined, at when she joined it
+        (:meth:`_activity_instant`).
         """
         scheduled = ""
         if self._daily_planner.current_plan:
-            slot = self._daily_planner.current_plan.get_current_slot()
+            slot = self._daily_planner.current_plan.get_current_slot(self._activity_instant())
             if slot:
                 scheduled = slot.activity_name
         return self.effective_current_activity(scheduled)
@@ -1322,7 +1920,7 @@ class LifeService:
         # End the "sleeping" activity: the conversation override wins over the
         # planner slot for status/pictures/proactive for the usual window.
         self.set_conversation_activity("just woke up")
-        logger.info("Forced wake: user explicitly woke her (wake button)")
+        logger.info("Forced wake: user explicitly woke the persona (wake button)")
 
     def is_forced_wake_fresh(self) -> bool:
         """True while the explicit forced-wake override (wake button) is still live.
@@ -1350,11 +1948,13 @@ class LifeService:
         return (datetime.now() - ref) <= timedelta(minutes=FORCED_WAKE_WINDOW_MINUTES)
 
     def _next_activity_info(self) -> tuple:
-        """(activity_name, is_important) for her next scheduled slot."""
+        """(activity_name, is_important) for her next scheduled slot, after
+        her local world time's hour (after the joined one inside a housemate's
+        activity she joined: :meth:`_activity_instant`)."""
         name = ""
         plan = self._daily_planner.current_plan
         if plan is not None:
-            nxt = plan.get_next_slot()
+            nxt = plan.get_next_slot(self._activity_instant())
             if nxt is not None:
                 name = nxt.activity_name or ""
         important = is_important_activity(name, self._errands) if name else False
@@ -1409,6 +2009,31 @@ class LifeService:
             desires=self._daily_planner.desires,
             life_events=self._life_events.get_unshared_events()[:2],
         )
+
+    def get_moment(self, user_text: Optional[str] = None) -> Moment:
+        """Her moment now (humanness Task 18, spec section 4.10): where she
+        is, the state that drives her, at most two things on her mind --
+        ranked by salience, novelty and relevance to ``user_text`` -- at most
+        one unshared thing with its id, how to speak, at most one thing she
+        keeps to herself. Deterministic, no LLM. ``render()`` is what the
+        host puts in the prompt one or two messages from the end, rebuilt
+        every turn (README "Placement contract").
+
+        It saves two things only (ruling T18-R2): the novelty of the cues it
+        rendered, and the reinforcement of the memory cues it rendered
+        (ruling T12-R2). In memory it also keeps what this conversation has
+        had -- moments less than ``CONVERSATION_ACTIVITY_WINDOW_MINUTES``
+        apart -- which the next moment passes over unless the user's words
+        name it (Task 38); a restart starts a new conversation. It marks
+        nothing shared: the host calls :meth:`mark_shared` with
+        ``to_share.id`` once she told it. ``get_life_context()`` stays for
+        dashboards.
+
+        It reads the world clock for its instant; the wall clock only where
+        the accessors it uses do today: ``current_activity_name`` (a
+        conversation's activity window) and ``is_asleep`` (a forced wake's
+        window)."""
+        return build_moment(self, user_text)
 
     def get_response_style_hint(self) -> str:
         """Get response style hint based on energy."""
@@ -1544,8 +2169,9 @@ class LifeService:
         return {
             "identity": self._identity.export_state(),
             "drive": {
-                "goals": self._goal_engine.export_state(),
-                "plan": self._daily_planner.export_state(),
+                "goals": self._goal_engine.export_state(now=self._world_clock()()),
+                # Inside a housemate's activity she joined, at when she joined it (Task 19).
+                "plan": self._daily_planner.export_state(now=self._activity_instant()),
                 "intimacy": self._desire_system.export_state(),
                 **self._drive.export_state(),
             },
@@ -1565,8 +2191,8 @@ class LifeService:
             },
             "shadow": self._shadow.export_state(),
             "sanity": self._sanity.export_state(),
-            "memory_time": self._memory_time.export_state(),
-            "continuity": self._continuity.export_state(),
+            "memory_time": self._memory_time_export(),
+            "continuity": self._continuity.export_state(now=self._world_clock()()),
             "character_evolution": self._character_evolution.export_state(),
             "chaos": self._chaos.export_state(),
             "life_events": self._life_events.export_state(),
@@ -1574,10 +2200,22 @@ class LifeService:
             "mental_health": self.mental_health_index(),
         }
 
+    def _memory_time_export(self) -> dict:
+        """The memory and time engine's export, its nostalgia memory addressed to her.
+
+        Her setting writes a memory with slots ("a book {subj} read ..."); a host
+        that prints the export must never see one (Task 43).
+        """
+        state = self._memory_time.export_state(now=self._world_clock()())
+        nostalgia = state.get("recent_nostalgia")
+        if nostalgia and nostalgia.get("memory"):
+            state["recent_nostalgia"] = {**nostalgia, "memory": self._addressed_to_her(nostalgia["memory"])}
+        return state
+
     def export_outer_state(self) -> dict:
         """Structured dump of all Outer World engines for digest pass."""
         # Location profile for current location
-        loc_key = self._world.current_location.lower().replace(" ", "_") if self._world.current_location else "home"
+        loc_key = self._current_location.lower().replace(" ", "_") if self._current_location else "home"
         loc_profile = self._location_registry.get(loc_key)
         location_export = {}
         if loc_profile:
@@ -1588,11 +2226,11 @@ class LifeService:
                 "visit_count": loc_profile.visit_count,
             }
         state = {
-            "world": {**self._world.export_state(), "location_detail": location_export},
+            "world": {**self._world_export(), "location_detail": location_export},
             "body": {
                 **self._body.export_state(),
             },
-            "social": self._social.export_state(now=self._world_clock()()),
+            "social": {**self._social.export_state(now=self._world_clock()()), "household": self._household_export()},
             "media": {
                 "current_book": self._media.current_book,
                 "book_progress": round(self._media.book_progress, 2),
@@ -1600,7 +2238,7 @@ class LifeService:
                 "current_music": self._media.current_music_obsession,
             },
             "behavior": self._behavior.export_state(self._world_clock()(), exclude=NOT_HABIT_FORMING),
-            "expression": self._expression.export_state(),
+            "expression": self._expression_export(),
             "skills": self._skills_system.export_state(),
         }
         if not self._is_ai:
@@ -1625,7 +2263,7 @@ class LifeService:
                     "home_type": self._room_state.home_type,
                 },
                 "finance": self._finance.export_state(),
-                "career": self._career.export_state(now=self._world_clock()()),
+                "career": self._render_career_status(self._career.export_state(now=self._world_clock()())),
                 "errands": self._errands.export_state(),
                 "places": self._location.export_state(),
                 "transport": self._transport.export_state(self._transit),
@@ -1634,13 +2272,64 @@ class LifeService:
 
     def on_user_message(self, text: str, detected_emotion: str = "", emotion_intensity: float = 0.0) -> None:
         """
-        Called when user sends a message.
-
-        - Adds social energy boost
-        - Multi-engine conversation trigger dispatch
-        - May generate conversation-based goal
-        - Updates UserModel behavioral statistics
+        Called when user sends a message: :meth:`observe_user_turn` with the
+        host's detected emotion, if any (ruling T16-R1), its appraisal
+        dropped. A host calls one of the two per turn, never both.
         """
+        emotions = {detected_emotion: emotion_intensity} if detected_emotion else None
+        self.observe_user_turn(text, emotions=emotions)
+
+    def observe_user_turn(self, text: Optional[str] = None, *, sentiment: Optional[float] = None,
+                          emotions: Optional[Dict[str, float]] = None, topics=None,
+                          disclosure: Optional[float] = None, language: Optional[str] = None) -> dict:
+        """The user's turn (spec section 4.8; humanness Task 16a): all a
+        message ever did -- the social energy boost, the conversation-session
+        state, the multi-engine keyword dispatch, the UserModel's statistics
+        -- and her appraisal of it, which she feels and remembers.
+
+        Args:
+            text: What the user said (``None``: a turn with no text).
+            sentiment: The host's sentiment of the turn, -1..1, when it has
+                one: the turn's valence when she feels nothing about it.
+            emotions: The user's emotions, name -> intensity 0..1, when the
+                host detected them; otherwise the text fallback analyzer
+                (``TextEmotionAnalyzer.get_emotional_tone``) reads ``text``.
+            topics: What the turn was about: tags of its episode.
+            disclosure: How much of themselves the user shared, 0..1: her
+                trust rises with it (``IdentitySystem.apply_user_turn``).
+            language: The turn's language for the analyzer ("en": English
+                only; ``None``: English and French).
+
+        She appraises the user's emotion, never copies it
+        (:func:`aura_life.emotion.user_appraisal.appraise_user_turn`):
+        concern for a sad user, amusement at a playful one, hurt or
+        irritation -- by her volatility -- at hostility aimed at her. She
+        feels that (``_feel``, volatility applied); her empathy hears the
+        user's strongest emotion with her trust in them
+        (``AffectSystem.on_user_emotion_detected``); her trust falls on
+        hostility at her and rises on warmth and disclosure; the turn is an
+        episode of her memory stream, tagged "conversation", at the world
+        instant, which is also kept as :attr:`last_user_turn_at`.
+
+        Returns:
+            ``{"valence": float, "persona_emotions": {name: intensity},
+            "trust_delta": float}`` -- the valence of what she feels
+            (intensity-weighted; else ``sentiment``; else 0.0), her feelings,
+            and how much her trust in the user moved over the turn.
+        """
+        text_value = text if isinstance(text, str) else ""
+        if emotions:
+            user_emotions = {}
+            for name, intensity in emotions.items():
+                if name and intensity is not None:
+                    user_emotions[str(name)] = max(0.0, min(1.0, float(intensity)))
+        elif text_value:
+            user_emotions = TextEmotionAnalyzer.get_emotional_tone(text_value, language=language)
+        else:
+            user_emotions = {}
+        dominant = max(user_emotions.items(), key=lambda item: item[1]) if user_emotions else ("", 0.0)
+        trust_before = self._identity.get_user_perception().trust_level
+
         # Track live conversation activity so the autonomous tick won't drift her
         # to sleep mid-chat (sleep is a soft cap — see EnergySystem.should_sleep).
         _now = datetime.now()
@@ -1662,14 +2351,26 @@ class LifeService:
         # Expression: track connection and style
         self._expression.on_user_message()
 
-        # Affect: meaningful social interaction
-        self._affect.on_social_interaction(meaningful=True)
+        # Her appraisal (Task 16a), read here because hostility aimed at her
+        # is contact, not a meaningful interaction (ruling T16a-R3): it draws
+        # nothing and changes no state; she feels it below.
+        appraisal = appraise_user_turn(
+            user_emotions,
+            aimed_at_her=text is None or addresses_listener(text_value, language=language),
+            parameters=self._params,
+        )
+
+        # Affect: a social interaction, at the world's instant (her
+        # loneliness counts from it on the world clock -- Task 11 fix round);
+        # meaningful unless the turn was hostility at her
+        self._affect.on_social_interaction(meaningful=appraisal.hostility <= 0.0, now=self._world_clock()())
 
         # Social boost from interaction
         self._energy.add_social_boost()
 
-        # Multi-engine conversation trigger dispatch
-        text_lower = text.lower()
+        # Multi-engine conversation trigger dispatch: each keyword on word
+        # boundaries and not negated, through the analyzer's tokenizer
+        # (ruling T16-R4; matched_cues keeps the map's order)
         triggered = set()  # Dedup (engine, trigger_type) pairs
 
         engine_dispatch = {
@@ -1681,39 +2382,121 @@ class LifeService:
             "drive": self._drive,
         }
 
-        for keyword, triggers in CONVERSATION_KEYWORD_MAP.items():
-            if keyword in text_lower:
-                for engine_name, trigger_type in triggers:
-                    pair = (engine_name, trigger_type)
-                    if pair not in triggered:
-                        triggered.add(pair)
-                        engine = engine_dispatch.get(engine_name)
-                        if engine:
-                            engine.process_conversation_trigger(trigger_type)
+        for keyword in matched_cues(text_value, CONVERSATION_KEYWORD_MAP):
+            for engine_name, trigger_type in CONVERSATION_KEYWORD_MAP[keyword]:
+                pair = (engine_name, trigger_type)
+                if pair not in triggered:
+                    triggered.add(pair)
+                    engine = engine_dispatch.get(engine_name)
+                    if engine:
+                        engine.process_conversation_trigger(trigger_type)
 
         # Cognitive + MemoryTime: conversation engagement
-        self._cognitive.on_user_message(text)
-        self._shadow.on_user_message(text)
-        self._memory_time.on_user_message(text)
-
-        # Small chance to generate goal or desire from interesting topic
-        # (Simplified - could use NLP for topic extraction)
-        if len(text) > 50 and random.random() < 0.1:
-            # Extract potential topic (very simplified)
-            words = text.lower().split()
-            interesting = [w for w in words if len(w) > 6 and w.isalpha()]
-            if interesting:
-                topic = random.choice(interesting)
-                self._goal_engine.generate_goal_from_conversation(topic)
-                self._daily_planner.generate_desire_from_conversation(topic)
+        self._cognitive.on_user_message(text_value)
+        self._shadow.on_user_message(text_value)
+        self._memory_time.on_user_message(text_value)
 
         # UserModel: observe message for behavioral learning
         if self._user_model_provider is not None:
             try:
                 um = self._user_model_provider(self._persona_id)
-                um.observe_message(text, datetime.now(), detected_emotion, emotion_intensity)
+                um.observe_message(text_value, datetime.now(), dominant[0], dominant[1])
             except Exception as exc:
                 self._report_user_model_failure("observe_message", exc)
+
+        # Her appraisal (Task 16a): what she feels about the turn, her
+        # empathy, her trust, and the episode.
+        self._feel(appraisal.emotions, reactivity_applied=True)
+        if dominant[0]:
+            self._affect.on_user_emotion_detected(
+                dominant[0], dominant[1], trust_level=self._identity.get_user_perception().trust_level)
+        disclosure_value = max(0.0, min(1.0, float(disclosure))) if disclosure is not None else 0.0
+        self._identity.apply_user_turn(
+            hostility=appraisal.hostility, warmth=appraisal.warmth, disclosure=disclosure_value,
+        )
+        trust_delta = self._identity.get_user_perception().trust_level - trust_before
+        valence = appraisal_valence(appraisal.emotions)
+        if valence is None:
+            valence = max(-1.0, min(1.0, float(sentiment))) if sentiment is not None else 0.0
+        at = self._world_clock()()
+        # Relationship depth (Task 16b): the silence before this turn, a new
+        # contact day, the user's disclosure answering one of hers
+        self._expression.note_user_turn(at, self._identity.last_user_turn_at, disclosure_value)
+        self._identity.note_user_turn(at)
+        felt_most = max(appraisal.emotions.items(), key=lambda item: item[1]) if appraisal.emotions else None
+        # a host's one topic given as a string is that topic, not its letters
+        topic_list = [str(t) for t in ((topics,) if isinstance(topics, str) else (topics or ())) if t]
+        # The episode is a gist of what the turn was to her, never the user's
+        # words, and only for a turn that left a trace (ruling T16a-R2).
+        kind = _conversation_kind(appraisal, disclosure_value, felt_most, topic_list)
+        if kind is not None:
+            self._remember(
+                conversation_phrase(kind, topic_list, render=self._addressed_to_her),
+                emotion=felt_most[0] if felt_most else None,
+                intensity=felt_most[1] if felt_most else None,
+                valence=valence,
+                tags=("conversation", *topic_list),
+            )
+        return {
+            "valence": float(valence),
+            "persona_emotions": dict(appraisal.emotions),
+            "trust_delta": float(trust_delta),
+        }
+
+    @property
+    def last_user_turn_at(self) -> Optional[datetime]:
+        """The world instant of the user's last turn (ruling T16-R2): set by
+        :meth:`observe_user_turn` (and so by :meth:`on_user_message`) from the
+        world clock, saved and loaded with her state; ``None`` before any
+        turn, and for a save from before Task 16a."""
+        return self._identity.last_user_turn_at
+
+    @property
+    def relationship_depth(self) -> float:
+        """How deep her bond with the user is now, 0..1 (humanness Task 16b,
+        :mod:`aura_life.expression.relationship`): from disclosure
+        reciprocity and contact days, regressing after a week without a user
+        turn. It sets ``expression.relationship_stage`` and the style hint's
+        distance line."""
+        return self._expression.depth_at(self._world_clock()(), self.last_user_turn_at)
+
+    @property
+    def after_absence(self) -> Optional[AfterAbsence]:
+        """Her ``after_absence`` state now (humanness Task 16b, ruling
+        T16-R7: computed here, rendered by the moment with her
+        ``state_expressions``), or ``None``: the user has been away
+        ``ABSENCE_AFTER_HOURS`` or more (``ongoing``), or the present
+        conversation ended such an absence (turns less than
+        ``IN_CONVERSATION_MINUTES`` apart; ``ongoing`` False). Its intensity
+        and feelings follow her ``attachment_style``
+        (:func:`aura_life.expression.relationship.after_absence`)."""
+        last = self.last_user_turn_at
+        if last is None:
+            return None
+        style = getattr(self._definition, "attachment_style", "") if self._definition else ""
+        silent_hours = silent_days(self._world_clock()(), last) * 24.0
+        if silent_hours >= ABSENCE_AFTER_HOURS:
+            return absence_state(silent_hours, style, ongoing=True)
+        reunion = self._expression.reunion_hours
+        if reunion is not None and silent_hours * 60.0 < IN_CONVERSATION_MINUTES:
+            return absence_state(reunion, style, ongoing=False)
+        return None
+
+    def _expression_export(self) -> dict:
+        """``export_outer_state()["expression"]``: the expression engine's
+        keys (``style_hint``, ``relationship_stage``, ...), plus her
+        relationship ``depth`` now and her ``after_absence`` state (a dict, or
+        ``None``; ruling T16-R7) -- Task 16b's new keys."""
+        absence = self.after_absence
+        return {
+            **self._expression.export_state(),
+            "depth": round(self.relationship_depth, 3),
+            "after_absence": absence.as_dict() if absence is not None else None,
+        }
+
+    def _communication_traits(self) -> List[str]:
+        """The persona's own register lines (``definition.communication_traits``)."""
+        return list(getattr(self._definition, "communication_traits", None) or []) if self._definition else []
 
     def on_theater_conversation(self, other_name: str, tone: str = "neutral") -> None:
         """Apply residue from a persona-to-persona (theater) conversation.
@@ -1723,7 +2506,7 @@ class LifeService:
         a positive social touch.
         """
         try:
-            self._affect.on_social_interaction(meaningful=(tone != "tense"))
+            self._affect.on_social_interaction(meaningful=(tone != "tense"), now=self._world_clock()())
         except Exception as e:
             logger.warning(f"Theater affect residue failed: {e}")
 
@@ -1756,24 +2539,420 @@ class LifeService:
             if exp.id == experience_id:
                 exp.shared = True
                 exp.shared_at = datetime.now()
+                self._her_disclosure()
                 break
         self._save_shareable()
+
+    def mark_shared(self, share_id: str) -> bool:
+        """Mark a life event or shareable experience as shared, by the
+        stable id ``get_unshared_events()`` / ``get_shareable_experiences()``
+        items carry on ``.share_id`` (``"event:<n>"``, ``"share:<n>"`` -- spec
+        Sec 4.9). Persists the change and excludes the item from both
+        unshared getters from then on.
+
+        An item one episode of her memory stream tells together with
+        another (a shareable and its life event: a chaos event, a finished
+        book, a skill milestone -- :func:`_share_ids`) is one piece of news:
+        marking either id marks the ids told with it, with one disclosure
+        (Task 18 fix round 1, C3: the moment offers one id of the pair).
+
+        Returns whether a match was found. False for an id that doesn't
+        parse to a known prefix, or doesn't match anything currently held
+        (already evicted, wrong kind, or never existed) -- it never raises.
+        """
+        if not isinstance(share_id, str) or not self._mark_one_shared(share_id):
+            return False
+        told_with = {other for episode in self._memory.episodes
+                     if share_id in _share_ids_of(episode) for other in _share_ids_of(episode)}
+        # Her memory tells some things in the very same words (two evenings
+        # of the same activity): a twin of what she just told is the same
+        # news, and is told with it (Task 38: it was offered at the very
+        # next turn).
+        words = {_told(episode) for episode in self._memory.episodes if share_id in _share_ids_of(episode)}
+        told_with |= {other for episode in self._memory.episodes
+                      if _told(episode) in words for other in _share_ids_of(episode)}
+        for other in sorted(told_with - {share_id}):
+            self._mark_one_shared(other)
+        self._her_disclosure()
+        return True
+
+    def _mark_one_shared(self, share_id: str) -> bool:
+        """Mark one life event or shareable experience shared by its id,
+        saved at once (:meth:`mark_shared`, which adds the disclosure)."""
+        if share_id.startswith("event:"):
+            if self._life_events.mark_shared(share_id, now=self._world_clock()()):
+                self._save_life_events()
+                return True
+            return False
+        if share_id.startswith("share:"):
+            for exp in self._shareable_queue:
+                if exp.share_id == share_id:
+                    exp.shared = True
+                    exp.shared_at = self._world_clock()()
+                    self._save_shareable()
+                    return True
+            return False
+        return False
+
+    def _her_disclosure(self) -> None:
+        """She told the user something of her own life: her side of the
+        disclosure reciprocity that deepens the bond (Task 16b,
+        ``ExpressionSystem.note_her_disclosure``), saved at once as the
+        share itself is."""
+        self._expression.note_her_disclosure(self._world_clock()(), self.last_user_turn_at)
+        self._save_expression()
+
+    def recall(self, query: Optional[str] = None, k: int = 3, reinforce: bool = True) -> List[Episode]:
+        """What she remembers now (spec section 4.6): the ``k`` episodes of
+        her memory stream that come to mind -- for ``query`` (what was said,
+        a topic, a name) or, with none, unprompted -- best first, by recency,
+        importance, relevance and how well each fits her mood now. Unprompted
+        recall weighs each by how much of it she still holds, its retention
+        (:mod:`aura_life.memory`; ruling T12-R1); a cued recall -- a ``query``
+        -- does not, so a good cue brings back a faded memory (ruling
+        T12-R5). Recalling is remembering
+        again: each one returned is strengthened -- its strength gains 1 and
+        its recency and retention start again -- and saved at once.
+        ``reinforce=False`` reads the same episodes without that, for a host
+        that shows her memories rather than has her remember them (ruling
+        T12-R2). Each is an :class:`~aura_life.memory.Episode`, whose
+        ``gist()`` is one plain sentence to quote to her."""
+        now, mood = self._world_clock()(), self._affect.mood.valence
+        if not reinforce:
+            return self._memory.retrieve(now=now, query=query, k=k, mood_valence=mood)
+        return self._memory.recall(now=now, query=query, k=k, mood_valence=mood)
+
+    def _remember(self, what: str, *, place: Optional[str] = None, people=(), emotions=None,
+                  emotion: Optional[str] = None, intensity: Optional[float] = None,
+                  valence: Optional[float] = None, tags=(), activity: Optional[str] = None) -> Optional[Episode]:
+        """An event of her life into her memory stream, at the world instant
+        (:meth:`MemoryStream.record`, which weighs its importance): where she
+        is unless ``place`` says otherwise ("" is nowhere in particular), the
+        valence of her mood now unless an appraisal gives one -- Task 14's
+        outcome appraisal and Task 16's user turns pass their own
+        ``emotion``, ``intensity`` and ``valence``. Returns the episode, or
+        ``None`` when it could not be recorded: that is logged at WARNING and
+        never takes the tick that lived it down."""
+        memory = getattr(self, "_memory", None)
+        if memory is None:
+            return None
+        try:
+            episode = memory.record(
+                at=self._world_clock()(),
+                what=what,
+                place=self._current_location if place is None else place,
+                people=people,
+                emotions=emotions,
+                emotion=emotion,
+                intensity=intensity,
+                valence=self._affect.mood.valence if valence is None else valence,
+                tags=tags,
+                activity=activity,
+            )
+        except Exception:
+            logger.warning("Could not remember %r in the persona's memory stream", what, exc_info=True)
+            return None
+        self._share_excitement(episode)
+        return episode
+
+    # ============= Proactive hints: their concrete detail (Task 17) =======
+
+    def _when_said(self, then: datetime) -> str:
+        """When ``then`` -- a world instant -- was, in words on her local
+        calendar (ruling T17-R4: no number): "earlier today", "yesterday",
+        "three days ago"."""
+        now = self._world_clock()()
+        local_now = self._local_world_now()
+        days = (local_now.date() - (local_now - (now - then)).date()).days
+        if days <= 0:
+            return "earlier today"
+        if days == 1:
+            return "yesterday"
+        return f"{_number_words(days)} days ago"
+
+    def _on_her_mind(self) -> Optional[Episode]:
+        """The episode most on her mind now -- what a mood shift or an unmet
+        need is about (ruling T17-R2) -- read without reinforcing it
+        (``recall(reinforce=False)``, ruling T12-R2), at :meth:`recall`'s
+        default ``k``; a belief is a realization, not a lived moment. ``None``
+        with nothing in her memory."""
+        try:
+            episodes = self.recall(reinforce=False)
+        except Exception:
+            logger.warning("Life trigger: the memory stream could not be read", exc_info=True)
+            return None
+        return next((e for e in episodes if "belief" not in e.tags), None)
+
+    def _on_her_mind_line(self, episode: Episode) -> str:
+        """"On your mind, from yesterday: cooking a meal at home with Roberta,
+        feeling warm." -- an episode as a hint's detail."""
+        return f"On your mind, from {self._when_said(episode.at)}: {_told(episode)}"
+
+    def _last_talked(self) -> str:
+        """"The last time you talked with Robin was yesterday" -- when the
+        user's last turn was (:attr:`last_user_turn_at`, ruling T17-R2: the
+        detail of a need of contact), the user named as :meth:`_user_ref`
+        names them; "" before any turn."""
+        last = self.last_user_turn_at
+        if last is None:
+            return ""
+        return f"The last time you talked with {self._user_ref()} was {self._when_said(last)}"
+
+    def _contact_detail(self) -> str:
+        """The detail of a need of contact (loneliness, connection): when they
+        last spoke, else what is on her mind; "" with neither."""
+        last = self._last_talked()
+        if last:
+            return f"{last}."
+        moved = self._on_her_mind()
+        return self._on_her_mind_line(moved) if moved is not None else ""
+
+    def _newest_episode(self, *tags: str, person: Optional[str] = None) -> Optional[Episode]:
+        """Her newest episode carrying every one of ``tags`` (and ``person``
+        among its people, when given), or ``None``."""
+        memory = getattr(self, "_memory", None)
+        if memory is None:
+            return None
+        for episode in reversed(memory.episodes):
+            if all(tag in episode.tags for tag in tags) and (person is None or person in episode.people):
+                return episode
+        return None
+
+    def _still_unshared(self, episode: Episode) -> bool:
+        """Whether something an episode is tied to (its share ids) is still
+        hers to share: true for one tied to nothing."""
+        ids = _share_ids_of(episode)
+        if not ids:
+            return True
+        unshared = {e.share_id for e in self._get_unshared_experiences()}
+        unshared.update(e.share_id for e in self._life_events.get_unshared_events())
+        return any(share_id in unshared for share_id in ids)
+
+    def _share_excitement(self, episode: Optional[Episode]) -> None:
+        """The EXCITEMENT_SHARE of a life event waiting for her memory of it
+        (:meth:`_bridge_life_event`), now that ``episode`` is that memory --
+        its tags carry the event's share id: the hint is made of the episode
+        (what, where, who, feeling, when), and the share id goes to a host
+        that takes one (ruling T17-R1)."""
+        waiting = getattr(self, "_excitement_waiting", None)
+        if not waiting or episode is None:
+            return
+        for share_id in _share_ids_of(episode):
+            event = waiting.pop(share_id, None)
+            if event is None or self._follow_up_provider is None:
+                continue
+            if not self._life_trigger_cooled_down("excitement_share", datetime.now()):
+                continue
+            try:
+                fm = self._follow_up_provider(self._persona_id)
+                _create_follow_up(
+                    fm,
+                    share_id=event.share_id,
+                    trigger_type="EXCITEMENT_SHARE",
+                    topic=event.title,
+                    context=event.description,
+                    urgency=min(event.share_urgency, 0.85),
+                    emotional_weight=max(event.emotional_impact.values()) if event.emotional_impact else 0.5,
+                    prompt_hint=(
+                        f"Something happened {self._when_said(episode.at)} that you're excited about: "
+                        f"{_told(episode)} Share the concrete detail — what actually happened — not a "
+                        f"vague 'I had an epiphany' or 'I cracked the code'."
+                    ),
+                )
+                self._record_life_trigger_cooldown("excitement_share", datetime.now())
+            except Exception:
+                # Matches the sibling trigger handlers: without this the trigger
+                # can be permanently dead in production with zero signal.
+                logger.warning("Life trigger: EXCITEMENT_SHARE dispatch failed", exc_info=True)
+
+    def _addressed_to_her(self, text: str) -> str:
+        """A line of her setting's as her memory keeps it: addressed to her,
+        in the second person ("{Subj} spilled coffee" -> "You spilled
+        coffee"), the user named as her user or "them" -- the form her
+        episodes are quoted back to her in."""
+        return _render_second_person(text, user=self._user_info)
+
+    # ============= Reflection & nostalgia from real history (Task 13) =====
+
+    def _real_nostalgia_episode(self, now: datetime) -> Optional[Episode]:
+        """A real memory old enough to be nostalgic (the Task 13 brief,
+        verbatim: at least NOSTALGIA_MIN_EPISODE_AGE_DAYS simulated days),
+        picked at random among every eligible one (``self._service_rng``:
+        "the service's own direct draws", not delegated to
+        ``MemoryTimeSystem`` -- picking WHICH memory surfaces is hers to
+        make, since she owns the memory stream) -- or ``None`` when she has
+        none yet, so the setting's ten templates
+        (``aura_life.settings.contemporary.NOSTALGIA_MEMORIES``) stay the
+        fallback. A belief is never picked: it is a realization about her
+        life, not a lived moment to feel nostalgic for."""
+        memory = getattr(self, "_memory", None)
+        if memory is None:
+            return None
+        cutoff = timedelta(days=NOSTALGIA_MIN_EPISODE_AGE_DAYS)
+        old_enough = [e for e in memory.episodes if "belief" not in e.tags and (now - e.at) >= cutoff]
+        return self._service_rng.choice(old_enough) if old_enough else None
+
+    def _get_reflection_llm(self):
+        """The LLM client for optional reflection enrichment (``reflection_llm=True``
+        at construction), or ``None`` when the host registered no
+        ``get_llm_service`` hook or asking for it raised -- degrades to the
+        deterministic beliefs, no ERROR (mirrors :meth:`_get_trip_llm`)."""
+        try:
+            from aura_life.hooks import get_llm_service
+            return get_llm_service()
+        except Exception:
+            return None
+
+    def _reflect_with_llm(self, window: List[Episode]) -> None:
+        """One more belief an LLM adds on top of the deterministic ones,
+        from the same reflection window -- only reached when this service
+        was built with ``reflection_llm=True`` (:meth:`_reflect`). Safe-fail
+        like :meth:`_pick_trip_destination`: no client, any exception, or a
+        reply that fails :func:`~aura_life.memory.reflection.validate_llm_belief`
+        (fix round 1, Important 2: a length cap, no digit, no unfilled
+        brace, no bare third-person pronoun, never "the user", one sentence)
+        leaves the deterministic beliefs exactly as they are -- a failed
+        exception logged no louder than DEBUG, a failed validation no
+        louder than WARNING (the reply came from a configured, reachable
+        model; that it answered something unusable is worth knowing, not
+        alarming). Its valence is the reflection window's mean, the same as
+        every deterministic belief (fix round 1, Minor 5) -- not her mood
+        right now, at the moment this happens to run."""
+        llm = self._get_reflection_llm()
+        if llm is None:
+            return
+        gists = "\n".join(f"- {e.gist()}" for e in window[-20:])
+        prompt = (
+            "Here is a short window of a person's own recent memories, most important "
+            "first is not guaranteed -- just what happened, in order:\n"
+            f"{gists}\n"
+            "In one short sentence, addressed to them as \"you\", say one thing this "
+            "adds up to that they might realize about themselves. Reply with ONLY that "
+            "sentence, no quotation marks, no commentary."
+        )
+        try:
+            raw = llm.generate(prompt)
+        except Exception:
+            logger.debug("LLM reflection failed; the deterministic beliefs stand", exc_info=True)
+            return
+        text = validate_llm_belief(raw)
+        if text is None:
+            logger.warning("LLM reflection's reply (%d chars) failed validation; "
+                           "the deterministic beliefs stand", len(str(raw or "")))
+            return
+        self._remember(text, place="", tags=("belief", "llm"), intensity=BELIEF_INTENSITY,
+                       valence=mean_valence(window))
+
+    def _recent_belief_keys(self, now: datetime) -> set:
+        """Every belief pattern key (``aura_life.memory.reflection.BeliefKey``)
+        already believed within BELIEF_REPEAT_COOLDOWN_DAYS simulated days
+        of ``now`` (fix round 1, Important 1) -- read from the belief
+        episodes' own tags (:func:`~aura_life.memory.reflection.belief_key_from_tag`),
+        not a side table: the stream is already the record of what she has
+        concluded and when."""
+        memory = getattr(self, "_memory", None)
+        if memory is None:
+            return set()
+        cutoff = now - timedelta(days=BELIEF_REPEAT_COOLDOWN_DAYS)
+        keys = set()
+        for episode in memory.episodes:
+            if "belief" not in episode.tags or episode.at < cutoff:
+                continue
+            for tag in episode.tags:
+                key = belief_key_from_tag(tag)
+                if key is not None:
+                    keys.add(key)
+        return keys
+
+    def _reflect(self, now: datetime) -> None:
+        """Whether the importance she has lived since her last reflection
+        reaches REFLECTION_THRESHOLD (spec 4.6) and, when it does, what she
+        concludes from it: deterministic beliefs from the window's episode
+        counts and trends (``aura_life.memory.reflection.generate_beliefs``)
+        -- a repeated activity with a person, a recurring place, a mood
+        trend -- each remembered as an episode of her own (``tags=("belief",)``,
+        plus its pattern key, :func:`~aura_life.memory.reflection.belief_key_tag`)
+        and its grounding episodes reinforced (ruling T12-R2: reflection
+        that surfaces an episode reinforces it); then, only when this
+        service was built with ``reflection_llm=True``, one more belief an
+        LLM adds from the same window.
+
+        A pattern already believed within BELIEF_REPEAT_COOLDOWN_DAYS is
+        skipped (fix round 1, Important 1: a belief's TEXT can reword the
+        same conclusion forever -- "You've been at the cafe most days this
+        week." every time she is, in fact, mostly at the cafe). A
+        reflection that finds nothing new this way records nothing.
+
+        The window is every non-belief episode more recent than
+        ``self._last_reflection_at`` (or, with none yet, every one she
+        has). That instant is set the moment the threshold is crossed --
+        whether or not any belief survives the dedup above -- and saved at
+        once (fix round 1, Minor 4): it used to be derived from the most
+        recent belief episode's own timestamp, which MemoryStream's cap
+        could prune, letting a later reflection re-count episodes already
+        reflected on."""
+        memory = getattr(self, "_memory", None)
+        if memory is None:
+            return
+        episodes = memory.episodes
+        window = [e for e in episodes if "belief" not in e.tags
+                  and (self._last_reflection_at is None or e.at > self._last_reflection_at)]
+        if sum(e.importance for e in window) < REFLECTION_THRESHOLD:
+            return
+        self._last_reflection_at = now
+        self._save_reflection_state()
+        recent_keys = self._recent_belief_keys(now)
+        for key, text, grounds in generate_beliefs(window, mood_band=MOOD_VALENCE_BAND):
+            if key in recent_keys:
+                continue
+            people = tuple(dict.fromkeys(person for episode in grounds for person in episode.people))
+            valence = mean_valence(grounds) if grounds else mean_valence(window)
+            belief = self._remember(text, place="", people=people, intensity=BELIEF_INTENSITY,
+                                    valence=valence, tags=("belief", belief_key_tag(key)))
+            if belief is not None:
+                recent_keys.add(key)
+                if grounds:
+                    memory.reinforce(grounds, now=now)
+        if self._reflection_llm:
+            self._reflect_with_llm(window)
+
+    def _chapter_window_stats(self, period_start: datetime, now: datetime) -> Tuple[str, Dict[str, int]]:
+        """What a life chapter synthesised at ``now`` summarises (Task 13,
+        spec 4.6): the dominant activities and the mood of the WHOLE period
+        since ``period_start``, read from her memory stream (Task 12) --
+        never ``_behavior._activity_history`` (its last 50 only, a day or
+        so at production cadence, not a month) or her mood at this one
+        instant (spec 4.6: "not the mood at the moment of writing").
+
+        Her mean valence over the window (0.0, neutral, with no episode in
+        it) and her arousal right now (the library keeps no arousal
+        history to average -- valence is the axis spec 4.6 names) give
+        ``mood_label`` (``aura_life.affect.affect_system``, the same
+        function ``AffectSystem`` itself uses) its point on the mood grid;
+        the label is ``ContinuitySystem.monthly_tick``'s ``dominant_mood``
+        argument, unchanged since Task 12."""
+        memory = getattr(self, "_memory", None)
+        window = [e for e in memory.episodes if period_start <= e.at <= now] if memory else []
+        activity_counts: Dict[str, int] = {}
+        for episode in window:
+            if "activity" in episode.tags:
+                activity_counts[episode.what] = activity_counts.get(episode.what, 0) + 1
+        arousal = self._affect.mood.arousal if self._affect else 0.0
+        return mood_label(mean_valence(window), arousal), activity_counts
 
     def apply_schedule_override(self, action: str) -> None:
         """
         Apply a schedule override from conversation (e.g. user said 'skip work').
 
         Parses the action string and delegates to the appropriate planner method.
-        Which slots are still ahead is judged on the world clock; a duck-typed
-        service with no ``_world_clock`` passes no instant, which is the host's
-        wall clock.
+        Which slots are still ahead, and which is hers now, is judged at her
+        local world time (:func:`_plan_instant`); a duck-typed service without
+        one passes no instant, which is the host's wall clock.
         """
         action_lower = action.strip().lower()
 
         if any(w in action_lower for w in ["cancel work", "call off", "skip work", "no work", "day off"]):
-            clock = getattr(self, "_world_clock", None)
-            now = clock()() if callable(clock) else None
-            self._daily_planner.cancel_work_today(now=now)
+            self._daily_planner.cancel_work_today(now=_plan_instant(self))
 
         elif action_lower.startswith("go to ") or action_lower.startswith("move to "):
             location = action_lower.split("to ", 1)[1].strip()
@@ -1781,20 +2960,18 @@ class LifeService:
             slug = location.lower().replace(" ", "_")
             if slug not in self._location_registry:
                 self._register_user_location(location)
-            self._world.move_to(location)
-            self._daily_planner.override_current_location(location)
+            _move_persona_to(self, location)
+            self._daily_planner.override_current_location(location, now=_plan_instant(self))
 
         elif any(w in action_lower for w in ["stay home", "stay here", "stay in"]):
-            clock = getattr(self, "_world_clock", None)
-            now = clock()() if callable(clock) else None
-            self._daily_planner.stay_at_current_location(now=now)
+            self._daily_planner.stay_at_current_location(now=_plan_instant(self))
 
         else:
             # Generic location move: try to extract a location name
             for key in self._persona_locations:
                 if key.lower() in action_lower:
-                    self._world.move_to(key.lower())
-                    self._daily_planner.override_current_location(key.lower())
+                    _move_persona_to(self, key.lower())
+                    self._daily_planner.override_current_location(key.lower(), now=_plan_instant(self))
                     break
 
         # Persist the updated plan
@@ -1803,10 +2980,8 @@ class LifeService:
 
     def schedule_meeting_arrival(self, location: str) -> None:
         """Update activity, schedule and world location when the persona arrives for a planned meeting."""
-        self._world.move_to(location)
-        clock = getattr(self, "_world_clock", None)
-        now = clock()() if callable(clock) else None
-        self._daily_planner.schedule_rendezvous(location, now=now)
+        _move_persona_to(self, location)
+        self._daily_planner.schedule_rendezvous(location, now=_plan_instant(self))
         self._save_plan()
         logger.info(f"Meeting arrival applied: now at {location}")
 
@@ -1829,11 +3004,11 @@ class LifeService:
         Minutes are accepted/validated for format leniency, but the planner's
         slot granularity is hourly — "19:30" and "19:00" both commit to hour 19.
 
-        "Already passed" is judged on the world clock. The method only needs
-        ``_daily_planner``, ``_location_registry``, ``_register_user_location``
-        and ``_save_plan``, and a host may bind it to a duck-typed stand-in with
-        just those: with no ``_world_clock`` it passes no instant, which is the
-        host's wall clock.
+        "Already passed" is judged at her local world time (:func:`_plan_instant`).
+        The method only needs ``_daily_planner``, ``_location_registry``,
+        ``_register_user_location`` and ``_save_plan``, and a host may bind it
+        to a duck-typed stand-in with just those: with no ``_local_world_now``
+        it passes no instant, which is the host's wall clock.
         """
         text = (raw or "").strip()
         m = re.match(r'^(\d{1,2}):(\d{2})\b\s*(.*)$', text)
@@ -1872,14 +3047,12 @@ class LifeService:
                 except Exception as e:
                     logger.debug(f"add_conversation_plan: could not register location {location!r}: {e}")
 
-        clock = getattr(self, "_world_clock", None)
-        now = clock()() if callable(clock) else None
         self._daily_planner.set_planned_activity(
             hour=hour,
             activity_name=what,
             location=location,
-            reason="agreed with user",
-            now=now,  # "already passed" is the world's hour, not the host's
+            reason=USER_AGREED_REASON,
+            now=_plan_instant(self),  # "already passed" is her hour, not the host's
         )
         self._save_plan()
         logger.info(f"Conversation plan added: {hour:02d}:{minute:02d} -> hour {hour:02d} — {what}" + (f" @ {location}" if location else ""))
@@ -1905,7 +3078,8 @@ class LifeService:
         hourly: the plan fills each hour it touches. A plan for another day is
         recorded and gets its slot when that day's plan is generated.
 
-        ``at`` is a naive datetime on the world clock; names match the circle
+        ``at`` is a naive datetime on the world clock; a persona with a timezone
+        gets the plan at her local hour of that instant. Names match the circle
         case-insensitively. Raises ``ValueError`` for an unknown or empty list of
         people, a blank ``what``, a non-positive duration, a timezone-aware ``at``
         or a start in a past hour of the world's day.
@@ -1915,7 +3089,7 @@ class LifeService:
         for raw in people or []:
             canonical = circle.get(str(raw).strip().lower())
             if canonical is None:
-                raise ValueError(f"unknown person {raw!r}: not in her social circle")
+                raise ValueError(f"unknown person {raw!r}: " + self._render_text("not in {poss} social circle"))
             if canonical not in names:
                 names.append(canonical)
         if not names:
@@ -1940,30 +3114,36 @@ class LifeService:
             if at < o.deadline + timedelta(minutes=o.duration_min) and o.deadline < end:
                 raise ValueError(f"{at.isoformat()} overlaps the plan {o.description!r} at {o.deadline.isoformat()}")
 
-        self._social.add_plan(names, what, at, duration_min)
-        self._apply_social_plans(now)
+        self._social.add_plan(names, what, at, duration_min, now=self._world_clock()())
+        self._apply_social_plans()
         self._save_social_expansion()
         logger.info(f"Social plan added: {at.isoformat()} {what} with {', '.join(names)} ({duration_min} min)")
 
-    def _apply_social_plans(self, now: datetime) -> None:
+    def _apply_social_plans(self) -> None:
         """Put every hour of every social plan that falls on the current daily plan's date into it.
 
-        The day is the daily plan's own ``date`` (the planner dates its plan on the
-        host clock, not the world's), so a plan for tomorrow lands when tomorrow's
+        The day is the daily plan's own ``date``: her local world day (every plan route
+        gives the planner her local world time, ``_plan_instant``; never the host's
+        clock), and each plan's instant (on the world clock) is read as her local
+        world time (:meth:`_local_world_instant`: her own hour of it for a persona
+        with a timezone), so a plan for tomorrow lands when tomorrow's
         plan is generated and a plan that crosses midnight puts its after-midnight
         hours in the next day's plan. A slot already carrying the plan is left alone
-        (re-applying would reopen a finished one). A no-op while no plan exists.
+        (re-applying would reopen a finished one); "already passed" is judged at her
+        local world time, as on every other plan route. A no-op while no plan exists.
         """
         plan = self._daily_planner.current_plan
         if plan is None:
             return
+        now = _plan_instant(self)
         changed = False
         for o in self._social.obligations:
             if not (o.duration_min and o.deadline):
                 continue
             reason = SOCIAL_PLAN_REASON_PREFIX + ", ".join(o.people)
-            end = o.deadline + timedelta(minutes=o.duration_min)
-            hour_start = o.deadline.replace(minute=0, second=0, microsecond=0)
+            start = self._local_world_instant(o.deadline)
+            end = start + timedelta(minutes=o.duration_min)
+            hour_start = start.replace(minute=0, second=0, microsecond=0)
             while hour_start < end:
                 if hour_start.strftime("%Y-%m-%d") == plan.date:
                     slot = plan.get_slot_for_hour(hour_start.hour)
@@ -2002,7 +3182,7 @@ class LifeService:
         # transit state machine, no travel-time estimation.
         if self._is_ai:
             return
-        origin = self._world.current_location or "home"
+        origin = self._current_location or "home"
 
         # Already there — nothing to do
         if origin == destination:
@@ -2026,7 +3206,7 @@ class LifeService:
                 departure_at=now,
                 expected_arrival_at=expected_arrival,
             )
-            self._world.move_to("in transit")
+            _move_persona_to(self, "in transit")
             logger.info(
                 f"Transit started (short trip, skipped prep): "
                 f"{origin} → {destination}, ETA {total_minutes}min"
@@ -2074,16 +3254,14 @@ class LifeService:
         if to_phase == TransitPhase.IN_TRANSIT:
             self._transit.phase = TransitPhase.IN_TRANSIT
             self._transit.departure_at = now
-            self._world.move_to("in transit")
+            _move_persona_to(self, "in transit")
             logger.info(f"Transit phase → IN_TRANSIT: heading to {self._transit.destination}")
 
         elif to_phase == TransitPhase.ARRIVED:
             self._transit.phase = TransitPhase.ARRIVED
             self._transit.arrived_at = now
-            self._world.move_to(self._transit.destination)
-            clock = getattr(self, "_world_clock", None)
-            world_now = clock()() if callable(clock) else None
-            self._daily_planner.schedule_rendezvous(self._transit.destination, now=world_now)
+            _move_persona_to(self, self._transit.destination)
+            self._daily_planner.schedule_rendezvous(self._transit.destination, now=_plan_instant(self))
             self._save_plan()
             logger.info(f"Transit phase → ARRIVED: at {self._transit.destination}")
 
@@ -2133,7 +3311,7 @@ class LifeService:
                 )
                 self._transit.phase = TransitPhase.ARRIVED
                 self._transit.arrived_at = self._transit.expected_arrival_at
-                self._world.move_to(self._transit.destination)
+                _move_persona_to(self, self._transit.destination)
                 self.clear_transit()
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
@@ -2190,7 +3368,8 @@ class LifeService:
             from datetime import datetime
             needs_revert = False
             try:
-                needs_revert = datetime.now() >= datetime.fromisoformat(pl.trip_returns_at)
+                # On the world clock, as _update_trip stamps it (Task 19).
+                needs_revert = self._world_clock()() >= datetime.fromisoformat(pl.trip_returns_at)
             except ValueError:
                 needs_revert = True  # Malformed timestamp — clear defensively.
             if needs_revert:
@@ -2410,9 +3589,8 @@ class LifeService:
             return
 
         from datetime import datetime, timedelta
-        import random as _random_mod
 
-        rng = _rng if _rng is not None else _random_mod
+        rng = _rng if _rng is not None else self._service_rng
         now = _now if _now is not None else datetime.now()
         pl = self._place_location
 
@@ -2531,21 +3709,24 @@ class LifeService:
     def resume_planned_activity(self) -> None:
         """Resume the current planned activity after a conversation concludes.
 
-        Syncs world location to the current plan slot so the persona returns
-        to what she was supposed to be doing (commuting, attending classes, etc.).
-        Also immediately re-evaluates the visual transition so descriptions update.
+        Syncs world location to the current plan slot (at her local world
+        time) so the persona returns to what she was supposed to be doing
+        (commuting, attending classes, etc.) -- unless she is on the way
+        somewhere or inside a housemate's activity she joined
+        (:meth:`_location_held`): that is what she was doing. Also
+        immediately re-evaluates the visual transition so descriptions update.
         """
         plan = self._daily_planner.current_plan
         if not plan:
             return
 
-        slot = plan.get_current_slot()
+        slot = plan.get_current_slot(self._local_world_now())
         if not slot or slot.completed:
             return
 
         planned_location = slot.location or "home"
-        if self._world.current_location != planned_location:
-            self._world.move_to(planned_location)
+        if self._current_location != planned_location and not self._location_held():
+            _move_persona_to(self, planned_location)
             logger.info(
                 f"Resumed planned activity: '{slot.activity_name}' at {planned_location}"
             )
@@ -2599,18 +3780,73 @@ class LifeService:
     def get_current_location(self) -> str:
         """Get current location from the daily planner (single source of truth).
 
-        The planner slot's location is authoritative. The world engine is
-        kept in sync as a side effect.  Falls back to 'home' only when no
-        plan exists yet.
+        The planner slot's location is authoritative: her slot at her local
+        world time (:meth:`_local_world_now`; Task 28 -- it read the host's
+        hour). This persona's own current location (:attr:`_current_location`)
+        is kept in sync as a side effect -- never the (possibly shared)
+        world's directly, see :func:`_move_persona_to`. Falls back to 'home'
+        only when no plan exists yet.
+
+        Never while her place is held (:meth:`_location_held`: on the way
+        somewhere, or inside a housemate's activity she joined): she is where
+        she is, and that is the answer -- a read of her status or her looks
+        must not move her (Task 28 fix round 1).
         """
+        if self._location_held():
+            return (self._current_location or "home").replace("_", " ")
         if self._daily_planner.current_plan:
-            slot = self._daily_planner.current_plan.get_current_slot()
+            slot = self._daily_planner.current_plan.get_current_slot(self._local_world_now())
             if slot and slot.location:
-                # Keep world engine in sync with planner
-                if self._world.current_location != slot.location:
-                    self._world.move_to(slot.location)
+                # Keep this persona's own location in sync with the planner
+                if self._current_location != slot.location:
+                    _move_persona_to(self, slot.location)
                 return slot.location.replace("_", " ")
         return "home"
+
+    def _location_now(self) -> str:
+        """Where she is, as :meth:`get_current_location` answers it, without
+        its sync: she is not moved to her slot's place. What a read that
+        must change nothing uses -- the moment (``context.moment``, ruling
+        T18-R2; Task 18 fix round 1, C1)."""
+        if self._location_held():
+            return (self._current_location or "home").replace("_", " ")
+        if self._daily_planner.current_plan:
+            slot = self._daily_planner.current_plan.get_current_slot(self._local_world_now())
+            if slot and slot.location:
+                return slot.location.replace("_", " ")
+        return "home"
+
+    def _location_held(self) -> bool:
+        """Is she somewhere her plan's place for the hour must not move her
+        from? While a transit is getting ready or under way (the phases
+        ``_perform_activity`` leaves the location to the transit in), and
+        while a housemate's activity she joined is hers (``_joint_until``,
+        on the world clock: :meth:`_join_housemate`)."""
+        transit = getattr(self, "_transit", None)
+        if transit is not None and transit.phase in (TransitPhase.PREPARING, TransitPhase.IN_TRANSIT):
+            return True
+        return self._joint_held()
+
+    def _joint_held(self) -> bool:
+        """Is a housemate's activity she joined still hers (``_joint_until``,
+        on the world clock: :meth:`_join_housemate`)? The joint half of
+        :meth:`_location_held`."""
+        joint_until = getattr(self, "_joint_until", None)
+        return joint_until is not None and self._world_clock()() < joint_until
+
+    def _activity_instant(self) -> datetime:
+        """The instant her plan is read at for what she is doing: her local
+        world time (:meth:`_local_world_now`) -- but while a housemate's
+        activity she joined holds her where it is (:meth:`_joint_held`, the
+        rule :meth:`_location_held` follows), the local instant she joined it,
+        so her current activity, the "Right now" line, her next activity and
+        the plan a digest pass reads all say the joint activity, where she is,
+        through the window's tail into the next hour; after it, her plan's
+        hour again (humanness Task 19, ruling T19-R5)."""
+        joint_at = getattr(self, "_joint_at", None)
+        if joint_at is not None and self._joint_held():
+            return joint_at
+        return self._local_world_now()
 
     @staticmethod
     def _weather_mood_enabled() -> bool:
@@ -2620,12 +3856,17 @@ class LifeService:
         return _os.environ.get("AURA_WEATHER_MOOD_ENABLED", "true").lower() in ("true", "1", "yes")
 
     @staticmethod
-    def _mood_to_valence(label: str, intensity: float) -> float:
-        """Map a mood label + intensity to a 0..1 valence (1 = good, 0 = bad).
+    def _mood_to_valence(label: str, intensity: float, valence: Optional[float] = None) -> float:
+        """Map mood to a 0..1 valence (1 = good, 0 = bad).
 
         Single source of truth shared by the Shadow tick and the mental-health
-        read-out so the two never drift apart.
+        read-out so the two never drift apart. Both pass ``valence``, the
+        mood's own -1..1 valence (``AffectSystem.mood.valence``), which this
+        rescales. Without it -- the form a host may still call -- it maps the
+        retired one-axis labels as it always did, and any other label reads 0.5.
         """
+        if valence is not None:
+            return 0.5 + 0.5 * max(-1.0, min(1.0, valence))
         if label == "content":
             return 0.5 + 0.5 * intensity
         if label == "blue":
@@ -2646,7 +3887,8 @@ class LifeService:
         # --- Affect: mood (higher=better), stress + loneliness (inverted) ---
         try:
             mood_valence = self._mood_to_valence(
-                self._affect.mood.current_mood, self._affect.mood.intensity
+                self._affect.mood.current_mood, self._affect.mood.intensity,
+                valence=self._affect.mood.valence,
             )
             stress = max(0.0, min(1.0, self._affect.stress.level))
             loneliness = max(0.0, min(1.0, self._affect.loneliness.level))
@@ -2727,12 +3969,24 @@ class LifeService:
         current_activity_emoji = None
         _scheduled_act = ""
         if self._daily_planner.current_plan:
-            slot = self._daily_planner.current_plan.get_current_slot()
+            # Inside a housemate's activity she joined, at when she joined it
+            # (_activity_instant, Task 19): the slot of where she is held.
+            slot = self._daily_planner.current_plan.get_current_slot(self._activity_instant())
             if slot:
                 _scheduled_act = slot.activity_name
         _effective_act = self.effective_current_activity(_scheduled_act)
         if _effective_act:
-            current_activity = _effective_act.capitalize()
+            # The activity id itself ("thinking about user") stays the stable
+            # internal key -- related_activities lists and SKILL_MAPPINGS-style
+            # lookups match on it elsewhere. Only the human-facing status-bar
+            # string swaps "user" for the real name/them, so the id is never
+            # renamed out from under those comparisons.
+            _display_act = self._activity_for_display(_effective_act)
+            # str.capitalize() lowercases every OTHER character too, which
+            # mangles a real name substituted in above ("Thinking about
+            # Sarah" -> "Thinking about sarah"). Uppercase only the first
+            # character; leave the rest -- including any name -- alone.
+            current_activity = _display_act[:1].upper() + _display_act[1:]
             current_activity_emoji = self._emoji_for_activity(_effective_act)
 
         current_location = self.get_current_location()
@@ -2757,10 +4011,10 @@ class LifeService:
             "locations_visited_today": len(self._locations_visited_today),
             "consecutive_home_hours": self._consecutive_home_ticks,
             # Detailed nested data (for debugging / future use)
-            "world": self._world.get_status(),
+            "world": self._world_status(),
             "energy": energy,
             "desire": self._desire_system.get_status(),
-            "goals": self._goal_engine.get_status(),
+            "goals": self._goal_engine.get_status(now=self._world_clock()()),
             "planner": {
                 "has_plan": self._daily_planner.current_plan is not None,
                 "plan_date": self._daily_planner.current_plan.date if self._daily_planner.current_plan else None,
@@ -2781,7 +4035,7 @@ class LifeService:
                 name: round(sp.level, 3)
                 for name, sp in self._skills.items()
             },
-            "social": self._social.get_status(),
+            "social": {**self._social.get_status(), "household": self._household_export()},
             "identity": self._identity.get_status(),
             "affect": self._affect.get_status(),
             "body": self._body.get_status(),
@@ -2792,7 +4046,9 @@ class LifeService:
             "drive": self._drive.get_status(),
             "behavior": self._behavior.get_status(),
             "memory_time": self._memory_time.get_status(),
-            "expression": self._expression.get_status(),
+            # depth now, regressed by any silence (as relationship_depth and
+            # the export give it), not as of the user's last turn
+            "expression": {**self._expression.get_status(), "depth": round(self.relationship_depth, 3)},
             "continuity": self._continuity.get_status(),
             "character_evolution": self._character_evolution.get_status(),
             "chaos": self._chaos.get_status(),
@@ -2821,12 +4077,276 @@ class LifeService:
                     "home_type": self._room_state.home_type,
                 },
                 "finance": self._finance.get_status(),
-                "career": self._career.get_status(now=self._world_clock()()),
+                "career": self._render_career_status(self._career.get_status(now=self._world_clock()())),
                 "errands": self._errands.get_status(),
                 "places": self._location.get_status(),
                 "transport": self._transport.get_status(self._transit),
             })
         return status
+
+    def _activity_for_display(self, name: str) -> str:
+        """An activity id as she would say it: "user" -- the id of her
+        "thinking about user" -- as her user's name, or "them"."""
+        return name.replace("user", self._user_ref()) if "user" in name else name
+
+    # ============= Household (Task 11, spec section 4.5) =============
+
+    def _housemates(self) -> list:
+        """The services of the people she lives with, joined now (none for a
+        stand-in built without ``__init__``, as for one living alone)."""
+        household = getattr(self, "_household", None)
+        return household.housemates(self) if household is not None else []
+
+    def _npc_for(self, other) -> Optional[NPC]:
+        """Her social-circle entry for housemate ``other``: the one whose name
+        is ``other``'s persona id or definition name, compared
+        case-insensitively; ``None`` when she has none."""
+        keys = {str(other._persona_id or "").strip().lower(),
+                str(getattr(other._definition, "name", "") or "").strip().lower()} - {""}
+        for npc in self._social._npcs.values():
+            if npc.name.strip().lower() in keys:
+                return npc
+        return None
+
+    def _housemate_name(self, other) -> str:
+        """How she names housemate ``other``: as her social circle does, else
+        by ``other``'s definition name, else by ``other``'s persona id."""
+        npc = self._npc_for(other)
+        if npc is not None and npc.name.strip():
+            return npc.name.strip()
+        name = str(getattr(other._definition, "name", "") or "").strip()
+        return name or str(other._persona_id)
+
+    def _housemate_npc_names(self) -> set:
+        """Her social-circle names for the housemates joined now: their own
+        lives run beside hers, so they draw no ordinary NPC event
+        (``SocialSystem.tick``'s ``skip``). One she expects who is not joined
+        is not here: her entry is an ordinary NPC."""
+        names = set()
+        for other in self._housemates():
+            npc = self._npc_for(other)
+            if npc is not None:
+                names.add(npc.name)
+        return names
+
+    def _household_state_now(self) -> HousemateState:
+        """What she shows the people she lives with, read from her live state
+        now (:class:`~aura_life.social.household.HousemateState`): whether she
+        is asleep, where she is, and her last activity -- none while she
+        sleeps, and none when it was one of her intimate activities: what she
+        does in private is hers alone."""
+        asleep = bool(self.is_asleep())
+        transit = self._transit
+        in_transit = bool(transit is not None and transit.phase == TransitPhase.IN_TRANSIT)
+        doing = ""
+        if not asleep and self._recent_activities:
+            last = self._recent_activities[0].activity_name
+            private = {activity.name for activity in self._setting.intimate_catalogue()}
+            if last not in self._setting.names_tagged("sleep") and last not in private:
+                doing = self._activity_for_display(last)
+        return HousemateState(
+            asleep=asleep,
+            location=self._current_location or "home",
+            in_transit=in_transit,
+            destination=transit.destination if in_transit else "",
+            activity=doing,
+        )
+
+    def _publish_household_state(self) -> None:
+        """Publish what the people she lives with see of her
+        (:meth:`_household_state_now`) -- at the end of each of her ticks, and
+        when she is built, loaded or joins a housemate. Read under the
+        household's lock, so no housemate's activity tick writes into her
+        meanwhile, and swapped in whole: a view read on another thread gets
+        this state or the one before, never half of each. Nothing when she
+        lives alone."""
+        household = getattr(self, "_household", None)
+        if household is None:
+            return
+        with household.lock:
+            self._household_state = self._household_state_now()
+
+    def _housemate_view(self, other) -> dict:
+        """What she knows of housemate ``other``: the state ``other``
+        published at the end of her last tick (:meth:`_publish_household_state`
+        -- never ``other``'s live fields, which her running tick may be
+        halfway through changing), and never saved on this side. Whether she
+        is asleep, where she is (and whether that is where this persona is),
+        and what she is doing."""
+        state = getattr(other, "_household_state", None) or HousemateState()
+        return {
+            "persona_id": other._persona_id,
+            "name": self._housemate_name(other),
+            "asleep": state.asleep,
+            "location": state.location,
+            "in_transit": state.in_transit,
+            "destination": state.destination,
+            "activity": state.activity,
+            "here": not state.in_transit and state.location == self._current_location,
+        }
+
+    def _household_views(self) -> List[dict]:
+        """Every housemate joined now, as she knows them (:meth:`_housemate_view`),
+        in the order they joined -- what her life context tells."""
+        return [self._housemate_view(other) for other in self._housemates()]
+
+    def _household_export(self) -> dict:
+        """Her household for ``get_status()`` and ``export_outer_state()``
+        (``["social"]["household"]``): the housemates joined now
+        (:meth:`_household_views`), the persona ids her definition expects
+        (``PersonalityDefinition.household``, lower-cased), and those of them
+        not joined."""
+        definition = getattr(self, "_definition", None)
+        household = getattr(self, "_household", None)
+        raw = (getattr(definition, "household", None) or []) if definition is not None else []
+        expected = [str(pid).strip().lower() for pid in raw if str(pid).strip()]
+        joined = set(household.member_ids()) if household is not None else set()
+        return {
+            "members": self._household_views(),
+            "expected": expected,
+            "missing": [pid for pid in expected if pid not in joined],
+        }
+
+    def _invite_housemates(self, activity, in_transit: bool) -> list:
+        """Who joins her in ``activity``, which she is about to do: the
+        housemates free for it (:meth:`_free_to_join`), when it is a joint
+        activity (tag "joint"), she is not on the way anywhere, and her own
+        household roll (``self._joint_chance``, on her own "household"
+        stream -- no one else's draws move) says she asks. Each as
+        ``(housemate, the housemate's own activity of that name, her plan's
+        slot for the hour)``, in the order they joined; none, most ticks."""
+        if self._household is None or "joint" not in activity.tags or in_transit:
+            return []
+        now = self._world_clock()()
+        joiners = []
+        for other in self._housemates():
+            try:
+                fit = other._free_to_join(activity.name, self._current_location, now)
+            except Exception:
+                # A housemate whose state cannot be read is not free: her
+                # failure must not take this tick down with it.
+                logger.debug("Housemate %r could not be asked in", getattr(other, "_persona_id", None),
+                             exc_info=True)
+                fit = None
+            if fit is not None:
+                joiners.append((other,) + fit)
+        if not joiners or self._household_rng.random() >= self._joint_chance:
+            return []
+        return joiners
+
+    def _joint_sides(self, joiners: list) -> tuple:
+        """Her side of doing it with ``joiners`` and each joiner's
+        (:class:`~aura_life.social.household.JointSide`): whom each does it
+        with, as each names them, and the line each one's log adds -- hers,
+        that they joined her; each of theirs, that she joined the one who
+        asked (JOINT_LINES, drawn on her household stream). Where the joiners
+        go is set once she is there."""
+        others = [other for other, _, _ in joiners]
+        names = [self._housemate_name(other) for other in others]
+        mine = JointSide(
+            with_name=name_list(names),
+            npc_names=tuple(npc.name for npc in (self._npc_for(other) for other in others) if npc is not None),
+            line=self._household_rng.choice(JOINT_LINES["initiator"]),
+            names=tuple(names),
+        )
+        theirs = []
+        for other in others:
+            npc = other._npc_for(self)
+            name = other._housemate_name(self)
+            theirs.append(JointSide(
+                with_name=name,
+                npc_names=(npc.name,) if npc is not None else (),
+                line=self._household_rng.choice(JOINT_LINES["joiner"]),
+                names=(name,),
+            ))
+        return mine, theirs
+
+    def _free_to_join(self, activity_name: str, place: str, now: datetime):
+        """Can she join a housemate's ``activity_name`` at ``place`` at the
+        world instant ``now``? ``(her Activity of that name, her plan's slot
+        for the hour)`` when she can, else ``None``.
+
+        She can when she is awake -- and, a persona who sleeps, outside her
+        sleep window now and for the activity interval to come
+        (LifeScheduler.TICK_INTERVAL_MINUTES), so she never joins in on her
+        way to bed -- where the housemate is, not on the way anywhere, not
+        already in a housemate's activity, and has not acted at this very
+        instant (a lock-step driver ticks both at one instant: the one whose
+        tick comes first does the asking); when the activity is hers to take
+        up (:meth:`_excluded_activities`), she has the energy for it (forced
+        to rest, only if it is rest), and the social battery
+        (``SocialSystem.should_decline_social``); and when her plan leaves the
+        hour free -- or plans that very activity: never a commitment or
+        another anchor."""
+        if self.is_asleep():
+            return None
+        if self._joint_until is not None and now < self._joint_until:
+            return None
+        if self._activity_tick_at is not None and self._activity_tick_at == now:
+            return None
+        if self._transit is not None and self._transit.phase in (TransitPhase.PREPARING, TransitPhase.IN_TRANSIT):
+            return None
+        if self._current_location != place:
+            return None
+        local = self._local_world_now()
+        if not self._is_ai:
+            interval = timedelta(minutes=LifeScheduler.TICK_INTERVAL_MINUTES["activity"])
+            if self._energy.in_sleep_window(local) or self._energy.in_sleep_window(local + interval):
+                return None
+        activity = self._activity_engine.get_activity(activity_name)
+        if activity is None or activity.name in self._excluded_activities():
+            return None
+        if self._energy.effective_level < activity.min_energy:
+            return None
+        if self._energy.should_rest() and activity.category != ActivityCategory.REST:
+            return None
+        if self._social.should_decline_social():
+            return None
+        slot = self._daily_planner.get_planned_activity(local.hour)
+        if slot is not None and slot.activity_name != activity.name and not self._daily_planner.is_free_time(slot):
+            return None
+        return activity, slot
+
+    def _join_housemate(self, activity, planned_slot, side: JointSide) -> None:
+        """She joins a housemate in ``activity`` (the housemate's activity
+        tick calls this, holding the household's lock): she does it now,
+        through her own pipeline (:meth:`_perform_activity`), where the
+        housemate is (``side.place``), and it takes her next activity tick
+        within one activity interval (LifeScheduler.TICK_INTERVAL_MINUTES) --
+        so she does it once.
+
+        Joining takes her hour (Task 28, ruling T13-R1): her plan's slot for
+        it becomes the activity where the housemate is, "with" whom she does
+        it (``DailyPlanner.join_activity``, the schedule overrides' own
+        mechanism), before she does it -- so the sync of her plan at the end
+        of it (:meth:`get_current_location`) and every later one keeps her
+        there, and the rest of the hour is the activity."""
+        interval = timedelta(minutes=LifeScheduler.TICK_INTERVAL_MINUTES["activity"])
+        self._joint_until = self._world_clock()() + interval
+        self._joint_at = self._local_world_now()
+        self._daily_planner.join_activity(activity.name, side.place or self._current_location,
+                                          reason=f"with {side.with_name}", now=self._joint_at)
+        self._perform_activity(activity, planned_slot, joint=side)
+        self._publish_household_state()
+
+    def _on_housemate_company(self, side: JointSide, activity_name: str) -> None:
+        """The company of the housemate(s) she did ``activity_name`` with: a
+        meaningful interaction for her loneliness
+        (``AffectSystem.on_social_interaction``), a cost to her social
+        battery, and -- for each she has in her social circle -- an
+        interaction on their relationship arc and a shared memory in how she
+        sees them."""
+        self._affect.on_social_interaction(meaningful=True, now=self._world_clock()())
+        self._social.drain_social_battery()
+        memory = f"{activity_name[:1].upper()}{activity_name[1:]} with {side.with_name}"
+        for name in side.npc_names:
+            self._social.update_arc(name, "interaction", now=self._world_clock()())
+            npc = self._social._npcs.get(name)
+            self._identity.update_from_social_event(SocialEvent(
+                npc_name=name, event_type="hangout", description=memory,
+                timestamp=self._world_clock()(), kind=npc.kind if npc is not None else DEFAULT_NPC_KIND,
+                valence=1.0,
+            ))
 
     # ============= Tick Handlers =============
 
@@ -2842,22 +4362,25 @@ class LifeService:
             pass
 
     def _on_plan_tick(self) -> None:
-        """Handle plan tick - generate daily plan if needed."""
-        if self._daily_planner.needs_new_plan():
+        """Handle plan tick - generate daily plan if needed. Her plan is for
+        her local world day, and its revision is of the hours still ahead of
+        her local world time (:meth:`_local_world_now`; Task 28)."""
+        local_now = self._local_world_now()
+        if self._daily_planner.needs_new_plan(now=local_now):
             # Reset daily flags for new day
             self._basic_needs.showered_today = False
             self._basic_needs.morning_routine_done = False
             self._sustenance.reset_daily()
             self._room_state.candle_lit = False
             self._room_state.music_playing = False
-            self._body.on_new_day()
+            self._body.on_new_day(now=self._world_clock()())
             self._reset_visual_moment()
 
             # Rotate music obsession every few days
-            if random.random() < 0.2:
+            if self._service_rng.random() < 0.2:
                 music = self._media_preferences.get("music", [])
                 if music:
-                    self._media.current_music_obsession = random.choice(music)
+                    self._media.current_music_obsession = self._service_rng.choice(music)
 
             self._daily_planner.generate_daily_plan(
                 goals=self._goal_engine.active_goals,
@@ -2865,9 +4388,10 @@ class LifeService:
                 available_activities=self._activity_engine.get_all_activities(),
                 recent_activity_names=[a.activity_name for a in self._recent_activities[:5]],
                 work_schedule=self._career_schedule(),
+                now=local_now,
                 habits=self._habit_factors(),
             )
-            self._apply_social_plans(self._world_clock()())
+            self._apply_social_plans()
             self._save_plan()
             logger.info("Generated new daily plan")
         else:
@@ -2877,24 +4401,28 @@ class LifeService:
                 energy_level=self._energy.effective_level,
                 mood=self._affect.mood.current_mood if self._affect else "",
                 mood_intensity=self._affect.mood.intensity if hasattr(self._affect.mood, 'intensity') else 0,
+                now=local_now,
             )
-            self._apply_social_plans(self._world_clock()())
+            self._apply_social_plans()
+        self._publish_household_state()
 
     def _on_world_tick(self) -> None:
         """Handle world tick. Skips if world is externally managed (shared)."""
         if not self._shared_world:
             self._world.tick()
-            logger.debug(f"World tick: {self._world.weather.value}, {self._world.time_of_day.value}")
+            logger.debug(f"World tick: {self._world.weather.value}, {self._persona_time_of_day.value}")
         # Real weather override — runs whether or not the world was ticked here,
         # because the persona's location state may have changed independently.
         self._update_weather()
-        # Trip lifecycle — per-day roll; return check on every tick.
-        self._update_trip()
+        # Trip lifecycle — per-day roll; return check on every tick, on the
+        # world clock (Task 19: it read the host's).
+        self._update_trip(_now=self._world_clock()())
+        self._publish_household_state()
 
     def _on_energy_tick(self) -> None:
         """Handle energy tick."""
-        self._energy.tick(self._world.time_of_day)
-        self._desire_system.tick(self._world.time_of_day, self._world.weather)
+        self._energy.tick(self._persona_time_of_day)
+        self._desire_system.tick(self._persona_time_of_day, self._world.weather, now=self._world_clock()())
         self._identity.tick()
 
         # Tick behavioral tendencies with cross-engine state
@@ -2906,28 +4434,37 @@ class LifeService:
             mood=self._affect.mood.current_mood if self._affect else "neutral",
         )
 
-        # Route struggle effects to affect/cognitive
+        # What weighs on her (Task 15): each producer below raises or holds
+        # its stressor while its cause holds and resolves it once the cause is
+        # gone, at this tick's world instant (an episode lapses by itself,
+        # after her mood's valence half-life -- affect's STRESSOR_KINDS).
+        _stress_now = self._world_clock()()
+
+        # Route struggle effects to affect/cognitive: a struggle flaring up
+        # is an episode, named in her own words for it.
         for struggle in self._identity.get_pending_struggle_effects():
-            self._affect.on_stressor_added(f"struggle:{struggle}")
-            if self._random.random() < 0.5:
+            self._affect.raise_stressor("struggle", now=_stress_now, what=struggle)
+            if self._service_rng.random() < 0.5:
                 self._cognitive.on_conflict(struggle)
 
         # === Physical-life engines (humans only — an AI doesn't eat or keep a home) ===
         if not self._is_ai:
-            # Sustenance: hunger / nutrition
-            self._sustenance.tick()
-            if self._sustenance.hunger > 0.7:  # high hunger drains energy
-                self._energy._state.level = max(0.1, self._energy._state.level - 0.01)
-            # Habitation: living space
-            self._habitation.tick(self._world.time_of_day)
-            if self._habitation.comfort < 0.35:  # a bleak, messy space is a mild stressor
-                if "messy space" not in list(self._affect._stress.sources):
-                    self._affect.on_stressor_added("messy space")
+            # Sustenance: hunger / nutrition, per world hour since the last
+            # sustenance tick (ruling T4-R4) -- they were per call, so the
+            # host's tick rate set how fast she starved. High hunger drains
+            # her energy per waking hour, never while she sleeps.
+            self._tick_sustenance()
+            # Habitation: living space -- a bleak, messy one is a mild
+            # stressor, until she tidies it (HabitationSystem.COMFORT_BLEAK).
+            self._habitation.tick(self._persona_time_of_day)
+            self._affect.hold_stressor("home", self._habitation.comfort < COMFORT_BLEAK, now=_stress_now)
 
-        # === Body tick ===
+        # === Body tick === (her plan's slot at her local world time; in a
+        # joint window's tail, the instant she joined: what she is doing,
+        # T19-R5)
         current_activity = ""
         if self._daily_planner.current_plan:
-            slot = self._daily_planner.current_plan.get_current_slot()
+            slot = self._daily_planner.current_plan.get_current_slot(self._activity_instant())
             if slot:
                 current_activity = slot.activity_name
         self._body.tick(
@@ -2937,6 +4474,7 @@ class LifeService:
             stress_level=self._affect.stress.level,
             # Self-image is dragged down by shame (routed from Shadow via LifeService).
             shame=self._shadow.get_status().get("shame", 0.0) if self._shadow else 0.0,
+            now=_stress_now,
         )
 
         # === Hormonal modifiers routing ===
@@ -2956,17 +4494,26 @@ class LifeService:
         if inebriation_fx.get("is_inebriated"):
             self._cognitive._focus.quality = max(0.0,
                 self._cognitive._focus.quality - inebriation_fx["focus_penalty"] * 0.1)
-        if inebriation_fx.get("is_hungover"):
-            if "hangover" not in [s for s in self._affect._stress.sources]:
-                self._affect.on_stressor_added("hangover")
+        # A hangover weighs on her while it lasts.
+        self._affect.hold_stressor("hangover", bool(inebriation_fx.get("is_hungover")), now=_stress_now)
+
+        # === The day's quality (ruling T14-R1) === drawn at her first waking
+        # tick of a day (keyed by her last wake) outside her sleep window,
+        # before the tick that feels it.
+        self._draw_day_quality()
 
         # === Affect tick ===
-        self._affect.tick(
-            body_state={"hunger": self._basic_needs.hunger, "hours_awake": self._energy.hours_awake},
-            social_state={"recent_events": self._social.get_recent_events() if hasattr(self._social, 'get_recent_events') else []},
-            weather=self._world.weather.value if hasattr(self._world.weather, 'value') else str(self._world.weather),
-            season=self._world.season.value if hasattr(self._world.season, 'value') else str(self._world.season),
-        )
+        # Mood's half-lives run on the world hours since the last affect tick,
+        # on the world clock like energy and sanity; the stamp is taken at
+        # construction and again on reload, so downtime is not charged as
+        # lived time (see _tick_sanity).
+        _affect_now = self._world_clock()()
+        _affect_hours = max(0.0, (_affect_now - self._affect_ticked_at).total_seconds() / 3600)
+        self._affect_ticked_at = _affect_now
+        # Asleep: the service's answer, not the energy system's flag: the wake
+        # button wakes her here (force_wake) and leaves that flag set.
+        self._tick_affect(_affect_hours, _affect_now, asleep=self.is_asleep())
+        self._decay_emotion_engine()
 
         # === Weather → Affect mood nudge (human-only, on weather CHANGE) ===
         # Route a one-shot bounded nudge when the weather label changes so the push
@@ -2979,14 +4526,18 @@ class LifeService:
                     self._affect.on_weather_nudge(_delta * WEATHER_MOOD_WEIGHT)
                 self._last_weather_label = _cur_w
 
-        # === Life Events: record intense emotional moments ===
+        # === Life Events: record a mood-label change (throttled) ===
+        # on_mood_change fires only when affect.mood.current_mood differs
+        # from the label at her last mood life-event, and at most once every
+        # MOOD_EVENT_MIN_HOURS simulated hours -- replaces recording on every
+        # energy tick (Task 5 / humanness Sec 4.9). `_affect_now` is this same
+        # tick's world-clock instant, already read above for the affect tick.
         mood_intensity = self._affect.mood.intensity if hasattr(self._affect.mood, 'intensity') else 0
-        if mood_intensity > 0.5:
-            life_event = self._life_events.on_emotion_event(
-                self._affect.mood.current_mood, mood_intensity
-            )
-            if life_event:
-                self._bridge_life_event(life_event)
+        life_event = self._life_events.on_mood_change(
+            self._affect.mood.current_mood, mood_intensity, _affect_now
+        )
+        if life_event:
+            self._bridge_life_event(life_event)
 
         # === Cognitive tick ===
         self._cognitive.tick(
@@ -2994,6 +4545,7 @@ class LifeService:
             stress_level=self._affect.stress.level,
             sleep_quality=self._body.sleep_quality.last_quality,
             hunger=self._basic_needs.hunger,
+            now=_stress_now,
         )
         # Awareness (from Energy) modulates focus — foggy/barely-present dampens it.
         _awareness = self._energy.awareness()
@@ -3004,11 +4556,14 @@ class LifeService:
 
         # === Shadow tick (inner dark psychology) ===
         # Reuse the same affect-derived signals the cognitive/affect ticks use.
-        # Mood is a string label + intensity; map it to a 0..1 valence
-        # (1 = good, 0 = bad) the Shadow engine expects.
+        # Mood's -1..1 valence, rescaled to the 0..1 valence (1 = good,
+        # 0 = bad) the Shadow engine expects.
         _mood_label = self._affect.mood.current_mood if self._affect else "neutral"
         _mood_intensity = self._affect.mood.intensity if self._affect else 0.0
-        _mood_valence = self._mood_to_valence(_mood_label, _mood_intensity)
+        _mood_valence = self._mood_to_valence(
+            _mood_label, _mood_intensity,
+            valence=self._affect.mood.valence if self._affect else None,
+        )
         self._shadow.tick(
             stress=self._affect.stress.level,
             loneliness=self._affect.loneliness.level,
@@ -3018,22 +4573,30 @@ class LifeService:
         # === Sanity tick (the interior that integrates and can break) ===
         self._tick_sanity()
 
-        # === Drive tick ===
-        self._drive.tick()
+        # === Drive tick === (on the world clock, Task 19)
+        self._drive.tick(now=_stress_now)
         self._drive.roll_avoidance()
-        # Feed avoidance guilt into affect stress
-        for stressor in self._drive.get_guilt_stressors():
-            self._affect.on_stressor_added(f"avoiding: {stressor}")
+        # What she is putting off weighs on her once its guilt has grown
+        # (DriveSystem.put_off): one stressor, named for what she has put off
+        # most, weighing a hassle's worth when she has put off as much as she
+        # can at full guilt (DriveSystem.put_off_share) and a share of one
+        # for less -- four things put off are one weight in her day, not
+        # four. It lifts when she gets to them.
+        put_off = self._drive.put_off()
+        self._affect.hold_stressor("put_off", bool(put_off), now=_stress_now, share=self._drive.put_off_share(),
+                                   **({"what": put_off[0]} if put_off else {}))
 
         # === Social expansion tick ===
-        self._social.tick_arcs()
-        self._social.tick_obligations()
+        # On the world clock, as their stamps are (Task 19).
+        self._social.tick_arcs(now=_stress_now)
+        self._social.tick_obligations(now=_stress_now)
         self._social.prune_plans(self._world_clock()())
-        self._social.tick_conflicts()
+        self._social.tick_conflicts(now=_stress_now)
         self._social.recharge_social_battery()
-        # Feed overdue obligations into affect stress
-        for obligation in self._social.get_overdue_obligations():
-            self._affect.on_stressor_added(f"overdue: {obligation}")
+        # An overdue obligation weighs on her until she keeps it.
+        self._affect.hold_stressors("obligation", [{"what": obligation}
+                                                   for obligation in self._social.get_overdue_obligations()],
+                                    now=_stress_now)
 
         # === Career / Finance / Errands (humans only) ===
         # On the world clock, the way the catch-up path already ticks them
@@ -3046,35 +4609,50 @@ class LifeService:
         # is ``datetime.now()`` exactly as before (see :meth:`_world_clock`).
         # Work stress is asked on the same instant: a bare ``work_stress()``
         # answered ``on_shift`` from the host's weekday and hour, so the hour
-        # the process ran decided whether "work stress" reached affect.
+        # the process ran decided whether work reached affect as a stressor.
         if not self._is_ai:
             _world_now = self._world_clock()()
-            self._career.tick(now=_world_now)
+            _work_event = self._career.tick(now=_world_now)
+            if _work_event:
+                # A good or bad day at work moves her mood, and she keeps it
+                # (Task 12), in her setting's words addressed to her.
+                work_emotions = self._setting.work_event_emotions.get(_work_event, {})
+                self._feel(work_emotions)
+                self._remember(self._addressed_to_her(_work_event), emotions=work_emotions, tags=("work",))
             if self._career.monthly_salary > 0:
                 self._finance.state.monthly_income = self._career.monthly_salary
-            if self._career.work_stress(now=_world_now) >= 0.5:
-                if "work stress" not in list(self._affect._stress.sources):
-                    self._affect.on_stressor_added("work stress")
+            # Work weighs on her while her shift's workload does (work
+            # stress at 0.5 or more, as it always has), by how much it is:
+            # the end of her shift ends it. Money worries while money is
+            # tight (financial stress at 0.4 or more), by how tight, on
+            # FinanceSystem's own scale (MAX_FINANCIAL_STRESS): money coming
+            # in ends them. Errands piling up while three or more are
+            # overdue, by how many of the most the backlog holds
+            # (errands MAX_TOTAL): an errand done ends it.
+            _work_stress = self._career.work_stress(now=_world_now)
+            self._affect.hold_stressor("work", _work_stress >= 0.5, now=_stress_now, share=_work_stress)
 
             self._finance.tick(now=_world_now)
-            if self._finance.financial_stress() >= 0.4:
-                if "money worries" not in list(self._affect._stress.sources):
-                    self._affect.on_stressor_added("money worries")
+            _money_stress = self._finance.financial_stress()
+            self._affect.hold_stressor("money", _money_stress >= 0.4, now=_stress_now,
+                                       share=_money_stress / MAX_FINANCIAL_STRESS)
 
             self._errands.tick(now=_world_now)
-            if self._errands.overdue_count >= 3:
-                if "errands piling up" not in list(self._affect._stress.sources):
-                    self._affect.on_stressor_added("errands piling up")
+            self._affect.hold_stressor("errands", self._errands.overdue_count >= 3, now=_stress_now,
+                                       share=self._errands.overdue_count / ERRANDS_MAX_TOTAL)
 
         # === Behavior tick (ambient senses) ===
         self._behavior.tick(
-            location=self._world.current_location or "home",
+            location=self._current_location or "home",
             weather=self._world.weather.value if hasattr(self._world.weather, 'value') else str(self._world.weather),
-            time_of_day=self._world.time_of_day.value if hasattr(self._world.time_of_day, 'value') else str(self._world.time_of_day),
+            time_of_day=self._persona_time_of_day.value if hasattr(self._persona_time_of_day, 'value') else str(self._persona_time_of_day),
         )
 
         # === Expression tick (connection awareness) ===
         self._expression.tick()
+        # Relationship stage from depth at the world instant (Task 16b): a
+        # week of silence can lower it before the user's next turn
+        self._expression.refresh_stage(self._world_clock()(), self.last_user_turn_at)
 
         # === Continuity tick (daily/weekly cycles) ===
         # On the world clock, gate and stamps alike: the cycles compare ``now``
@@ -3120,10 +4698,11 @@ class LifeService:
         # Monthly continuity synthesis (life chapters, every 30 days)
         if (not self._continuity._last_monthly_tick or
                 (now - self._continuity._last_monthly_tick).total_seconds() > 2592000):
-            # Gather month's data for chapter synthesis
-            from collections import Counter
-            activity_counts = dict(Counter(self._behavior._activity_history))
-            mood_str_month = self._affect.mood.current_mood if self._affect else "neutral"
+            # Gather month's data for chapter synthesis: the WHOLE period's
+            # dominant activities and mean-valence mood (Task 13), not the
+            # last 50 activities or the mood at this one instant.
+            period_start = self._continuity._last_monthly_tick or now
+            mood_str_month, activity_counts = self._chapter_window_stats(period_start, now)
             avg_energy_month = self._energy.level
             completed = [g.title for g in self._goal_engine.completed_goals[-5:]
                          if g.completed_at and (now - g.completed_at).days <= 35]
@@ -3158,6 +4737,7 @@ class LifeService:
             inside_joke_count=len(self._identity.get_inside_jokes()),
         )
         if milestone:
+            milestone.description = self._render_text(milestone.description)
             self._create_shareable_from_text(
                 f"A milestone: {milestone.name} — {milestone.description}",
                 context="Looking back",
@@ -3175,7 +4755,7 @@ class LifeService:
         # === Memory & Time tick ===
         mood_str = self._affect.mood.current_mood if self._affect else "neutral"
         season_str = self._world.season.value if hasattr(self._world.season, 'value') else str(self._world.season)
-        tod_str = self._world.time_of_day.value if hasattr(self._world.time_of_day, 'value') else str(self._world.time_of_day)
+        tod_str = self._persona_time_of_day.value if hasattr(self._persona_time_of_day, 'value') else str(self._persona_time_of_day)
         nostalgia_event = self._memory_time.tick(
             current_activity=current_activity,
             mood=mood_str,
@@ -3184,24 +4764,60 @@ class LifeService:
             now=now,  # the continuity block's world instant, same tick
         )
         if nostalgia_event:
+            remembered = self._real_nostalgia_episode(now)
+            if remembered is not None:
+                # A real memory, at least NOSTALGIA_MIN_EPISODE_AGE_DAYS old
+                # (Task 13): her gist replaces the setting's template, and
+                # surfacing it reinforces it (ruling T12-R2).
+                nostalgia_event.memory_reference = remembered.gist()
+                self._memory.reinforce([remembered], now=now)
             self._affect.on_emotion_event("nostalgic", nostalgia_event.intensity)
             if nostalgia_event.intensity > 0.4:
+                reminded = self._render_text("Something reminded {obj} of")
+                memory_text = self._render_text(nostalgia_event.memory_reference)
                 self._create_shareable_from_text(
-                    f"Something reminded her of {nostalgia_event.memory_reference}",
+                    f"{reminded} {memory_text}",
                     context=f"A wave of nostalgia from {nostalgia_event.trigger}",
                 )
 
+        # === Reflection (Task 13) ===
+        self._reflect(now)
+
         # === Anticipation → mood ===
-        anticipations = self._memory_time.get_anticipations()
+        # Felt for as long as it lasts: ANTICIPATION_MOOD_PER_HOUR x its
+        # intensity per world hour since the last affect tick. (It was that
+        # much per energy tick, so the more often the ticks ran the more she
+        # felt it.)
+        anticipations = self._memory_time.get_anticipations(now=_stress_now)
         for ant in anticipations:
             if ant.feeling == "excited" and ant.intensity > 0.2:
-                self._affect.on_emotion_event("excited", ant.intensity * 0.1)
+                self._affect.on_emotion_event(
+                    "excited", ant.intensity * ANTICIPATION_MOOD_PER_HOUR * _affect_hours)
             elif ant.feeling == "dreading" and ant.intensity > 0.2:
-                self._affect.on_emotion_event("anxious", ant.intensity * 0.1)
+                self._affect.on_emotion_event(
+                    "anxious", ant.intensity * ANTICIPATION_MOOD_PER_HOUR * _affect_hours)
 
         # === Evaluate life-driven proactive triggers ===
         self._evaluate_life_triggers()
 
+        # === Periodic state persistence (world clock, at most once/hour) ===
+        # `now` is the continuity block's world instant, above -- same tick.
+        # Gated on `_is_initialized`: `_save_state()`'s energy write is a
+        # plain UPDATE ... WHERE id=1, a no-op until `_load_state()` (via
+        # `start()`) has inserted that row -- but once a *previous* run's
+        # `start()` did insert it, a service that ticks here without ever
+        # loading would periodically overwrite that saved state with fresh
+        # in-memory defaults. Only a service that has loaded its own state
+        # may write it back.
+        # Explicit `_save_state()` calls remain at stop(), reset, and
+        # catch-up; this is the only tick-driven one, so a crash between them
+        # loses at most an hour of simulated time instead of everything since
+        # the last explicit save.
+        if self._is_initialized and (now - self._last_periodic_save_at).total_seconds() >= 3600:
+            self._save_state()
+            self._last_periodic_save_at = now
+
+        self._publish_household_state()
         logger.debug(f"Energy tick: {self._energy.effective_level:.2f}, hunger: {self._basic_needs.hunger:.2f}")
 
     # ============= Life-Driven Proactive Triggers =============
@@ -3303,9 +4919,9 @@ class LifeService:
         business, and the engine is only told about hours the persona lived.
 
         ``stressed`` reads affect's stress *level* against
-        ``SANITY_STRESSED_LEVEL``, not the ``stress.sources`` labels: the level
-        is the live quantity (it decays), the labels are a summary the service
-        never clears.
+        ``SANITY_STRESSED_LEVEL``, not whether any stressor is listed: a
+        hassle or two is on her mind most of the time, and weighs too little
+        to wear her down (see ``SANITY_STRESSED_LEVEL``).
         """
         now = self._world_clock()()
         hours = (now - self._sanity_ticked_at).total_seconds() / 3600
@@ -3344,11 +4960,9 @@ class LifeService:
             return
         rank = SANITY_STATES.index
 
-        if new == "sound":
-            if SANITY_STRESS_SOURCE in self._affect.stress.sources:
-                self._affect.on_stressor_resolved(SANITY_STRESS_SOURCE)
-        else:
-            self._affect.on_stressor_added(SANITY_STRESS_SOURCE)
+        # Strained or worse, keeping it together weighs on her; sound, it
+        # lifts (affect's "sanity" stressor, SANITY_STRESS_SOURCE).
+        self._affect.hold_stressor("sanity", new != "sound", now=self._world_clock()())
 
         self._hold_sanity_restraint(new)
 
@@ -3366,11 +4980,89 @@ class LifeService:
         if self._shadow.restraint_pressure != pressure:
             self._shadow.set_restraint_pressure(pressure)
 
+    # ============= Emotions: mood and the host's EmotionEngine =============
+
+    def _feel(self, emotions: Dict[str, float], *, reactivity_applied: bool = False) -> None:
+        """She feels ``emotions`` (name -> intensity): each goes to the host's
+        EmotionEngine, when one was injected, and to mood. Activities,
+        intimate activities, micro-events, chaos, goal events and completions
+        and work events all come through here, so none of them reaches one and
+        not the other. (The small mood-only nudges -- a new place, an
+        anniversary, nostalgia, an anticipation -- go to mood alone, as they
+        always did.)
+
+        ``reactivity_applied``: they are her appraisal's (Task 14), felt as
+        strongly as her volatility makes them -- mood is told so
+        (``AffectSystem.on_emotion_event``) and does not scale them by it
+        again."""
+        for emotion, intensity in (emotions or {}).items():
+            if self._emotion_engine:
+                try:
+                    self._emotion_engine.add_emotion(emotion, intensity)
+                except Exception:
+                    pass  # a host engine may reject a name its wheel lacks
+            if reactivity_applied:
+                self._affect.on_emotion_event(emotion, intensity, reactivity_applied=True)
+            else:
+                self._affect.on_emotion_event(emotion, intensity)
+
+    def _draw_day_quality(self) -> None:
+        """The day's quality (ruling T14-R1; ``AffectSystem.new_day``): drawn
+        once per persona-day, on the world clock, at her first waking tick
+        outside her sleep window (``EnergySystem.in_sleep_window``) -- so
+        waking in the night draws nothing and a nap never draws again. Her
+        day is keyed by the date of her last effective wake
+        (``EnergySystem.last_wake``), not the calendar's: a night owl up past
+        midnight is still in the day before, and the new day's draw waits for
+        the night that shifts it. Drawn from her own "day_quality" stream,
+        shifted by last night's sleep (``BodySystem.sleep_quality``; an AI
+        persona, who does not sleep, has no night to go by). A service that
+        starts awake draws at its first waking tick; one reloaded mid-day
+        keeps the day it saved."""
+        local = self._local_world_now()
+        if self.is_asleep() or self._energy.in_sleep_window(local):
+            return
+        today = self._energy.last_wake(local).date()
+        if self._affect.day_quality[0] == today:
+            return
+        slept = None if self._is_ai else self._body.sleep_quality.last_quality
+        self._affect.new_day(today, self._day_quality_rng, sleep_quality=slept)
+
+    def _decay_emotion_engine(self) -> None:
+        """Decay the host's EmotionEngine by the world time since the last call
+        (see ``decays_emotion_engine``).
+
+        aura-life's own EmotionEngine is decayed by that many seconds through
+        its ``_decay``; ``decay_tick()``, its public method, measures the wall
+        clock instead, which on a simulated world is not the time the persona
+        lived. A host engine without ``_decay`` is decayed through its own
+        ``decay_tick()``, on its own clock; one with neither is left alone.
+        """
+        now = self._world_clock()()
+        seconds = max(0.0, (now - self._emotion_decayed_at).total_seconds())
+        self._emotion_decayed_at = now
+        engine = self._emotion_engine
+        if engine is None:
+            return
+        decay = getattr(engine, "_decay", None)
+        if callable(decay):
+            decay(seconds)
+            return
+        decay_tick = getattr(engine, "decay_tick", None)
+        if callable(decay_tick):
+            decay_tick()
+
     def _evaluate_life_triggers(self):
         """Evaluate all engine state and create proactive triggers when conditions are met.
 
         Called at end of _on_energy_tick() (every 5 min) after all cross-engine routing
         is complete. Never called during catch-up.
+
+        Each candidate's hint carries what moved her (Task 17): an episode
+        of her memory stream, a life event, her plan slot, or when the user
+        last spoke for a need of contact; a candidate with no such detail is
+        not made (rulings T17-R2, T17-R3). Its words are hers, in the second
+        person, with no number or engine label (T17-R4).
         """
         if self._follow_up_provider is None:
             return
@@ -3378,6 +5070,10 @@ class LifeService:
         now = datetime.now()
         fm = self._follow_up_provider(self._persona_id)
         candidates = []  # (trigger_type_str, urgency, topic, prompt_hint)
+        # The share id each candidate's hint is about (ruling T17-R1), and
+        # what a candidate consumes only if it is the one that fires.
+        share_ids: Dict[str, str] = {}
+        consumed: Dict[str, Tuple[str, object]] = {}
 
         # --- 1. MOOD_SHIFT ---
         try:
@@ -3394,14 +5090,15 @@ class LifeService:
                 and (cur_intensity - self._prev_mood_intensity) >= 0.25
             )
             if (mood_changed or intensity_spiked) and self._life_trigger_cooled_down("mood_shift", now):
-                context = f"intensity {cur_intensity:.1f}"
-                if mood_changed:
-                    context = f"was {self._prev_mood}, now {cur_mood} ({context})"
-                hint = (
-                    f"Your mood shifted to {cur_mood}. {context}. "
-                    f"Reach out naturally — share how you're feeling or let it color what you say."
-                )
-                candidates.append(("mood_shift", 0.5, cur_mood, hint))
+                # What is on her mind is the detail; a shift with nothing
+                # behind it is no trigger (ruling T17-R2).
+                moved = self._on_her_mind()
+                if moved is not None:
+                    hint = (
+                        f"You're feeling {_plain(cur_mood)} now. {self._on_her_mind_line(moved)} "
+                        f"Reach out naturally — share how you're feeling or let it color what you say."
+                    )
+                    candidates.append(("mood_shift", 0.5, cur_mood, hint))
             # Always update prev state
             self._prev_mood = cur_mood
             self._prev_mood_intensity = cur_intensity
@@ -3413,26 +5110,40 @@ class LifeService:
             cur_loneliness = self._affect.loneliness.level
             crossed_up = self._prev_loneliness < 0.6 and cur_loneliness >= 0.6
             if crossed_up and self._life_trigger_cooled_down("loneliness_spike", now):
-                hint = (
-                    "You've been feeling really lonely. You want to hear from them — "
-                    "ask how their day is going, or share something to start a conversation."
-                )
-                candidates.append(("loneliness_spike", 0.6, "feeling lonely", hint))
+                # When they last spoke, else what is on her mind; neither, no
+                # trigger (ruling T17-R2).
+                last = self._last_talked()
+                moved = None if last else self._on_her_mind()
+                if last:
+                    lonely = f"{last}, and you've been feeling really lonely."
+                elif moved is not None:
+                    lonely = f"You've been feeling really lonely. {self._on_her_mind_line(moved)}"
+                else:
+                    lonely = ""
+                if lonely:
+                    hint = (
+                        f"{lonely} You want to hear from them — "
+                        "ask how their day is going, or share something to start a conversation."
+                    )
+                    candidates.append(("loneliness_spike", 0.6, "feeling lonely", hint))
             self._prev_loneliness = cur_loneliness
         except Exception:
             logger.debug("Life trigger: loneliness_spike eval failed", exc_info=True)
 
-        # --- 3. DREAM_SHARE ---
+        # --- 3. DREAM_SHARE --- only of a dream she remembers (ruling T17-R3:
+        # the episode _on_woke records), not yet offered, still hers to share;
+        # an emotion residue alone is none.
         try:
-            dream = self._cognitive.get_dream_residue()
-            if dream and dream.get("intensity", 0) >= 0.3:
-                if self._life_trigger_cooled_down("dream_share", now):
-                    emotion = dream.get("emotion", "strange")
-                    hint = (
-                        f"You had a weird/vivid dream — it left you feeling {emotion}. "
-                        f"Share it casually, like 'I had the strangest dream last night...'"
-                    )
-                    candidates.append(("dream_share", 0.4, f"dream ({emotion})", hint))
+            dream = self._newest_episode("dream")
+            if (dream is not None and dream.id != getattr(self, "_last_dream_share_episode", None)
+                    and self._still_unshared(dream) and self._life_trigger_cooled_down("dream_share", now)):
+                hint = (
+                    f"A dream from {self._when_said(dream.at)} is still with you: {_told(dream)} "
+                    f"Share it casually, like 'I had the strangest dream last night...'"
+                )
+                candidates.append(("dream_share", 0.4, _plain(dream.what)[:60], hint))
+                share_ids["dream_share"] = next(iter(_share_ids_of(dream)), "")
+                consumed["dream_share"] = ("_last_dream_share_episode", dream.id)
         except Exception:
             logger.debug("Life trigger: dream_share eval failed", exc_info=True)
 
@@ -3443,12 +5154,16 @@ class LifeService:
             last_event_type = chaos_state.get("last_chaos_type", "")
             if last_event_text and last_event_text != self._last_seen_chaos_event:
                 share_worthy = last_event_type in ("serendipity", "universal")
-                if share_worthy and self._life_trigger_cooled_down("chaos_event", now):
+                # Her memory of it is the hint (Task 12 records it, addressed
+                # to her, where it happened); none, no trigger.
+                told = self._newest_episode("chaos", last_event_type) if share_worthy else None
+                if told is not None and self._life_trigger_cooled_down("chaos_event", now):
                     hint = (
-                        f"Something happened: {last_event_text}. "
+                        f"Something happened {self._when_said(told.at)}: {_told(told)} "
                         f"Share it like you'd tell a friend about your day."
                     )
                     candidates.append(("chaos_event", 0.55, last_event_text[:60], hint))
+                    share_ids["chaos_event"] = next(iter(_share_ids_of(told)), "")
                 self._last_seen_chaos_event = last_event_text
         except Exception:
             logger.debug("Life trigger: chaos_event eval failed", exc_info=True)
@@ -3459,27 +5174,58 @@ class LifeService:
             if recent:
                 n = recent[0]
                 if n.intensity >= 0.4 and n.memory_reference != self._last_seen_nostalgia_ref:
+                    # Addressed to her, in the second person -- what she
+                    # remembers quoted back to her (spec 4.10) -- so a
+                    # template's {subj}/{poss} token never reaches this
+                    # prompt-bound hint (found in Task 9: this was one of
+                    # two paths that read n.memory_reference unrendered).
+                    memory_text = self._addressed_to_her(n.memory_reference)
                     if self._life_trigger_cooled_down("nostalgia", now):
                         hint = (
-                            f"A memory hit you — {n.memory_reference}. "
+                            f"A memory hit you — {memory_text}. "
                             f"Share the feeling with them, maybe ask if they've had moments like that."
                         )
-                        candidates.append(("nostalgia", 0.4, n.memory_reference[:60], hint))
+                        candidates.append(("nostalgia", 0.4, memory_text[:60], hint))
                     self._last_seen_nostalgia_ref = n.memory_reference
         except Exception:
             logger.debug("Life trigger: nostalgia eval failed", exc_info=True)
 
         # --- 6. GOAL_MILESTONE ---
+        # A goal she completed (its episode, _on_goal_tick's, with what it
+        # was: the life event's description) comes first; else what she
+        # feels about a goal she names -- never the goalless line, which
+        # names none (Task 17).
         try:
-            emotional_ctx = self._goal_engine.get_emotional_context()
-            if emotional_ctx and self._life_trigger_cooled_down("goal_milestone", now):
-                hint = (
-                    f"You've been thinking about your goals — {emotional_ctx} "
-                    f"Name the ONE concrete thing that actually moved (a specific step "
-                    f"you took, a real obstacle you hit) — never a vague 'epiphany' or "
-                    f"'I cracked the code'. Or just ask what they're working toward."
-                )
-                candidates.append(("goal_milestone", 0.5, emotional_ctx[:60], hint))
+            done = self._newest_episode("goal", "completed")
+            if done is not None and (done.id == getattr(self, "_last_goal_share_episode", None)
+                                     or not self._still_unshared(done)):
+                done = None
+            emotional_ctx = ("" if self._goal_engine.is_goalless
+                             else self._goal_engine.get_emotional_context(now=self._world_clock()()))
+            if (done is not None or emotional_ctx) and self._life_trigger_cooled_down("goal_milestone", now):
+                if done is not None:
+                    goal_id = next(iter(_share_ids_of(done)), "")
+                    event = next((e for e in self._life_events.get_unshared_events() if e.share_id == goal_id), None)
+                    about = _plain(event.description) if event is not None else ""
+                    set_out = (f"You had set out to do this: {about}. "
+                               if about and about.lower() not in _plain(done.what).lower() else "")
+                    hint = (
+                        f"You reached a goal {self._when_said(done.at)}: {_told(done)} {set_out}"
+                        f"Name the ONE concrete thing that actually moved it (a specific step you "
+                        f"took, a real obstacle you got past) — never a vague 'epiphany' or "
+                        f"'I cracked the code'."
+                    )
+                    candidates.append(("goal_milestone", 0.5, _plain(done.what)[:60], hint))
+                    share_ids["goal_milestone"] = goal_id
+                    consumed["goal_milestone"] = ("_last_goal_share_episode", done.id)
+                else:
+                    hint = (
+                        f"You've been thinking about your goals — {emotional_ctx} "
+                        f"Name the ONE concrete thing that actually moved (a specific step "
+                        f"you took, a real obstacle you hit) — never a vague 'epiphany' or "
+                        f"'I cracked the code'. Or just ask what they're working toward."
+                    )
+                    candidates.append(("goal_milestone", 0.5, emotional_ctx[:60], hint))
         except Exception:
             logger.debug("Life trigger: goal_milestone eval failed", exc_info=True)
 
@@ -3489,33 +5235,54 @@ class LifeService:
             if events:
                 ev = events[0]
                 age_min = (now - ev.timestamp).total_seconds() / 60 if ev.timestamp else 999
-                if ev.share_worthy and age_min <= 30:
-                    if self._life_trigger_cooled_down("social_event", now):
+                # Unwelcome news -- a threat, someone she is estranged from --
+                # is never something she shares (ruling T11-R1): it weighs on
+                # her as stress instead.
+                if ev.share_worthy and getattr(ev, "valence", 0.0) >= 0 and age_min <= 30:
+                    # Her memory of it (who, what, where; _on_social_event's
+                    # episode), never the event's line, which is written
+                    # about her; none, no trigger.
+                    told = self._newest_episode("social", ev.event_type, person=ev.npc_name)
+                    if told is not None and self._life_trigger_cooled_down("social_event", now):
                         hint = (
-                            f"Something happened with {ev.npc_name}: {ev.description}. "
-                            f"Share it naturally."
+                            f"Something happened with {ev.npc_name} {self._when_said(told.at)}: "
+                            f"{_told(told)} Share it naturally."
                         )
                         candidates.append(("social_event", 0.45, ev.description[:60], hint))
+                        share_ids["social_event"] = next(iter(_share_ids_of(told)), "")
         except Exception:
             logger.debug("Life trigger: social_event eval failed", exc_info=True)
 
         # --- 8. NEED_DRIVEN ---
         try:
             needs = self.assess_needs()
+            # (how she feels, what she might do); the detail goes between:
+            # when they last spoke for connection, else what is on her mind
+            # (ruling T17-R2) -- with none, no trigger.
             need_hints = {
-                "connection": "You're craving connection. Reach out warmly.",
-                "stimulation": "You're bored and restless. Start an interesting conversation or ask them something thought-provoking.",
-                "competence": "You're feeling unsure of yourself. Talk about something you're working on, or ask for their perspective.",
-                "safety": "You're feeling uneasy. Reach out for some comfort or grounding.",
-                "autonomy": "You're feeling boxed in. Share what's on your mind or vent a little.",
+                "connection": ("You're craving connection.", "Reach out warmly."),
+                "stimulation": ("You're bored and restless.",
+                                "Start an interesting conversation or ask them something thought-provoking."),
+                "competence": ("You're feeling unsure of yourself.",
+                               "Talk about something you're working on, or ask for their perspective."),
+                "safety": ("You're feeling uneasy.", "Reach out for some comfort or grounding."),
+                "autonomy": ("You're feeling boxed in.", "Share what's on your mind or vent a little."),
             }
             for need_name, need_data in needs.items():
                 if need_name == "physical_comfort":
                     continue  # Don't message about hunger/tiredness
                 if need_data["satisfaction"] < 0.2:
                     if self._life_trigger_cooled_down("need_driven", now):
-                        hint = need_hints.get(need_name, f"You're reaching out because you need {need_name}.")
-                        candidates.append(("need_driven", 0.55, need_name, hint))
+                        if need_name == "connection":
+                            detail = self._contact_detail()
+                        else:
+                            moved = self._on_her_mind()
+                            detail = self._on_her_mind_line(moved) if moved is not None else ""
+                        if detail:
+                            feeling, ask = need_hints.get(
+                                need_name, (f"You're reaching out because you need {_plain(need_name)}.", ""))
+                            hint = " ".join(part for part in (feeling, detail, ask) if part)
+                            candidates.append(("need_driven", 0.55, need_name, hint))
                     break  # Only one need-driven trigger at a time
         except Exception:
             logger.debug("Life trigger: need_driven eval failed", exc_info=True)
@@ -3530,7 +5297,7 @@ class LifeService:
                     question_candidates.append((
                         0.5 + rum.intensity * 0.1,
                         rum.topic,
-                        f"You've been turning '{rum.topic}' over in your mind. "
+                        f"You've been turning '{_plain(rum.topic)}' over in your mind. "
                         f"Ask them what they think about it.",
                     ))
 
@@ -3540,7 +5307,7 @@ class LifeService:
                     question_candidates.append((
                         0.45,
                         op.subject,
-                        f"You're forming an opinion about '{op.subject}' but you're not sure yet. "
+                        f"You're forming an opinion about '{_plain(op.subject)}' but you're not sure yet. "
                         f"Ask where they stand.",
                     ))
 
@@ -3550,35 +5317,41 @@ class LifeService:
                     question_candidates.append((
                         0.5 + cur.intensity * 0.1,
                         cur.topic,
-                        f"You've gotten curious about '{cur.topic}'. "
+                        f"You've gotten curious about '{_plain(cur.topic)}'. "
                         f"Ask if they know anything about it or have thoughts.",
                     ))
 
-            # Low self-esteem source
+            # Low self-esteem source: what is on her mind is its detail
+            # (ruling T17-R2); with nothing there, no question of it.
             if self._identity.self_esteem.level < 0.35:
-                question_candidates.append((
-                    0.45,
-                    "self-doubt",
-                    "You've been second-guessing yourself. "
-                    "Ask for their honest perspective on something you're unsure about.",
-                ))
+                moved = self._on_her_mind()
+                if moved is not None:
+                    question_candidates.append((
+                        0.45,
+                        "self-doubt",
+                        f"You've been second-guessing yourself. {self._on_her_mind_line(moved)} "
+                        "Ask for their honest perspective on something you're unsure about.",
+                    ))
 
-            # Loneliness source (lower threshold than spike)
+            # Loneliness source (lower threshold than spike): when they last
+            # spoke is its detail; never spoken to, no question of it.
             if self._affect.loneliness.level >= 0.5:
-                question_candidates.append((
-                    0.5,
-                    "missing real conversation",
-                    "You miss real conversation. Ask them something personal — "
-                    "what they've been thinking about, what's on their mind.",
-                ))
+                last = self._last_talked()
+                if last:
+                    question_candidates.append((
+                        0.5,
+                        "missing real conversation",
+                        f"You miss real conversation. {last}. Ask them something personal — "
+                        "what they've been thinking about, what's on their mind.",
+                    ))
 
             # Inner monologue source
-            thought = self._cognitive.get_inner_monologue()
+            thought = self._cognitive.get_inner_monologue(now=self._world_clock()())
             if thought and len(thought) > 10:
                 question_candidates.append((
                     0.45,
                     thought[:40],
-                    f"You had this thought: '{thought[:60]}'. "
+                    f"You had this thought: '{_plain(thought)}'. "
                     f"Turn it into a question — ask them what they think.",
                 ))
 
@@ -3587,7 +5360,7 @@ class LifeService:
                 question_candidates.sort(key=lambda x: x[0], reverse=True)
                 top = question_candidates[:3]
                 weights = [u ** 2 for u, _, _ in top]
-                chosen = self._random.choices(top, weights=weights, k=1)[0]
+                chosen = self._service_rng.choices(top, weights=weights, k=1)[0]
                 urgency, topic, hint = chosen
                 candidates.append(("life_question", urgency, topic[:60], hint))
         except Exception:
@@ -3613,17 +5386,26 @@ class LifeService:
                 <= timedelta(minutes=CONVERSATION_ACTIVITY_WINDOW_MINUTES)
             )
             _act_name = ""
+            _act_place = ""
             if self._daily_planner.current_plan:
-                _slot = self._daily_planner.current_plan.get_current_slot()
+                # Her plan's slot at her local world time (Task 28; in a
+                # joint window's tail, the instant she joined: T19-R5); the
+                # cooldowns and the conversation window above stay on the
+                # host's clock -- they pace messages a real user receives.
+                _slot = self._daily_planner.current_plan.get_current_slot(self._activity_instant())
                 if _slot:
                     _act_name = _slot.activity_name or ""
+                    _act_place = getattr(_slot, "location", "") or ""
             # Defensive: an AI persona has no physical body, so her moment-share
             # must never claim a physical action (eating, commuting, sleeping…).
             # The AI scheduler already excludes physical activities, but a stale
             # plan or a manually-set slot could still carry one — blank it so the
             # share falls back to the conversation-driven [DOING:] activity below.
+            # Physical is her setting's tag "physical" (its activities and its
+            # routine slot names -- what DailyPlanner.PHYSICAL_ACTIVITIES listed
+            # until Task 9's fix round, ruling T9-R5).
             if self._is_ai and _act_name:
-                if _act_name.lower() in PHYSICAL_ACTIVITIES:
+                if _act_name.lower() in self._setting.names_tagged("physical"):
                     _act_name = ""
             if _recent_conversation:
                 _act_name = ""  # skip — recent chat makes the scheduled slot unreliable
@@ -3631,8 +5413,13 @@ class LifeService:
                 # Signal 1: chaos event is NEW (not yet consumed by a moment share)
                 _chaos_event_text = self._chaos.export_state().get("last_chaos_event", "")
                 _chaos_new = bool(_chaos_event_text and _chaos_event_text != self._last_moment_share_chaos_event)
-                # Signal 2: mood clearly lifted (reuse same accessor as MOOD_SHIFT block)
-                _mood_high = self._affect.mood.intensity >= 0.7
+                # Signal 2: mood clearly lifted -- strong AND pleasant. Intensity
+                # alone is distance from neutral in any direction, so it would
+                # fire at her lowest too.
+                _mood_high = (
+                    self._affect.mood.intensity >= 0.7
+                    and self._affect.mood.valence >= MOOD_VALENCE_BAND
+                )
                 # Signal 3: shadow validation drive is high — a "look at me" moment.
                 # Reuse the existing MOMENT_SHARE photo path, just flavor the hint
                 # toward a flattering selfie/scene fishing for a little attention.
@@ -3646,10 +5433,12 @@ class LifeService:
                 if self._is_ai and not self._relationship_is_close():
                     _attention_high = False
                 if (_chaos_new or _mood_high or _attention_high) and self._life_trigger_cooled_down("moment_share", now):
+                    # The slot's activity phrased, and where (ruling T17-R4).
+                    _doing_now = _doing(self._activity_for_display(_act_name), _act_place)
                     if _attention_high:
                         hint = (
-                            f"You're feeling a pull to be noticed right now. You're"
-                            f" {_act_name} and you want a little attention — share a"
+                            f"You're feeling a pull to be noticed right now. {_doing_now},"
+                            f" and you want a little attention — share a"
                             f" casual, flattering photo of yourself or the moment using"
                             f" an [IMAGE:self: ...] or [IMAGE:scene: ...] tag, with a"
                             f" short caption that low-key fishes for a compliment or"
@@ -3658,7 +5447,7 @@ class LifeService:
                         )
                     else:
                         hint = (
-                            f"You're {_act_name} right now and it feels worth sharing."
+                            f"{_doing_now} right now and it feels worth sharing."
                             f" Send a short excited message about it, like texting a photo to"
                             f" someone you like."
                         )
@@ -3693,7 +5482,7 @@ class LifeService:
         candidates.sort(key=lambda x: x[1], reverse=True)
         top = candidates[:3]
         weights = [u ** 2 for _, u, _, _ in top]
-        chosen = self._random.choices(top, weights=weights, k=1)[0]
+        chosen = self._service_rng.choices(top, weights=weights, k=1)[0]
         trigger_type_str, urgency, topic, hint = chosen
 
         # Map candidate string to the follow-up type's member NAME. The host
@@ -3725,7 +5514,9 @@ class LifeService:
             except Exception as exc:
                 self._report_user_model_failure("quiet_windows", exc)
 
-        fm.create_trigger(
+        _create_follow_up(
+            fm,
+            share_id=share_ids.get(trigger_type_str, ""),
             trigger_type=follow_up_type,
             topic=topic,
             context=f"life_trigger:{trigger_type_str}",
@@ -3734,20 +5525,151 @@ class LifeService:
             quiet_windows=quiet_windows,
         )
         self._record_life_trigger_cooldown(trigger_type_str, now)
+        # The dream or goal completion it was made of is not offered again,
+        # after a restart too (fix round 1, T17-RV3).
+        if trigger_type_str in consumed:
+            attribute, value = consumed[trigger_type_str]
+            setattr(self, attribute, value)
+            try:
+                self._save_trigger_state()
+            except Exception:
+                logger.warning("Life trigger: the trigger state could not be saved", exc_info=True)
         # Consume the pending chaos event only when moment_share actually fires.
         if trigger_type_str == "moment_share" and self._pending_moment_share_chaos_event:
             self._last_moment_share_chaos_event = self._pending_moment_share_chaos_event
         self._pending_moment_share_chaos_event = None
         logger.info(f"[LIFE-TRIGGER] {trigger_type_str} for {self._persona_id}: {topic[:40]}")
 
+    def _tick_sustenance(self) -> None:
+        """Hunger and nutrition for the world hours since the last sustenance
+        tick, and the energy her hunger drains in them (none asleep).
+
+        An ordinary tick asks her sleep state. A longer gap -- a paused host
+        (SUSTENANCE_GAP_HOURS) -- is walked one energy interval at a time
+        (``sustenance_system.TICK_HOURS``), so her hunger crosses its
+        threshold when it would have, and each interval inside her sleep
+        window counts as asleep: her sleep state cannot have moved while the
+        host was paused, and asking it once at the end drained a night's
+        worth of waking hunger from her (fix round 1, finding 4)."""
+        now = self._world_clock()()
+        began = self._sustenance_ticked_at
+        hours = max(0.0, (now - began).total_seconds() / 3600)
+        self._sustenance_ticked_at = now
+        if hours > SUSTENANCE_GAP_HOURS:
+            # A paused host's hours: what she was at their start, for a
+            # catch-up of the same gap (Task 34c fix round 1).
+            state = self._sustenance.state
+            self._sustenance_gap_charge = (began, now, state.hunger, state.nutrition)
+        if hours <= SUSTENANCE_GAP_HOURS:
+            self._sustenance.tick(now=now, hours=hours)
+            drain = self._sustenance.energy_drain(hours, asleep=self.is_asleep())
+        else:
+            local_end = self._local_world_now()
+            steps = max(1, math.ceil(hours / SUSTENANCE_TICK_HOURS - 1e-9))
+            step = hours / steps
+            drain = 0.0
+            for index in range(steps):
+                middle = local_end - timedelta(hours=hours - (index + 0.5) * step)
+                self._sustenance.tick(now=now, hours=step)
+                drain += self._sustenance.energy_drain(step, asleep=self._energy.in_sleep_window(middle))
+        if drain:
+            self._energy._state.level = max(0.1, self._energy._state.level - drain)
+
+    def _choice_state(self) -> ChoiceState:
+        """What she needs and feels now -- what her activity choice weighs
+        (aura_life.activities.choice): each need's shortfall, 0..1, read from
+        the state aura_life.settings.spec.NEED_KEYS names (an AI persona has
+        no hunger); her mood; her energy; her recent activities; and the pull
+        of her goals (their motivation) and wants (their urgency)."""
+        battery = self._social.social_battery
+        curiosities = self._drive.get_active_curiosities(1)
+        loops = getattr(self._cognitive, "_ruminations", [])
+        needs = {
+            "rest": max(0.0, 1.0 - self._energy.effective_level),
+            "social": self._affect.loneliness.level,
+            "solitude": 1.0 - battery.charge / battery.capacity if battery.capacity > 0 else 0.0,
+            "calm": self._affect.stress.level,
+            "stimulation": curiosities[0].intensity if curiosities else 0.0,
+            "reflection": max((loop.intensity for loop in loops), default=0.0),
+        }
+        if not self._is_ai:
+            needs["hunger"] = self._sustenance.hunger
+        pulls: Dict[str, float] = {}
+        for goal in self._goal_engine.active_goals:
+            for name in goal.related_activities:
+                pulls[name] = max(pulls.get(name, 0.0), goal.motivation_level)
+        for want in self._daily_planner.desires:
+            for name in want.related_activities:
+                pulls[name] = max(pulls.get(name, 0.0), want.urgency)
+        # What would end a stressor she can end herself (Task 15): what the
+        # problem-focused part of her coping reaches for.
+        resolving: Dict[str, float] = {}
+        for stressor in self._affect.stressors:
+            if stressor.controllability <= 0.0:
+                continue
+            for name in self._resolving_activities(stressor.kind):
+                resolving[name] = max(resolving.get(name, 0.0), stressor.controllability)
+        mood = self._affect.mood
+        return ChoiceState(
+            needs={need: max(0.0, min(1.0, level)) for need, level in needs.items()},
+            valence=mood.valence,
+            arousal=mood.arousal,
+            energy=self._energy.effective_level,
+            history=tuple(self._behavior._activity_history),
+            pulls=pulls,
+            resolving=resolving,
+        )
+
+    def _resolving_activities(self, kind: str) -> FrozenSet[str]:
+        """Her activities that end a stressor of ``kind`` (Task 15) -- by what
+        the engine that clears its cause acts on, never by name here: hunger,
+        a meal (tag "meal", ruling T9-R8; SustenanceSystem); errands piling
+        up, what clears an errand (ErrandsSystem.clears); the mess at home,
+        what tidies it (HabitationSystem.tidies). None for any other kind.
+        What she has put off or promised is hers to end (controllability 1),
+        but no activity of a setting is the doing of it, so her coping has
+        nothing to reach for there. Cached per kind: her setting's
+        activities do not change."""
+        cache = self._resolving_cache
+        if kind not in cache:
+            activities = self._setting.activities_for(self._persona_id)
+            if kind == "hunger":
+                names = {a.name for a in activities if "meal" in a.tags}
+            elif kind == "errands":
+                names = {a.name for a in activities if ErrandsSystem.clears(a.name)}
+            elif kind == "home":
+                names = {a.name for a in activities if HabitationSystem.tidies(a.name)}
+            else:
+                names = set()
+            cache[kind] = frozenset(names)
+        return cache[kind]
+
     def _on_activity_tick(self) -> None:
-        """Handle activity tick - perform an activity."""
+        """Handle activity tick - perform an activity.
+
+        In a household, under its lock (``Household.lock``): an activity she
+        shares writes into a housemate's life, so no two members' activity
+        ticks run at once (Task 11)."""
+        household = getattr(self, "_household", None)
+        if household is None:
+            self._activity_tick()
+            return
+        with household.lock:
+            self._activity_tick()
+            self._publish_household_state()
+
+    def _activity_tick(self) -> None:
+        """The activity tick itself (:meth:`_on_activity_tick`): her sleep
+        state, then what she does this tick -- chosen here, done by
+        :meth:`_perform_activity`."""
+        # The instant of this tick, on the world clock: a housemate never
+        # pulls her into something at an instant she has already acted in
+        # (_free_to_join).
+        self._activity_tick_at = self._world_clock()()
+
         # Clear stale ARRIVED transit (auto-clears after next activity tick)
         if self._transit and self._transit.phase == TransitPhase.ARRIVED:
             self.clear_transit()
-
-        # Check if should rest/sleep
-        force_rest = self._energy.should_rest()
 
         # If the user is actively chatting right now, sleep is a soft cap: she stays
         # up with them (and pays for it tomorrow) instead of drifting off mid-chat.
@@ -3756,38 +5678,70 @@ class LifeService:
             recent_msg and (datetime.now() - recent_msg).total_seconds() < 20 * 60
         )
 
-        # AI personas never sleep — skip the autonomous sleep decision entirely so
-        # they stay awake at all times (humans keep the existing soft-cap behavior).
-        if not self._is_ai and self._energy.should_sleep(in_conversation=in_conversation, now_hour=self.persona_local_hour()):
-            # Sleep activity
-            activity = self._activity_engine.get_activity("sleeping")
-            if activity:
-                self._energy.sleep()
-                log = ActivityLog(
-                    activity_name="sleeping",
-                    category=activity.category,
-                    started_at=datetime.now(),
-                    narrative="She drifted into restful sleep",
-                    energy_before=0.1,
-                    energy_after=0.7,
-                )
-                self._record_activity(log)
-                logger.info("The persona went to sleep")
-                return
+        # Sleep is a state with a duration (EnergySystem.update_sleep): she falls
+        # asleep inside her own window, on her local clock, once her sleep
+        # pressure allows, and sleeps until that night's wake time -- each night
+        # drawn once from the service's own sleep stream (_sleep_stream).
+        # Asleep, she does nothing else this tick. An AI never sleeps: it
+        # rests through its night, still here.
+        change = self._energy.update_sleep(
+            self._local_world_now(), in_conversation=in_conversation, rng=self._sleep_rng,
+        )
+        if change == "fell_asleep":
+            self._on_fell_asleep()
+        elif change == "woke":
+            self._on_woke()
+        if self._energy.is_asleep():
+            return
 
-        # Check if conditions are right for an intimate activity
-        if self._desire_system.should_do_intimate_activity(
+        # She joined a housemate in something (Task 11): it is in her log and
+        # done, and it takes this tick -- one activity interval from when she
+        # joined (_join_housemate).
+        joint_until = getattr(self, "_joint_until", None)
+        if joint_until is not None and self._activity_tick_at < joint_until:
+            return
+
+        # Rest is forced when she has been up longer than her usual day or her
+        # energy is nearly gone (EnergySystem.should_rest).
+        force_rest = self._energy.should_rest()
+
+        # Consult daily plan for the current hour (her local world time, so
+        # her schedule follows her own timezone and the world's clock, not
+        # the server's -- Task 28). The slot governs
+        # every activity tick of its hour, not only the first: done once, it
+        # still says what the hour is for, so plan adherence and a whim have
+        # the whole hour to act in (Task 10, the ruling carried from Task 8).
+        # Not while a transit is under way (getting ready, or on the way):
+        # she is going somewhere, whatever the hour was planned for.
+        in_transit = bool(self._transit and self._transit.phase in (TransitPhase.PREPARING,
+                                                                    TransitPhase.IN_TRANSIT))
+        planned_slot = None if in_transit else self._daily_planner.get_planned_activity(
+            self._local_world_now().hour)
+
+        # Check if conditions are right for an intimate activity -- never in
+        # a work shift, a commute, a class or study, nor inside her sleep
+        # window (spec R6: they used to pre-empt both). Her intimacy rate,
+        # when set, scales the chance (DesireSystem).
+        # Nor on the way somewhere (it would take her home mid-transit). The
+        # sleep window is a sleeper's: an AI persona, who rests through hers
+        # awake, keeps her nights as they were (ruling T10-R3).
+        intimacy_allowed = (not in_transit
+                            and not self._daily_planner.is_commitment(planned_slot)
+                            and (self._is_ai or not self._energy.in_sleep_window(self._local_world_now())))
+        if intimacy_allowed and self._desire_system.should_do_intimate_activity(
             self._energy.effective_level,
-            self._world.time_of_day
+            self._persona_time_of_day
         ):
             intimate_activity = self._desire_system.select_intimate_activity()
             if intimate_activity:
                 # Move to home for intimate activities
-                if self._world.current_location != "home":
-                    self._world.move_to("home")
+                if self._current_location != "home":
+                    _move_persona_to(self, "home")
 
                 # Execute intimate activity
-                result = self._desire_system.execute_intimate_activity(intimate_activity)
+                result = self._desire_system.execute_intimate_activity(intimate_activity, now=self._world_clock()())
+                result["narrative"] = self._render_text(result["narrative"])
+                result["thoughts"] = [self._render_text(t) for t in result["thoughts"]]
 
                 # Apply energy cost
                 if result["energy_cost"] < 0:
@@ -3795,15 +5749,9 @@ class LifeService:
                 else:
                     self._energy.consume_energy(result["energy_cost"])
 
-                # Apply emotion effects
+                # Apply emotion effects: the host's engine and mood
                 if result["emotion_effects"]:
-                    # Update real-time EmotionEngine
-                    if self._emotion_engine:
-                        for emotion, intensity in result["emotion_effects"].items():
-                            try:
-                                self._emotion_engine.add_emotion(emotion, intensity)
-                            except Exception:
-                                pass
+                    self._feel(result["emotion_effects"])
 
                     # Persist emotions for multi-day arcs
                     self._persist_activity_emotions(
@@ -3816,7 +5764,7 @@ class LifeService:
                     activity_name=result["activity_name"],
                     category=ActivityCategory.REST,  # Categorize as rest for now
                     started_at=datetime.now(),
-                    location=self._world.current_location,
+                    location=self._current_location,
                     weather=self._world.weather,
                     narrative=result["narrative"],
                     thoughts_generated=result["thoughts"],
@@ -3835,21 +5783,45 @@ class LifeService:
                     if would_share:
                         self._create_shareable(log, context)
 
+                # Not an episode of her memory stream (Task 12): what her memory
+                # keeps is quoted back to her in the host's prompt (the moment,
+                # nostalgia), and these -- several a day, as strongly felt as
+                # the library makes them -- would outrank the rest of her life
+                # and, kept by importance, outlast it (the Task 12 report).
                 logger.info(f"Intimate activity: {intimate_activity.name}")
                 return
 
-        # Consult daily plan for the current hour (persona-local so her schedule
-        # follows her own timezone, not the server's clock).
-        planned_slot = self._daily_planner.get_planned_activity(self.persona_local_hour())
-        planned_activity_name = planned_slot.activity_name if planned_slot and not planned_slot.completed else None
+        planned_activity_name = planned_slot.activity_name if planned_slot else None
 
-        # Try to follow the plan; fall back to ad-hoc selection
+        excluded = self._excluded_activities()
+        if planned_activity_name in excluded:
+            planned_activity_name = None
+
+        # What she needs and feels now: what she chooses by (Task 10).
+        state = self._choice_state()
+
+        # Try to follow the plan; fall back to ad-hoc selection. Forced to
+        # rest, she still keeps a planned slot that is itself rest.
         activity = None
-        if planned_activity_name and not force_rest:
+        if planned_activity_name:
             activity = self._activity_engine.get_activity(planned_activity_name)
+            if activity and force_rest and activity.category != ActivityCategory.REST:
+                activity = None
             # Verify energy requirement
             if activity and self._energy.effective_level < activity.min_energy:
                 activity = None  # Can't do this right now
+            # An impulsive persona sometimes drops a free-time slot on a whim
+            # (her plan_deviation_chance; no draw at all at neutral).
+            if activity and self._daily_planner.abandons_slot(planned_slot):
+                activity = None
+            # A pressing need (hungry: aura_life.activities.choice
+            # .PRESSING_NEEDS) takes a free-time slot the planned activity
+            # does nothing for: she eats instead. Anchors and commitments
+            # are kept.
+            if activity and self._daily_planner.is_free_time(planned_slot):
+                meets = self._preferences.satisfaction(activity)
+                if any(meets.get(need, 0.0) <= 0.0 for need in pressing_needs(state)):
+                    activity = None
 
         if not activity:
             # Get salient values for value-influenced scoring
@@ -3863,86 +5835,185 @@ class LifeService:
                     ]
             activity = self._activity_engine.select_activity(
                 energy_level=self._energy.effective_level,
-                time_of_day=self._world.time_of_day,
+                time_of_day=self._persona_time_of_day,
                 weather=self._world.weather,
-                current_location=self._world.current_location,
+                current_location=self._current_location,
                 active_goals=self._goal_engine.active_goals,
                 force_rest=force_rest,
                 season=self._world.season,
                 salient_values=salient_vals,
-                habit=self._habit_factors().get(habit_band(self.persona_local_hour())),
+                exclude=excluded,
+                state=state,
+                # The habits of her part of the day on her local world hour, the hour her plan runs on (Task 28's
+                # _plan_instant), as track_activity dates them: never the host's.
+                habit=self._habit_factors().get(habit_band(self._local_world_now().hour)),
             )
 
         if not activity:
             logger.debug("No suitable activity found")
             return
 
+        # The people she lives with who are free for it may join her (Task
+        # 11): she does it first -- it may take her elsewhere -- then each of
+        # them, where she now is, and as it went (Task 14: one event, one
+        # outcome; each feels it her own way).
+        joiners = self._invite_housemates(activity, in_transit)
+        mine, theirs = self._joint_sides(joiners) if joiners else (None, [])
+        log = self._perform_activity(activity, planned_slot, joint=mine)
+        for (other, their_activity, their_slot), side in zip(joiners, theirs):
+            other._join_housemate(their_activity, their_slot,
+                                  replace(side, place=self._current_location, started_at=log.started_at,
+                                          outcome=log.outcome))
+
+    def _excluded_activities(self) -> set:
+        """The activities of hers she cannot take up now. Her sleep activity
+        (tag "sleep": the contemporary "sleeping") is never an ordinary
+        choice -- sleep is a state (EnergySystem.update_sleep) -- and a nap
+        (tag "nap") needs her tired, once a waking day (EnergySystem.can_nap).
+        An AI persona has no body: nothing that needs one (tags "physical",
+        "meal") is hers to choose -- her plan already leaves them out, and a
+        free choice (rest forced on her, say) could still land on a meal or a
+        shower (Task 10 fix round 1, finding 9)."""
+        excluded = set(self._setting.names_tagged("sleep"))
+        if not self._energy.can_nap(self._persona_time_of_day):
+            excluded |= self._setting.names_tagged("nap")
+        if self._is_ai:
+            excluded |= self._setting.names_tagged("physical") | self._setting.names_tagged("meal")
+        return excluded
+
+    def _perform_activity(self, activity, planned_slot, joint: Optional[JointSide] = None) -> ActivityLog:
+        """Do ``activity`` now, and live what it does to her: where she does
+        it, how it goes, its narrative in her log, its cost and what she feels
+        about it, her plan, her needs, her engines, and what the people in her
+        life and the world do meanwhile. ``planned_slot`` is her plan for the
+        hour (it may send her somewhere). Returns the entry recorded in her
+        log.
+
+        How it goes (Task 14): a success, a mixed outcome or a failure
+        (:meth:`_activity_outcome`, from her skill at it, her energy and her
+        mood as she comes to it), told in her setting's words; what she feels
+        is her appraisal of it (:meth:`_appraise_activity`), not the setting's
+        fixed feelings, and it reaches her mood and her memory. What did not
+        go well is nothing to share and no life event; a failure is also no
+        step toward her goals, fulfils no want, makes nothing and turns no
+        page.
+
+        ``joint``: her side of doing it with a housemate (Task 11) -- whom
+        she does it with and the line that says so in her log, each worded
+        from her side; joining, she goes where the housemate is
+        (``joint.place``) instead of where her plan would send her, her
+        entry takes the instant of the housemate's (``joint.started_at``),
+        and it went as it went for the housemate (``joint.outcome``). Their
+        company is a meaningful interaction for her, once."""
+        # How she comes to it (Task 14): her needs, mood and energy before
+        # doing it moves any of them -- what its outcome is rolled from and
+        # what her appraisal of it weighs.
+        before = self._choice_state()
+        outcome, chances = self._activity_outcome(activity, before, joint)
+
         # Sync world location with the planner's slot location
         # Skip when transit is active (PREPARING or IN_TRANSIT) — don't let the
         # hourly slot system override the transit location.
-        if self._transit and self._transit.phase in (TransitPhase.PREPARING, TransitPhase.IN_TRANSIT):
+        if joint is not None and joint.place is not None:
+            if joint.place != self._current_location:
+                _move_persona_to(self, joint.place)  # where the housemate she joins is
+        elif self._transit and self._transit.phase in (TransitPhase.PREPARING, TransitPhase.IN_TRANSIT):
             pass  # Transit controls location
-        elif planned_slot and planned_slot.location and planned_slot.location != self._world.current_location:
-            self._world.move_to(planned_slot.location)
-        elif activity.suitable_locations and self._world.current_location not in activity.suitable_locations:
-            new_location = random.choice(activity.suitable_locations)
-            self._world.move_to(new_location)
+        elif planned_slot and planned_slot.location and planned_slot.location != self._current_location:
+            _move_persona_to(self, planned_slot.location)
+        elif planned_slot and planned_slot.location and activity.name == planned_slot.activity_name:
+            # Doing what her plan says where it says: she stays, for the whole
+            # hour -- even where the activity is not one of its usual places
+            # (the plan's outing, a meetup somewhere new), rather than being
+            # moved away on the slot's second tick and back on its third.
+            pass
+        elif activity.suitable_locations and self._current_location not in activity.suitable_locations:
+            new_location = self._service_rng.choice(activity.suitable_locations)
+            _move_persona_to(self, new_location)
 
         # Execute activity
         log = self._activity_engine.execute_activity(
             activity=activity,
-            location=self._world.current_location,
+            location=self._current_location,
             weather=self._world.weather,
             energy_before=self._energy.effective_level,
+            outcome=outcome,
         )
+        # A fresh ActivityLog each call, so rendering its narrative in place is
+        # safe -- it never touches Activity.narrative_templates, the pool. The
+        # activity is named for the library's neutral words for an outcome its
+        # setting has none for (NEUTRAL_OUTCOME_NARRATIVES' {Activity}).
+        log.narrative = self._render_text(log.narrative, **self._activity_name_fields(activity.name))
+        if joint is not None:
+            # Whom she did it with, from her side -- in the entry she keeps --
+            # at the instant of the one she joined.
+            log.narrative = _add_sentence(log.narrative, self._render_text(joint.line, name=joint.with_name))
+            if joint.started_at is not None:
+                log.started_at = log.ended_at = joint.started_at
 
-        # Apply energy cost
-        if activity.energy_cost < 0:
+        # Apply energy cost. A nap is sleep: it lowers her sleep pressure for
+        # its length as well as restoring energy (EnergySystem.nap).
+        if "nap" in activity.tags:
+            self._energy.nap(activity.duration_minutes)
+        elif activity.energy_cost < 0:
             self._energy.restore_energy(abs(activity.energy_cost))
         else:
             self._energy.consume_energy(activity.energy_cost)
 
-        # Apply emotion effects
+        # What she feels about it (Task 14): her appraisal of how it went --
+        # the goals, needs and values it served, whose doing it was, how
+        # expected it was -- not the setting's fixed feelings; to the host's
+        # engine and her mood, her volatility already in it.
+        spikes = self._appraise_activity(activity, outcome, chances, before)
+        log.emotions_triggered = emotions_of(spikes)
         if log.emotions_triggered:
-            # Update real-time EmotionEngine
-            if self._emotion_engine:
-                for emotion, intensity in log.emotions_triggered.items():
-                    try:
-                        self._emotion_engine.add_emotion(emotion, intensity)
-                    except Exception:
-                        pass  # Emotion might not exist in wheel
+            self._feel(log.emotions_triggered, reactivity_applied=True)
 
             # Persist emotions for multi-day arcs
             self._persist_activity_emotions(activity.name, log.emotions_triggered)
 
-            # Feed into affect system
-            for emotion, intensity in log.emotions_triggered.items():
-                self._affect.on_emotion_event(emotion, intensity)
-
         # Activity-based affect update (regulation recharge, stress relief)
         self._affect.on_activity(activity.name)
 
-        # Update goal progress
-        self._goal_engine.update_progress_from_activity(log)
+        # A failure (Task 14) is no step toward her goals, inspires no new
+        # one, fulfils no want of hers, makes nothing and turns no page;
+        # something that half worked out still counts.
+        accomplished = outcome != FAIL
 
-        # Maybe generate new goal from experience
-        self._goal_engine.generate_goal_from_activity(log)
+        if accomplished:
+            # Update goal progress (on the world clock, Task 19)
+            self._goal_engine.update_progress_from_activity(log, now=self._world_clock()())
 
-        # Track against daily plan and desires (persona-local hour)
-        self._daily_planner.mark_slot_completed(self.persona_local_hour(), activity.name)
-        self._daily_planner.fulfill_desire(activity.name)
+            # Maybe generate new goal from experience
+            self._goal_engine.generate_goal_from_activity(log, now=self._world_clock()())
+
+        # Track against daily plan and desires (her local world hour)
+        self._daily_planner.mark_slot_completed(self._local_world_now().hour, activity.name)
+        if accomplished:
+            self._daily_planner.fulfill_desire(activity.name)
         self._daily_planner.generate_desire_from_activity(activity.name)
 
         # Record activity
         self._record_activity(log)
 
+        # The shareables and life events this activity itself makes, for her
+        # memory of it (Task 12; recorded at the end, once she has lived all
+        # of it).
+        memory_tags: List[str] = []
+
         # Maybe create shareable experience
         if log.share_worthy:
-            self._create_shareable(log)
+            memory_tags.extend(_share_ids(self._create_shareable(log)))
 
         # === Basic needs + Room (humans only) ===
         if not self._is_ai:
-            self._sustenance.on_activity(activity.name)
+            # A meal feeds her whatever it is called (tag "meal"), and only a
+            # meal does (ruling T9-R8).
+            self._sustenance.on_activity(activity.name, now=self._world_clock()(), meal="meal" in activity.tags)
+            if "meal" in activity.tags:
+                # A live meal after a paused host's hours: a catch-up no longer
+                # lives those hours again (it would undo this meal).
+                self._sustenance_gap_charge = None
             if activity.name in ("morning shower", "taking a long bath"):
                 self._basic_needs.showered_today = True
             if activity.name in ("waking up", "having breakfast"):
@@ -3952,36 +6023,42 @@ class LifeService:
             # Tidying / cleaning restores tidiness (Habitation engine).
             self._habitation.on_activity(activity.name)
 
-        # === Media progress ===
-        if activity.name == "reading" and self._media.current_book:
-            self._media.book_progress += random.uniform(0.05, 0.12)
+        # === Media progress === (none when reading went wrong)
+        if accomplished and activity.name == "reading" and self._media.current_book:
+            self._media.book_progress += self._service_rng.uniform(0.05, 0.12)
             if self._media.book_progress >= 1.0:
                 finished_title = self._media.current_book
                 self._record_finished_book(finished_title)
-                self._create_shareable_from_text(
+                shared = self._create_shareable_from_text(
                     f"Just finished reading {finished_title}!",
                     context="After finishing the last page"
                 )
+                book_emotions = {"satisfied": 0.3, "thoughtful": 0.2}
                 event = self._life_events.record_event(
                     event_type="achievement",
                     title=f"Finished reading {finished_title}",
                     description=f"Just finished the last page of {finished_title}",
-                    emotional_impact={"satisfied": 0.3, "thoughtful": 0.2},
+                    emotional_impact=book_emotions,
                     share_urgency=0.7,
                     source="book_completion",
                 )
                 self._bridge_life_event(event)
+                self._remember(f"finishing “{finished_title}”", place=log.location,
+                               emotions=book_emotions, tags=("book", *_share_ids(shared, event)))
                 self._media.current_book = self._pick_new_book()
                 self._media.book_progress = 0.0
 
-        # === Skill progression ===
-        if activity.name in SKILL_MAPPINGS:
-            skill_name, increment = SKILL_MAPPINGS[activity.name]
+        # === Skill progression (the skill her setting says this trains) ===
+        skill_mappings = self._setting.skill_mappings
+        if activity.name in skill_mappings:
+            skill_name, increment = skill_mappings[activity.name]
             self._update_skill(skill_name, increment, log)
 
         # === Body update from activity ===
-        self._body.on_activity(activity.name)
-        self._body.on_substance_activity(activity.name)
+        self._body.on_activity(activity.name, now=self._world_clock()())
+        # A drink by its name or its tag (ruling T10-R2) -- never to an AI
+        # persona, whatever the activity's tags (Task 19, ruling T19-R6).
+        self._give_substance(activity.name, activity.tags)
 
         # === Location effects ===
         self._apply_location_effects(log.location)
@@ -3998,11 +6075,12 @@ class LifeService:
                 if cat_tag in v.aligned_tags:
                     self._identity.reinforce_value(v.name)
 
-        # === Value conflict detection ===
+        # === Value conflict detection === (compromising on a value she holds
+        # weighs on her for a while: an episode)
         if cat_tag:
             conflict = self._identity.check_value_conflict(cat_tag)
             if conflict:
-                self._affect.on_stressor_added(f"value conflict: {conflict['value']} vs {conflict['conflicting_tag']}")
+                self._affect.raise_stressor("torn", now=self._world_clock()(), value=conflict["value"])
                 self._cognitive.on_conflict(f"{conflict['value']} challenged by {conflict['tension_with']}")
 
         # === Drive: curiosity + comfort zone ===
@@ -4019,86 +6097,111 @@ class LifeService:
 
         # === Physical-life engines react to the activity (humans only) ===
         if not self._is_ai:
-            self._finance.on_activity(activity.name)   # money-spending activities
-            self._career.on_activity(activity.name)    # work activities shift workload
+            # Money-spending activities, paid for once in their world hour.
+            self._finance.on_activity(activity.name, now=self._world_clock()())
+            # Work activities shift workload -- but not her shift's and
+            # commute's own hours (tags "work", "commute"): CareerSystem.tick
+            # already counts the workday, and until Task 10 made them
+            # activities those hours never reached on_activity (0.05 a tick
+            # would have filled her workload by noon every workday). Nor a
+            # meetup (tag "meetup"): "meeting up" carries CareerSystem's
+            # "meeting" keyword and is no work at all (fix round 1, finding 8).
+            if not activity.tags & {"work", "commute", "meetup"}:
+                self._career.on_activity(activity.name)
             self._errands.on_activity(activity.name)   # chores clear the backlog
 
-        # === Life Events: auto-record notable activities ===
-        life_event = self._life_events.on_activity(
-            activity_name=activity.name,
-            emotions=log.emotions_triggered or {},
-            share_worthy=log.share_worthy,
-        )
+        # === Life Events: auto-record notable activities === Only one that
+        # went well (Task 14): a life event is something she is eager to
+        # share, and what did not go well is not news to share (ruling
+        # T11-R1's rule for unwelcome news from her people, for her own).
+        life_event = None
+        if outcome == SUCCESS:
+            life_event = self._life_events.on_activity(
+                activity_name=activity.name,
+                emotions=log.emotions_triggered or {},
+                share_worthy=log.share_worthy,
+            )
         if life_event:
             self._bridge_life_event(life_event)
+            memory_tags.extend(_share_ids(life_event))
 
-        # === Behavior: routines + creative output; dated (world clock, her hour) so habits learn from it ===
-        self._behavior.track_activity(activity.name, at=self._world_clock()(), hour=self.persona_local_hour())
-        artifact = self._behavior.on_creative_activity(
-            activity.name,
-            mood=next(iter(log.emotions_triggered), "") if log.emotions_triggered else "",
-            focus=self._cognitive.focus.quality if self._cognitive else 0.5,
-        )
-        if artifact:
-            self._create_shareable_from_text(
-                f"She made something: {artifact.title} ({artifact.artifact_type})",
-                context=f"While {activity.name}",
+        # === Behavior: routines + creative output === (nothing made when it
+        # went wrong); dated (world clock, her local world hour) so habits learn from it
+        self._behavior.track_activity(activity.name, at=self._world_clock()(), hour=self._local_world_now().hour)
+        artifact = None
+        if accomplished:
+            artifact = self._behavior.on_creative_activity(
+                activity.name,
+                mood=next(iter(log.emotions_triggered), "") if log.emotions_triggered else "",
+                focus=self._cognitive.focus.quality if self._cognitive else 0.5,
             )
+        if artifact:
+            made_something = self._render_text("{Subj} made something:")
+            memory_tags.extend(_share_ids(self._create_shareable_from_text(
+                f"{made_something} {artifact.title} ({artifact.artifact_type})",
+                context=f"While {activity.name}",
+            )))
 
-        # === Social tick ===
-        social_event = self._social.tick()
+        # === The company of the housemate(s) she did it with (Task 11) ===
+        if joint is not None:
+            self._on_housemate_company(joint, activity.name)
+
+        # === Social tick === (never the people she lives with: their own
+        # lives run beside hers -- Task 11. With no one to skip, the call is
+        # the bare one it always was.)
+        housemates = self._housemate_npc_names()
+        social_event = self._social.tick(skip=housemates, now=self._world_clock()())
         if social_event:
-            log.narrative += f" {social_event.description}."
-            self._identity.update_from_social_event(social_event)
-            self._social.update_arc(social_event.npc_name, "interaction")
-            self._social.drain_social_battery()
-            if social_event.share_worthy:
-                self._create_shareable_from_text(
-                    social_event.description,
-                    context=f"While {activity.name}"
-                )
-            # Value alignment with NPC
-            npc = self._social._npcs.get(social_event.npc_name)
-            if npc:
-                alignment = self._identity.get_npc_value_alignment(npc)
-                arc = self._social._arcs.get(social_event.npc_name)
-                if arc and alignment != 0:
-                    arc.closeness = max(0.1, min(1.0, arc.closeness + alignment * 0.01))
+            self._on_social_event(social_event, log, activity.name)
 
-        # === Micro-event (20% chance) ===
-        if random.random() < 0.20:
-            event = random.choice(MICRO_EVENTS)
-            log.narrative += f" {event['text']}."
-            if event.get("emotion") and self._emotion_engine:
-                for emo, intensity in event["emotion"].items():
-                    try:
-                        self._emotion_engine.add_emotion(emo, intensity)
-                    except Exception:
-                        pass
+        # === Micro-event (MICRO_EVENT_CHANCE, scaled by her openness; none
+        #     rolled when her setting has no micro-events) ===
+        micro_events = self._setting.micro_events
+        if micro_events and self._service_rng.random() < self._micro_event_chance:
+            event = self._service_rng.choice(micro_events)
+            # Render into a local: micro-events are the setting's shared dicts,
+            # so writing the rendered text back into event["text"] would
+            # permanently fix that pool entry's pronoun to whichever persona
+            # rendered it first.
+            event_text = self._render_text(event["text"])
+            log.narrative += f" {event_text}."
+            if event.get("emotion"):
+                self._feel(event["emotion"])
+            shared = None
             if event.get("share_worthy"):
-                self._create_shareable_from_text(
-                    event["text"],
+                shared = self._create_shareable_from_text(
+                    event_text,
                     context=f"While {activity.name}"
                 )
+            # A small moment she keeps (Task 12), in her setting's words
+            # addressed to her.
+            self._remember(self._addressed_to_her(event["text"]), place=log.location,
+                           emotions=event.get("emotion"), tags=("moment", *_share_ids(shared)))
 
         # === Chaos event ===
         chaos_event = self._chaos.roll(
             current_activity=activity.name,
             energy=self._energy.effective_level,
             regulation=self._affect.regulation.capacity if self._affect else 0.7,
+            # Her day's cap, on her local world day (Task 19).
+            now=self._local_world_now().replace(tzinfo=None),
         )
         if chaos_event:
+            # Her setting's words for it, before they are rendered for her log:
+            # what her memory keeps, addressed to her (Task 12).
+            told = chaos_event["text"]
+            # A fresh dict per roll() call (never a shared pool entry), so
+            # rendering in place is safe and also fixes export_state()'s
+            # last_chaos_event / today_events, which read this same object.
+            chaos_event["text"] = self._render_text(chaos_event["text"])
             log.narrative += f" {chaos_event['text']}."
-            if chaos_event.get("emotions") and self._emotion_engine:
-                for emo, intensity in chaos_event["emotions"].items():
-                    try:
-                        self._emotion_engine.add_emotion(emo, intensity)
-                    except Exception:
-                        pass
-                for emo, intensity in chaos_event["emotions"].items():
-                    self._affect.on_emotion_event(emo, intensity)
+            # Mood feels it whether or not a host engine was injected (it used
+            # to be fed only inside the engine branch).
+            if chaos_event.get("emotions"):
+                self._feel(chaos_event["emotions"])
+            shared = event = None
             if chaos_event.get("share_worthy"):
-                self._create_shareable_from_text(
+                shared = self._create_shareable_from_text(
                     chaos_event["text"],
                     context=f"While {activity.name}",
                 )
@@ -4116,18 +6219,28 @@ class LifeService:
             effect = chaos_event.get("effect")
             if effect:
                 self._apply_chaos_effect(effect)
+            self._remember(self._addressed_to_her(told), place=log.location, emotions=chaos_event.get("emotions"),
+                           tags=("chaos", chaos_event.get("type") or "", *_share_ids(shared, event)))
 
-        # === Dream generation (when sleeping) ===
-        if activity.name == "sleeping":
-            self._body.on_sleep(
-                stress_level=self._affect.stress.level,
-                caffeine_boost=self._energy.state.caffeine_boost,
-            )
-            dream = self._generate_dream()
-            if dream:
-                self._create_shareable_from_text(dream, context="When she woke up")
+        # === Her memory of what she did (Task 12) === as she would name it,
+        # with the housemates she did it with ("together"; the activity's own
+        # "joint" tag says only that it can be shared), once she has lived all
+        # of it -- felt as she appraised it (Task 14): its valence is how it
+        # felt, not her mood, and one that did not go well is tagged with how
+        # it went ("mixed", "fail").
+        self._remember(
+            self._activity_for_display(activity.name),
+            place=log.location,
+            people=(joint.names or (joint.with_name,)) if joint is not None else (),
+            emotions=log.emotions_triggered,
+            valence=appraised_valence(spikes),
+            tags=("activity", activity.category.value, *sorted(activity.tags),
+                  *(("together",) if joint is not None else ()),
+                  *((outcome,) if outcome != SUCCESS else ()), *memory_tags),
+            activity=activity.name,
+        )
 
-        logger.info(f"Activity: {activity.name} - {log.narrative[:50]}...")
+        logger.info(f"Activity: {activity.name} ({outcome}) - {log.narrative[:50]}...")
 
         # Mark pipeline digests as stale
         if hasattr(self, '_pipeline') and self._pipeline:
@@ -4135,6 +6248,201 @@ class LifeService:
 
         # Check for visual description transitions
         self._check_visual_transition()
+        return log
+
+    # ============= How it goes, and what she feels about it (Task 14) =============
+
+    def _skill_level(self, activity) -> Optional[float]:
+        """Her level at the skill ``activity`` trains (her setting's
+        ``skill_mappings``): 0 for one she has never practised, ``None`` when
+        it trains none."""
+        mapping = self._setting.skill_mappings.get(activity.name)
+        if not mapping:
+            return None
+        progress = self._skills.get(mapping[0])
+        return progress.level if progress is not None else 0.0
+
+    def _activity_outcome(self, activity, state: ChoiceState,
+                          joint: Optional[JointSide]) -> Tuple[str, Dict[str, float]]:
+        """How ``activity`` goes and the chances it went by
+        (``ActivityEngine.roll_outcome``, on her own "outcome" stream): from
+        her skill at it, and her energy and mood as she comes to it
+        (``state``). Joining a housemate, it went as it went for the
+        housemate (``joint.outcome``) -- one event, one outcome, and no roll
+        of hers; its chances are still her own, for her appraisal."""
+        skill = self._skill_level(activity)
+        if joint is not None and joint.outcome in OUTCOMES:
+            return joint.outcome, outcome_chances(activity, energy=state.energy, valence=state.valence,
+                                                  skill=skill)
+        return self._activity_engine.roll_outcome(activity, energy=state.energy, valence=state.valence,
+                                                  skill=skill)
+
+    def _appraise_activity(self, activity, outcome: str, chances: Dict[str, float],
+                           state: ChoiceState) -> List[EmotionSpike]:
+        """What she feels about how ``activity`` went
+        (:func:`aura_life.emotion.appraisal.appraise`): its own feelings as
+        her setting wrote them, read against her active goals, the needs she
+        came to it with (``state``) as her traits weigh them, her values,
+        whose doing it was (a commitment -- a shift, the commute, a class,
+        study -- is not hers) and how expected the outcome was
+        (``chances``), scaled by her volatility. With ``appraisal_llm``, the
+        host's LLM may name it instead (:meth:`_appraise_with_llm`)."""
+        category = getattr(activity.category, "value", str(activity.category))
+        event = AppraisalEvent(
+            what=activity.name,
+            outcome=outcome,
+            emotions=activity.emotion_effects,
+            satisfies=self._preferences.satisfaction(activity),
+            aligned_tags=frozenset({category, *activity.tags}),
+            chosen=not (activity.tags & set(COMMITMENT_TAGS)),
+            success_chance=chances[SUCCESS],
+        )
+        goals = self._goal_engine.active_goals
+        values = self._identity.get_salient_values(limit=5) if self._identity else []
+        spikes = appraise(event, self._params, goals, state.needs, values)
+        if self._appraisal_llm:
+            spikes = self._appraise_with_llm(event, goals, state.needs, values, fallback=spikes)
+        return spikes
+
+    def _get_appraisal_llm(self):
+        """The LLM client for the optional appraisal (``appraisal_llm=True``
+        at construction), or ``None`` when the host registered no
+        ``get_llm_service`` hook or asking for it raised -- the deterministic
+        appraisal stands, no ERROR (mirrors :meth:`_get_reflection_llm`)."""
+        try:
+            from aura_life.hooks import get_llm_service
+            return get_llm_service()
+        except Exception:
+            return None
+
+    def _appraise_with_llm(self, event: AppraisalEvent, goals, needs, values,
+                           fallback: List[EmotionSpike]) -> List[EmotionSpike]:
+        """What the host's LLM says she feels about ``event``
+        (:func:`~aura_life.emotion.appraisal.llm_appraisal_prompt`),
+        validated (:func:`~aura_life.emotion.appraisal.parse_llm_appraisal`:
+        vocabulary names that fit how it went -- a failure is never felt as
+        joy, fix round 1 finding C1) and scaled by her volatility -- or
+        ``fallback``, the deterministic appraisal: with no client, when
+        asking raises (logged at DEBUG), or when the reply names nothing
+        usable (logged at WARNING: a configured model answered something
+        unusable). Never an ERROR. The client is called synchronously, on
+        her tick -- under the household's lock when she has housemates -- and
+        must return or raise within a bounded time; that bound is the host
+        client's (ruling T14-R2), and a raise falls back here."""
+        llm = self._get_appraisal_llm()
+        if llm is None:
+            return fallback
+        titles = [goal.title for goal in goals if event.what in goal.related_activities]
+        prompt = llm_appraisal_prompt(event, goal_titles=titles, needs=needs, values=values)
+        try:
+            raw = llm.generate(prompt)
+        except Exception:
+            logger.debug("LLM appraisal failed; the deterministic appraisal stands", exc_info=True)
+            return fallback
+        emotions = parse_llm_appraisal(raw, outcome=event.outcome)
+        if emotions is None:
+            logger.warning("LLM appraisal's reply (%d chars) named no feeling the emotion vocabulary knows "
+                           "that fits a %s outcome; the deterministic appraisal stands",
+                           len(str(raw or "")), event.outcome)
+            return fallback
+        return spikes_from_llm(emotions, self._params)
+
+    def _activity_name_fields(self, name: str) -> Dict[str, str]:
+        """The activity as she would name it, for a narrative's ``{activity}``
+        / ``{Activity}``
+        (:data:`aura_life.activities.activity_engine.NEUTRAL_OUTCOME_NARRATIVES`)."""
+        shown = self._activity_for_display(name)
+        return {"activity": shown, "Activity": shown[:1].upper() + shown[1:]}
+
+    def _on_social_event(self, event, log: ActivityLog, activity_name: str) -> None:
+        """What one of her people did reaches her, during ``activity_name``.
+
+        Its line joins the activity's narrative, how she sees them follows it
+        (``IdentitySystem.update_from_social_event``), it costs her social
+        battery, and it may be something to share -- as always. What it is to
+        her (``event.valence``, from the NPC's kind -- Task 11) decides the
+        rest. Contact she is glad of eases her loneliness: a call or time
+        together as a meaningful interaction, a text or an invitation a small
+        one (``AffectSystem.on_social_interaction``'s two reliefs). Anything
+        from someone she does not want to hear from -- getting in touch, or
+        her thinking of them -- is felt (``UNWELCOME_KIND_EMOTIONS``), feeds
+        her stress (``UNWELCOME_STRESSOR``: named for them), strains their
+        relationship arc where anything else counts as an interaction, and is
+        never something to share (ruling T11-R1). Her thinking of someone she
+        is glad of is no contact: it eases nothing."""
+        event.description = self._render_text(event.description)
+        log.narrative += f" {event.description}."
+        self._identity.update_from_social_event(event)
+        unwelcome = event.valence < 0
+        self._social.update_arc(event.npc_name, "conflict" if unwelcome else "interaction", now=self._world_clock()())
+        self._social.drain_social_battery()
+        if event.valence > 0:
+            self._affect.on_social_interaction(meaningful=event.event_type in MEANINGFUL_CONTACT_TYPES,
+                                               now=self._world_clock()())
+        elif unwelcome:
+            self._feel(UNWELCOME_KIND_EMOTIONS.get(event.kind, {}))
+            # Named for them, an episode that lapses (affect's "unwelcome"
+            # stressor, UNWELCOME_STRESSOR's words).
+            self._affect.raise_stressor("unwelcome", now=self._world_clock()(), name=event.npc_name)
+        shared = None
+        if event.share_worthy and not unwelcome:
+            shared = self._create_shareable_from_text(
+                event.description,
+                context=f"While {activity_name}"
+            )
+        # Her memory of it (Task 12): who, and what they did -- never the
+        # event's line, which is written about her -- felt as it was
+        # (nothing she names, from someone she is glad of).
+        self._remember(contact_phrase(event.event_type, event.npc_name), place=log.location,
+                       people=(event.npc_name,),
+                       emotions=UNWELCOME_KIND_EMOTIONS.get(event.kind, {}) if unwelcome else None,
+                       tags=("social", event.event_type, event.kind, *_share_ids(shared)))
+        # Value alignment with NPC. `_npcs` is a Dict[str, NPC] keyed by
+        # name -- iterating it directly yields the keys (str), and `n.name`
+        # on a str raised AttributeError every time a social event fired.
+        npc = self._social._npcs.get(event.npc_name)
+        if npc:
+            alignment = self._identity.get_npc_value_alignment(npc)
+            arc = self._social._arcs.get(event.npc_name)
+            if arc and alignment != 0:
+                arc.closeness = max(0.1, min(1.0, arc.closeness + alignment * 0.01))
+
+    def _on_fell_asleep(self) -> None:
+        """She has just fallen asleep: one entry for the whole night, named for
+        her setting's sleep activity (tag "sleep": the contemporary and
+        universal "sleeping"), and the night's sleep quality from how she
+        went to bed."""
+        activity = next(
+            (a for a in self._activity_engine.get_all_activities() if "sleep" in a.tags), None)
+        energy = self._energy.effective_level
+        self._record_activity(ActivityLog(
+            activity_name=activity.name if activity else "sleeping",
+            category=activity.category if activity else ActivityCategory.REST,
+            started_at=self._world_clock()(),
+            weather=self._world.weather,
+            narrative=self._render_text("{Subj} drifted into restful sleep"),
+            energy_before=energy,
+            energy_after=energy,
+        ))
+        self._body.on_sleep(
+            stress_level=self._affect.stress.level,
+            caffeine_boost=self._energy.state.caffeine_boost,
+        )
+        logger.info("The persona went to sleep")
+
+    def _on_woke(self) -> None:
+        """She has just woken from the night: it may have left a dream to
+        share -- and to remember (ruling T17-R3): an episode tagged "dream"
+        and with its shareable's id, told to her in the second person, of no
+        place; a DREAM_SHARE is made only of that episode."""
+        drawn = self._draw_dream()
+        if drawn:
+            template, fields = drawn
+            shared = self._create_shareable_from_text(self._render_text(template, **fields),
+                                                      context=self._render_text("When {subj} woke up"))
+            self._remember(_render_second_person(template, user=self._user_info, **fields), place="",
+                           tags=("dream", *_share_ids(shared)))
+        logger.info("The persona woke up")
 
     def _apply_chaos_effect(self, effect: dict) -> None:
         """Apply a chaos event's optional state-mutating `effect` to an engine.
@@ -4179,13 +6487,15 @@ class LifeService:
         if not self._persona_id or not self._definition:
             return
 
-        # Get current activity/location from planner
+        # Get current activity/location from planner (at her local world time;
+        # in a joint window's tail, the instant she joined, as her held
+        # location: T19-R5)
         current_activity = "relaxing"
         current_location = self.get_current_location()
         try:
             plan = self._daily_planner.current_plan
             if plan:
-                slot = plan.get_current_slot()
+                slot = plan.get_current_slot(self._activity_instant())
                 if slot:
                     current_activity = slot.activity_name or "relaxing"
         except Exception:
@@ -4284,54 +6594,63 @@ class LifeService:
                 context=f"Just arrived at {label} after being out.",
                 urgency=0.95,
                 emotional_weight=0.4,
-                delay_hours=random.uniform(1 / 60, 3 / 60),  # 1-3 minutes
+                delay_hours=self._service_rng.uniform(1 / 60, 3 / 60),  # 1-3 minutes
             )
             logger.info(f"[ARRIVAL] Trigger created for {self._persona_id}: arrived at {label}")
         except Exception as e:
             logger.warning(f"Failed to create arrival trigger: {e}")
 
     def _on_goal_tick(self) -> None:
-        """Handle goal tick."""
+        """Handle goal tick, on the world clock (Task 19): her day's goal,
+        a daily goal's end, a goal's stall and the goalless spell."""
+        world_now = self._world_clock()()
         # Generate daily goal
-        self._goal_engine.generate_daily_goal()
+        self._goal_engine.generate_daily_goal(now=world_now)
 
         # Check completions
-        completed = self._goal_engine.check_goal_completion()
+        completed = self._goal_engine.check_goal_completion(now=world_now)
         for goal in completed:
             logger.info(f"Goal completed: {goal.title}")
+            # Completing it lifts her mood, as well as being a life event.
+            self._feel(GOAL_COMPLETION_EMOTIONS)
             event = self._life_events.record_event(
                 event_type="achievement",
                 title=f"Completed: {goal.title}",
                 description=goal.description or goal.title,
-                emotional_impact={"proud": 0.4, "satisfied": 0.3},
+                emotional_impact=dict(GOAL_COMPLETION_EMOTIONS),
                 share_urgency=0.8,
                 source="goal_completion",
             )
-            self._bridge_life_event(event)
+            # Told by its GOAL_MILESTONE alone (ruling T17-R6).
+            self._bridge_life_event(event, excitement_share=False)
+            # Her memory of it (Task 12): no place -- it is done, not somewhere.
+            self._remember(f"finishing “{goal.title}”", place="", emotions=GOAL_COMPLETION_EMOTIONS,
+                           tags=("goal", "completed", *_share_ids(event)))
 
-        # Evaluate motivation — may produce emotional events
-        events = self._goal_engine.evaluate_motivation()
+        # Evaluate motivation — may produce emotional events (a motivation
+        # drop, a goal abandoned, nothing left to pursue): the host's engine
+        # and mood feel them.
+        events = self._goal_engine.evaluate_motivation(now=world_now)
         for event in events:
             logger.info(f"Goal event: {event.event_type} - {event.description}")
             if event.emotions:
-                # Update real-time EmotionEngine
-                if self._emotion_engine:
-                    for emotion, intensity in event.emotions.items():
-                        try:
-                            self._emotion_engine.add_emotion(emotion, intensity)
-                        except Exception:
-                            pass
+                self._feel(event.emotions)
 
                 # Persist emotions for multi-day arcs
                 self._persist_activity_emotions(
                     f"goal_{event.event_type}",
                     event.emotions
                 )
+            # A goal she gave up on is a failure she remembers (Task 12); a
+            # dip in her motivation is not an event.
+            if event.event_type == "abandoned":
+                self._remember(f"giving up on “{event.goal_title}”", place="", emotions=event.emotions,
+                               tags=("goal", "abandoned"))
 
         # Create anticipation from upcoming goals with deadlines
         for goal in self._goal_engine.active_goals:
             if goal.target_date and goal.progress < 0.8:
-                hours_until = (goal.target_date - datetime.now()).total_seconds() / 3600
+                hours_until = (goal.target_date - world_now).total_seconds() / 3600
                 if 0 < hours_until < 48:  # Within 2 days
                     feeling = "excited" if goal.motivation_level > 0.5 else "anxious"
                     self._memory_time.add_anticipation(
@@ -4343,6 +6662,7 @@ class LifeService:
 
         # Save goals
         self._save_goals()
+        self._publish_household_state()
 
     def _persist_activity_emotions(self, activity_name: str, emotions: dict) -> None:
         """
@@ -4386,14 +6706,17 @@ class LifeService:
                 datastore = get_persona_datastore(persona_id, get_config().data_dir)
             except Exception:
                 pass
-            emotion_persistence = get_emotion_persistence(persona_id, datastore=datastore)
+            # On the world clock, as their reads decay them (Task 19).
+            world_now = self._world_clock()()
+            emotion_persistence = get_emotion_persistence(persona_id, datastore=datastore, now=world_now)
 
             for emotion, intensity in emotions.items():
                 if intensity >= 0.1:  # Only persist significant emotions
                     emotion_persistence.save_emotion(
                         emotion=emotion,
                         intensity=intensity,
-                        caused_by=f"While {activity_name}"
+                        caused_by=f"While {activity_name}",
+                        now=world_now,
                     )
 
             logger.debug(f"Persisted {len(emotions)} emotions from {activity_name}")
@@ -4423,9 +6746,16 @@ class LifeService:
                     energy_before REAL,
                     energy_after REAL,
                     share_worthy INTEGER DEFAULT 0,
-                    shared_with_user INTEGER DEFAULT 0
+                    shared_with_user INTEGER DEFAULT 0,
+                    outcome TEXT DEFAULT 'success'
                 )
             """)
+            # Migration: how each activity went (Task 14). A row saved before
+            # it went well -- every activity did -- so the column defaults so.
+            try:
+                cursor.execute("ALTER TABLE activity_logs ADD COLUMN outcome TEXT DEFAULT 'success'")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
             # Goals table
             cursor.execute("""
@@ -4480,6 +6810,12 @@ class LifeService:
                     last_update TEXT
                 )
             """)
+            # Migration: the sleep state -- asleep or not, until when, the night
+            # drawn for her -- as EnergySystem.to_dict's "sleep_state" JSON (added 2026-09).
+            try:
+                cursor.execute("ALTER TABLE life_energy_state ADD COLUMN sleep_state TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
             # Shareable experiences table
             cursor.execute("""
@@ -4623,7 +6959,8 @@ class LifeService:
                     currency TEXT DEFAULT '$',
                     last_payday TEXT,
                     last_expense_run TEXT,
-                    recent_purchases TEXT DEFAULT '[]'
+                    recent_purchases TEXT DEFAULT '[]',
+                    spend_hour TEXT
                 )
             """)
             # Money-engine columns migration (ALTER TABLE for existing DBs)
@@ -4638,11 +6975,40 @@ class LifeService:
                 ("last_payday", "TEXT"),
                 ("last_expense_run", "TEXT"),
                 ("recent_purchases", "TEXT DEFAULT '[]'"),
+                # The last world hour her purchases are drawn for (Task 29 fix
+                # round 1); NULL in an old database.
+                ("spend_hour", "TEXT"),
             ]:
+                if col == "spend_hour":
+                    # The column and her runway land together or not at all:
+                    # ALTER commits by itself outside a transaction, and a
+                    # failure before this method's own commit then kept the
+                    # column and lost the raise for good (the task's review).
+                    conn.commit()
+                    cursor.execute("BEGIN IMMEDIATE")
                 try:
                     cursor.execute(f"ALTER TABLE life_financial_state ADD COLUMN {col} {col_def}")
                 except sqlite3.OperationalError:
-                    pass  # Column already exists
+                    if col == "spend_hour":
+                        conn.rollback()
+                    continue  # Column already exists
+                if col == "spend_hour":
+                    # Adding this column succeeds once, on a database a
+                    # released version (0.5.0 or before) wrote: the engines
+                    # that drew her purchases per tick and emptied every
+                    # balance within three days at the app's cadence, from a
+                    # default (1,200 against 1,850 of expenses) that was
+                    # worried from her first tick. Her balance is raised, this
+                    # once, to the runway a new persona starts with
+                    # (FinanceSystem.starting_balance); more than that she
+                    # keeps, and what she spends from here is hers (ruling
+                    # T37-R1). FinanceSystem.from_dict stays value for value.
+                    cursor.execute(
+                        "UPDATE life_financial_state SET balance = ROUND(? * monthly_expenses, 2) "
+                        "WHERE id = 1 AND balance < ? * monthly_expenses",
+                        (STARTING_RUNWAY, STARTING_RUNWAY),
+                    )
+                    conn.commit()
 
             # Career state table (single row) — Job engine
             cursor.execute("""
@@ -4799,9 +7165,34 @@ class LifeService:
                     empathy_susceptibility REAL DEFAULT 0.5,
                     empathy_absorbed_emotion TEXT,
                     empathy_absorbed_intensity REAL DEFAULT 0.0,
-                    empathy_fatigue REAL DEFAULT 0.0
+                    empathy_fatigue REAL DEFAULT 0.0,
+                    mood_valence REAL,
+                    mood_arousal REAL,
+                    day_quality_offset REAL,
+                    day_quality_date TEXT,
+                    stressors TEXT
                 )
             """)
+
+            # Mood (valence, arousal) columns migration (ALTER TABLE for
+            # existing DBs). No default: a row saved before them reads NULL,
+            # and AffectSystem.from_dict starts that persona at her set-point.
+            # The same for the day's quality (Task 14 fix round, ruling
+            # T14-R1): a row saved before it has none until her next draw.
+            # And for her stressors (Task 15): a row saved before them has
+            # only their labels, stress_sources, which AffectSystem.from_dict
+            # reads as stressors.
+            for col, col_def in [
+                ("mood_valence", "REAL"),
+                ("mood_arousal", "REAL"),
+                ("day_quality_offset", "REAL"),
+                ("day_quality_date", "TEXT"),
+                ("stressors", "TEXT"),
+            ]:
+                try:
+                    cursor.execute(f"ALTER TABLE life_affect_state ADD COLUMN {col} {col_def}")
+                except sqlite3.OperationalError:
+                    pass  # Column already exists
 
             # Social expansion state table (single row)
             cursor.execute("""
@@ -4866,9 +7257,17 @@ class LifeService:
                     relationship_stage TEXT DEFAULT 'early',
                     last_message_at TEXT,
                     avg_response_time REAL DEFAULT 0.0,
-                    response_times TEXT DEFAULT '[]'
+                    response_times TEXT DEFAULT '[]',
+                    depth_state TEXT
                 )
             """)
+            # Relationship depth (humanness Task 16b), on a new or an existing
+            # DB alike; NULL in an older save (ExpressionSystem.from_dict maps
+            # its stage to a depth)
+            try:
+                cursor.execute("ALTER TABLE life_expression_state ADD COLUMN depth_state TEXT")
+            except sqlite3.OperationalError:
+                pass  # Column already exists
 
             # Chaos state table (single row)
             cursor.execute("""
@@ -4947,9 +7346,17 @@ class LifeService:
                     created_at TEXT NOT NULL,
                     shared INTEGER DEFAULT 0,
                     shared_at TEXT,
-                    source TEXT
+                    source TEXT,
+                    share_id TEXT
                 )
             """)
+            # Stable "event:<n>" id migration (Task 5 / humanness Sec 4.9)
+            # for existing DBs: CREATE TABLE IF NOT EXISTS above is a no-op
+            # once the table already exists.
+            try:
+                cursor.execute("ALTER TABLE life_events ADD COLUMN share_id TEXT")
+            except sqlite3.OperationalError:
+                pass  # column already exists
 
             # Migrate existing life_goals table — add columns that may be missing
             for col, col_def in [
@@ -4968,6 +7375,15 @@ class LifeService:
                 CREATE TABLE IF NOT EXISTS life_world_state (
                     id INTEGER PRIMARY KEY CHECK (id = 1),
                     current_location TEXT DEFAULT 'home'
+                )
+            """)
+
+            # Setting table (single row) — the setting her saved places, plan
+            # and whereabouts belong to (Task 9 fix round); see _load_state
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS life_setting (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    setting TEXT NOT NULL
                 )
             """)
 
@@ -5018,6 +7434,31 @@ class LifeService:
             except sqlite3.OperationalError:
                 pass  # Column already exists
 
+            # Her memory stream's tables (Task 12): CREATE TABLE IF NOT
+            # EXISTS, so a database from before them gains them.
+            MemoryStream.create_schema(cursor)
+
+            # Her last reflection's world instant (Task 13 fix round 1,
+            # Minor 4): a table of its own -- entirely new, so no ALTER-TABLE
+            # migration is needed for a database from before it.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS life_reflection_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    last_reflection_at TEXT
+                )
+            """)
+
+            # The dream and the goal completion a proactive trigger was last
+            # made of (their episode ids; Task 17 fix round 1, T17-RV3): a
+            # table of its own, so no migration for a database from before.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS life_trigger_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    last_dream_share_episode INTEGER,
+                    last_goal_share_episode INTEGER
+                )
+            """)
+
             conn.commit()
 
     def _load_state(self) -> None:
@@ -5029,12 +7470,14 @@ class LifeService:
             # Load energy state (pass sleep_schedule for persona-specific timing)
             cursor.execute("SELECT * FROM life_energy_state WHERE id = 1")
             row = cursor.fetchone()
+            energy_was_saved = row is not None
             if row:
                 self._energy = EnergySystem.from_dict(
                     dict(row),
                     sleep_schedule=self._sleep_schedule,
                     core_traits=self._core_traits,
                     now=self._world_clock(),
+                    params=self._params,
                 )
                 # Reapply the AI flag after reload — an AI never sleeps / carries no
                 # sleep-physiology (from_dict doesn't persist persona_type).
@@ -5045,6 +7488,14 @@ class LifeService:
                     INSERT INTO life_energy_state (id, level, fatigue, last_update)
                     VALUES (1, 0.7, 0, ?)
                 """, (datetime.now().isoformat(),))
+
+            # The setting she was saved in. A database saved before it was
+            # (one with saved energy but no setting row) was saved in the
+            # default setting, the only one there was; a new one, in none.
+            cursor.execute("SELECT setting FROM life_setting WHERE id = 1")
+            row = cursor.fetchone()
+            saved_setting = row["setting"] if row else (DEFAULT_SETTING if energy_was_saved else None)
+            setting_changed = saved_setting is not None and saved_setting != self._setting.key
 
             # Load recent activities
             cursor.execute("""
@@ -5060,7 +7511,7 @@ class LifeService:
             # Load goals
             cursor.execute("SELECT * FROM life_goals")
             goals = [Goal.from_dict(dict(row)) for row in cursor.fetchall()]
-            self._goal_engine.load_goals(goals)
+            self._goal_engine.load_goals(goals, now=self._world_clock()())
 
             # Load shareable experiences
             cursor.execute("""
@@ -5078,7 +7529,11 @@ class LifeService:
             cursor.execute("SELECT * FROM life_desire_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._desire_system = DesireSystem.from_dict(dict(row), core_traits=self._core_traits, rng=self._rng)
+                self._desire_system = DesireSystem.from_dict(
+                    dict(row), core_traits=self._core_traits, rng=self._desire_rng,
+                    gender=self._persona_gender(), params=self._params, setting=self._setting,
+                    intimacy_rate=self._intimacy_rate(),
+                )
             else:
                 # Insert default
                 cursor.execute("""
@@ -5100,7 +7555,7 @@ class LifeService:
             self._daily_planner.load_state(plan, desires)
 
             # Load locations (must come after planner init so we can update available keys)
-            self._load_locations(cursor)
+            dropped_places = self._load_locations(cursor, drop_setting_places=setting_changed)
 
             # Load world location (must come after plan so we can fallback to plan slot)
             self._load_world(cursor)
@@ -5111,6 +7566,9 @@ class LifeService:
             if row:
                 self._sustenance = SustenanceSystem.from_dict(dict(row))
                 self._basic_needs = self._sustenance.state  # keep the alias
+                self._sustenance_ticked_at = self._world_clock()()
+                self._sustenance_live_since = self._sustenance_ticked_at
+                self._sustenance_gap_charge = None
 
             # Load media state
             cursor.execute("SELECT * FROM life_media_state WHERE id = 1")
@@ -5137,14 +7595,15 @@ class LifeService:
             cursor.execute("SELECT * FROM life_room_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._habitation = HabitationSystem.from_dict(dict(row), rng=self._rng)
+                self._habitation = HabitationSystem.from_dict(dict(row), rng=self._habitation_rng)
                 self._room_state = self._habitation.state  # keep the alias
 
             # Load financial state
             cursor.execute("SELECT * FROM life_financial_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._finance = FinanceSystem.from_dict(dict(row), core_traits=self._core_traits, rng=self._rng, now=self._world_clock()())
+                self._finance = FinanceSystem.from_dict(dict(row), core_traits=self._core_traits, rng=self._finance_rng,
+                                                        now=self._world_clock()(), params=self._params)
                 self._financial = self._finance.state  # keep the alias pointing at loaded state
 
             # Load career state
@@ -5152,7 +7611,8 @@ class LifeService:
             row = cursor.fetchone()
             if row:
                 _occupation = self._occupation or (getattr(self._definition, 'occupation', '') if self._definition else '')
-                self._career = CareerSystem.from_dict(dict(row), occupation=_occupation, rng=self._rng)
+                self._career = CareerSystem.from_dict(dict(row), occupation=_occupation, rng=self._career_rng,
+                                                      setting=self._setting)
                 if self._career.monthly_salary > 0:
                     self._finance.state.monthly_income = self._career.monthly_salary
 
@@ -5160,7 +7620,7 @@ class LifeService:
             cursor.execute("SELECT * FROM life_errands_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._errands = ErrandsSystem.from_dict(dict(row), rng=self._rng)
+                self._errands = ErrandsSystem.from_dict(dict(row), rng=self._errands_rng)
 
             # Load skills
             cursor.execute("SELECT * FROM life_skills")
@@ -5204,6 +7664,15 @@ class LifeService:
             # Load behavior state
             self._load_behavior(cursor)
 
+            # Load her last reflection's world instant (Task 13 fix round 1)
+            self._load_reflection_state(cursor)
+
+            # Load what the last dream / goal triggers were made of (Task 17)
+            self._load_trigger_state(cursor)
+
+            # Load the moment's cue novelty (Task 18)
+            self._load_moment_state(cursor)
+
             # Load memory & time state
             self._load_memory_time(cursor)
 
@@ -5227,6 +7696,15 @@ class LifeService:
 
             # Load place-identity volatile state (weather, trip, current city)
             self._load_place_state(cursor)
+
+            # Saved in another setting: drop what still points at its places
+            # (after everything that can move her has loaded), then record the
+            # setting her saved state now belongs to.
+            if setting_changed:
+                self._settle_into_setting(cursor, saved_setting, dropped_places)
+            cursor.execute(
+                "INSERT OR REPLACE INTO life_setting (id, setting) VALUES (1, ?)", (self._setting.key,),
+            )
 
             # Seed backstory chapter if this is first load (no chapters yet)
             if self._definition and not self._continuity._life_chapters:
@@ -5257,6 +7735,12 @@ class LifeService:
         # cursor was still open.
         self._prune_user_locations()
 
+        # A persona with no saved energy is brand new: start her on her own
+        # schedule again now that her place (and so her timezone) has loaded.
+        # One whose energy was saved keeps exactly what she saved.
+        if not energy_was_saved:
+            self._energy.start_on_schedule(self._local_world_now())
+
     def _save_state(self) -> None:
         """Save state to database."""
         with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
@@ -5273,7 +7757,8 @@ class LifeService:
                     social_boost = ?,
                     hours_awake = ?,
                     last_sleep_time = ?,
-                    last_update = ?
+                    last_update = ?,
+                    sleep_state = ?
                 WHERE id = 1
             """, (
                 energy_data["level"],
@@ -5284,6 +7769,7 @@ class LifeService:
                 energy_data["hours_awake"],
                 energy_data["last_sleep_time"],
                 energy_data["last_update"],
+                json.dumps(energy_data["sleep_state"]),
             ))
 
             # Save desire state
@@ -5332,6 +7818,8 @@ class LifeService:
         self._save_drive()
         self._save_social_expansion()
         self._save_behavior()
+        self._save_reflection_state()
+        self._save_trigger_state()
         self._save_memory_time()
         self._save_expression()
         self._save_continuity()
@@ -5350,8 +7838,8 @@ class LifeService:
                 INSERT INTO activity_logs
                 (activity_name, category, started_at, ended_at, location, weather,
                  narrative, thoughts_generated, emotions_triggered, energy_before,
-                 energy_after, share_worthy, shared_with_user)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 energy_after, share_worthy, shared_with_user, outcome)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data["activity_name"],
                 data["category"],
@@ -5366,6 +7854,7 @@ class LifeService:
                 data["energy_after"],
                 1 if data["share_worthy"] else 0,
                 1 if data["shared_with_user"] else 0,
+                data["outcome"],
             ))
 
             log.id = cursor.lastrowid
@@ -5483,8 +7972,8 @@ class LifeService:
 
             conn.commit()
 
-    def _create_shareable(self, log: ActivityLog, share_context: Optional[str] = None) -> None:
-        """Create a shareable experience from an activity."""
+    def _create_shareable(self, log: ActivityLog, share_context: Optional[str] = None) -> ShareableExperience:
+        """Create a shareable experience from an activity, and return it."""
         context_str = share_context or f"While {log.activity_name} at {log.location}"
 
         experience = ShareableExperience(
@@ -5492,7 +7981,7 @@ class LifeService:
             content=log.narrative,
             thought=log.thoughts_generated[0] if log.thoughts_generated else "",
             context=context_str,
-            priority=0.5 + random.random() * 0.3,
+            priority=0.5 + self._service_rng.random() * 0.3,
             created_at=datetime.now(),
         )
 
@@ -5514,9 +8003,11 @@ class LifeService:
             ))
 
             experience.id = cursor.lastrowid
+            experience.share_id = f"share:{experience.id}"
             conn.commit()
 
         self._append_shareable(experience)
+        return experience
 
     def _append_shareable(self, experience: ShareableExperience) -> None:
         """Append to the shareable queue, capping it to the newest N.
@@ -5562,12 +8053,13 @@ class LifeService:
 
     # ============= New Subsystem Helpers =============
 
-    def _create_shareable_from_text(self, text: str, context: str = "") -> None:
-        """Create a shareable experience from plain text (not an ActivityLog)."""
+    def _create_shareable_from_text(self, text: str, context: str = "") -> ShareableExperience:
+        """Create a shareable experience from plain text (not an ActivityLog),
+        and return it."""
         experience = ShareableExperience(
             content=text,
             context=context,
-            priority=0.4 + self._random.random() * 0.3,
+            priority=0.4 + self._service_rng.random() * 0.3,
             created_at=datetime.now(),
         )
 
@@ -5580,66 +8072,68 @@ class LifeService:
                 VALUES (?, ?, ?, ?, ?, ?, 0)
             """, (None, data["content"], "", data["context"], data["priority"], data["created_at"]))
             experience.id = cursor.lastrowid
+            experience.share_id = f"share:{experience.id}"
             conn.commit()
 
         self._append_shareable(experience)
+        return experience
 
-    def _bridge_life_event(self, event: LifeEvent) -> None:
+    def _bridge_life_event(self, event: LifeEvent, *, excitement_share: bool = True) -> None:
         """Bridge a life event to proactive messaging and shareable queue.
 
-        If share_urgency >= 0.6, creates a follow-up trigger so the persona
-        can reach out proactively.  Also boosts the priority of the most
-        recent shareable so it surfaces in conversation.
+        If share_urgency >= 0.6, the event waits for her memory of it: the
+        episode whose tags carry its share id (every caller records one
+        right after) creates the EXCITEMENT_SHARE follow-up trigger, made of
+        that episode (:meth:`_share_excitement`; Task 17: a hint only with
+        concrete detail). An event with no share id -- not one of hers -- or
+        that no episode ever tells (a mood change) creates none, and nor does
+        one bridged with ``excitement_share=False``: a goal completion, told
+        by its GOAL_MILESTONE (ruling T17-R6: one completion, one trigger).
+        Also boosts the priority of the most recent shareable so it surfaces
+        in conversation.
         """
         if event.share_urgency >= 0.6 and self._follow_up_provider is not None:
             if not self._life_trigger_cooled_down("excitement_share", datetime.now()):
                 return  # Still cooling down
-            try:
-                fm = self._follow_up_provider(self._persona_id)
-                fm.create_trigger(
-                    trigger_type="EXCITEMENT_SHARE",
-                    topic=event.title,
-                    context=event.description,
-                    urgency=min(event.share_urgency, 0.85),
-                    emotional_weight=max(event.emotional_impact.values()) if event.emotional_impact else 0.5,
-                    prompt_hint=(
-                        f"Something specific happened you're excited about: {event.title}. "
-                        f"Share the concrete detail — what actually happened — not a vague "
-                        f"'I had an epiphany' or 'I cracked the code'."
-                    ),
-                )
-                self._record_life_trigger_cooldown("excitement_share", datetime.now())
-            except Exception:
-                # Matches the sibling trigger handlers: without this the trigger
-                # can be permanently dead in production with zero signal.
-                logger.warning(
-                    "Life trigger: EXCITEMENT_SHARE dispatch failed", exc_info=True
-                )
+            if event.share_id and excitement_share:
+                # Only what her life events still hold unshared waits, so the
+                # wait is bounded by what they hold (life_event_system.MAX_EVENTS).
+                held = {e.share_id for e in self._life_events.get_unshared_events()}
+                waiting = {k: v for k, v in getattr(self, "_excitement_waiting", {}).items() if k in held}
+                waiting[event.share_id] = event
+                self._excitement_waiting = waiting
 
         # Boost priority of the most recent shareable (just created by caller)
         if self._shareable_queue:
             self._shareable_queue[-1].priority = min(0.95, event.share_urgency + 0.1)
 
     def _update_skill(self, skill_name: str, increment: float, log: ActivityLog) -> None:
-        """Advance a skill via the Skills engine; route any new milestones to
-        shareables + life events (engines never call each other directly)."""
+        """Advance a skill via the Skills engine; route any new milestones (her
+        setting's texts for the skill) to shareables + life events (engines
+        never call each other directly)."""
         new_milestones = self._skills_system.practice(
-            skill_name, increment, SKILL_MILESTONES.get(skill_name, [])
+            skill_name, increment, self._setting.skill_milestones.get(skill_name, [])
         )
-        for milestone_text in new_milestones:
-            self._create_shareable_from_text(
+        for milestone_template in new_milestones:
+            milestone_text = self._render_text(milestone_template)
+            shared = self._create_shareable_from_text(
                 milestone_text,
                 context=f"After practicing {skill_name}"
             )
+            milestone_emotions = {"proud": 0.3}
             event = self._life_events.record_event(
                 event_type="achievement",
                 title=milestone_text,
                 description=milestone_text,
-                emotional_impact={"proud": 0.3},
+                emotional_impact=milestone_emotions,
                 share_urgency=0.6,
                 source="skill_milestone",
             )
             self._bridge_life_event(event)
+            # Her memory of it (Task 12), in her setting's words addressed to her.
+            self._remember(self._addressed_to_her(milestone_template), place=log.location,
+                           emotions=milestone_emotions,
+                           tags=("milestone", skill_name, *_share_ids(shared, event)))
             logger.info(f"Skill milestone: {skill_name} - {milestone_text}")
 
         # Persist skills
@@ -5667,18 +8161,35 @@ class LifeService:
         books = self._media_preferences.get("books", [])
         unread = [b for b in books if b not in self._media.books_finished]
         if unread:
-            return random.choice(unread)
+            return self._service_rng.choice(unread)
         # All read — re-read a favorite
-        return random.choice(books) if books else None
+        return self._service_rng.choice(books) if books else None
 
     def _generate_dream(self) -> Optional[str]:
-        """Generate a dream from recent activities and emotions."""
-        if random.random() > 0.4:
+        """Generate a dream from recent activities and emotions, told by one
+        of her setting's dream templates (none when it has none)."""
+        drawn = self._draw_dream()
+        if not drawn:
+            return None
+        template, fields = drawn
+        return self._render_text(template, **fields)
+
+    def _draw_dream(self) -> Optional[Tuple[str, Dict[str, str]]]:
+        """The draws of a dream (:meth:`_generate_dream`): her setting's
+        template and its two ingredients (``a``, ``b``), or ``None`` -- left
+        unrendered, so it can be told in the third person to share and in
+        the second person to remember (Task 17). An activity is said as she
+        would say it (:meth:`_activity_for_display`: her "thinking about
+        user" is about her user by name; fix round 1, T17-RV2) -- a mapping
+        name for name, so the draws are the same -- and one the template puts
+        after "were" is phrased by :func:`_doing`'s rule in the template
+        (:func:`_phrase_after_was`, ruling T18-R8), after every draw."""
+        if self._service_rng.random() > 0.4:
             return None  # Not every sleep produces a memorable dream
 
         ingredients = []
         for act in self._recent_activities[:5]:
-            ingredients.append(act.activity_name)
+            ingredients.append(self._activity_for_display(act.activity_name))
 
         # Add current book/show if reading/watching
         if self._media.current_book:
@@ -5689,9 +8200,13 @@ class LifeService:
         if len(ingredients) < 2:
             return None
 
-        elements = random.sample(ingredients, min(2, len(ingredients)))
-        template = random.choice(DREAM_TEMPLATES)
-        return template.format(*elements)
+        elements = self._service_rng.sample(ingredients, min(2, len(ingredients)))
+        templates = self._setting.dream_templates
+        if not templates:
+            return None
+        template = self._service_rng.choice(templates)
+        fields = {"a": elements[0], "b": elements[1]}
+        return _phrase_after_was(template, fields), fields
 
     def _save_skills(self) -> None:
         """Save skill progress to database."""
@@ -5783,6 +8298,19 @@ class LifeService:
                 (tendencies_data,),
             )
 
+            # The world instant of the user's last turn (Task 16a, T16-R2)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS life_user_turn_state (
+                    id INTEGER PRIMARY KEY CHECK (id = 1),
+                    last_user_turn_at TEXT
+                )
+            """)
+            last_turn = self._identity.last_user_turn_at
+            cursor.execute(
+                "INSERT OR REPLACE INTO life_user_turn_state (id, last_user_turn_at) VALUES (1, ?)",
+                (last_turn.isoformat() if last_turn else None,),
+            )
+
             conn.commit()
 
     def _load_identity(self, cursor) -> None:
@@ -5838,10 +8366,11 @@ class LifeService:
             self._identity._facets = facets
         if perceptions:
             self._identity._perceptions = perceptions
-            # Ensure user perception exists
+            # Ensure user perception exists. Never "the user" -- see
+            # IdentitySystem.__init__.
             if "__user__" not in self._identity._perceptions:
                 self._identity._perceptions["__user__"] = PersonPerception(
-                    person_name="the user",
+                    person_name=self._user_ref(),
                     is_user=True,
                     trust_level=0.5,
                     emotional_valence=0.6,
@@ -5892,6 +8421,16 @@ class LifeService:
         except Exception:
             logger.warning("Failed to load behavioral tendencies", exc_info=True)
 
+        # The world instant of the user's last turn (Task 16a, ruling
+        # T16-R2). A save from before it has no table: None, no turn yet.
+        try:
+            cursor.execute("SELECT last_user_turn_at FROM life_user_turn_state WHERE id = 1")
+            row = cursor.fetchone()
+            if row and row[0]:
+                self._identity.note_user_turn(datetime.fromisoformat(row[0]))
+        except sqlite3.OperationalError:
+            pass  # Table doesn't exist yet — an old save, or a first run
+
     def _save_affect(self) -> None:
         """Save affect state to database."""
         with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
@@ -5903,16 +8442,27 @@ class LifeService:
                  stress_level, stress_sources, stress_coping_capacity, stress_last_relief,
                  loneliness_level, loneliness_desired_baseline, loneliness_last_meaningful, loneliness_lifetime_peak,
                  regulation_capacity, regulation_baseline, regulation_last_event,
-                 empathy_susceptibility, empathy_absorbed_emotion, empathy_absorbed_intensity, empathy_fatigue)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 empathy_susceptibility, empathy_absorbed_emotion, empathy_absorbed_intensity, empathy_fatigue,
+                 mood_valence, mood_arousal, day_quality_offset, day_quality_date, stressors)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data["mood_current"], data["mood_intensity"], data["mood_since"],
                 data["stress_level"], data["stress_sources"], data["stress_coping_capacity"], data["stress_last_relief"],
                 data["loneliness_level"], data["loneliness_desired_baseline"], data["loneliness_last_meaningful"], data["loneliness_lifetime_peak"],
                 data["regulation_capacity"], data["regulation_baseline"], data["regulation_last_event"],
                 data["empathy_susceptibility"], data["empathy_absorbed_emotion"], data["empathy_absorbed_intensity"], data["empathy_fatigue"],
+                data["mood_valence"], data["mood_arousal"], data["day_quality_offset"], data["day_quality_date"],
+                data["stressors"],
             ))
             conn.commit()
+
+    def _use_affect(self, affect: AffectSystem) -> None:
+        """Make ``affect`` her affect engine everywhere it is read: here, and in
+        the context builder, which keeps the engine it was handed at
+        construction -- without this, a loaded or reset engine left
+        ``get_life_context()`` reading a mood nothing ticks any more."""
+        self._affect = affect
+        self._context_builder._affect = affect
 
     def _load_affect(self, cursor) -> None:
         """Load affect state from database."""
@@ -5921,11 +8471,16 @@ class LifeService:
             row = cursor.fetchone()
             if row:
                 data = dict(row)
-                self._affect = AffectSystem.from_dict(
+                self._use_affect(AffectSystem.from_dict(
                     data,
                     core_traits=getattr(self._definition, 'core_traits', []) if self._definition else [],
                     emotional_baseline=getattr(self._definition, 'emotional_baseline', {}) if self._definition else {},
-                )
+                    params=self._params,
+                    # Her stressors' expiries are on the world clock (Task 15).
+                    now=self._world_clock()(),
+                ))
+                self._affect_ticked_at = self._world_clock()()
+                self._affect_live_since = self._affect_ticked_at
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
@@ -5956,7 +8511,7 @@ class LifeService:
                 self._cognitive = CognitiveSystem.from_dict(
                     dict(row), core_traits=self._core_traits,
                     intrusive_thought_themes=getattr(self._definition, 'intrusive_thought_themes', []) if self._definition else [],
-                    rng=self._rng,
+                    rng=self._cognitive_rng, params=self._params, setting=self._setting,
                 )
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
@@ -6034,7 +8589,8 @@ class LifeService:
             cursor.execute("SELECT * FROM life_drive_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._drive = DriveSystem.from_dict(dict(row), core_traits=self._core_traits, rng=self._rng)
+                self._drive = DriveSystem.from_dict(dict(row), core_traits=self._core_traits, rng=self._drive_rng,
+                                                    params=self._params)
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
@@ -6085,9 +8641,90 @@ class LifeService:
             cursor.execute("SELECT * FROM life_behavior_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._behavior = BehaviorSystem.from_dict(dict(row))
+                self._behavior = BehaviorSystem.from_dict(dict(row), rng=self._behavior_rng)
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
+
+    def _save_reflection_state(self) -> None:
+        """Save the world instant she last reflected at (Task 13 fix round
+        1, Minor 4) -- explicit, not derived from a belief episode that
+        MemoryStream's cap could prune."""
+        with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO life_reflection_state (id, last_reflection_at) VALUES (1, ?)",
+                (self._last_reflection_at.isoformat() if self._last_reflection_at else None,),
+            )
+            conn.commit()
+
+    def _load_reflection_state(self, cursor) -> None:
+        """Load the world instant she last reflected at from database."""
+        try:
+            cursor.execute("SELECT last_reflection_at FROM life_reflection_state WHERE id = 1")
+            row = cursor.fetchone()
+            if row and row[0]:
+                self._last_reflection_at = datetime.fromisoformat(row[0])
+        except sqlite3.OperationalError:
+            pass  # Table doesn't exist yet
+
+    def _save_trigger_state(self) -> None:
+        """Save the episode ids of the dream and the goal completion a
+        proactive trigger was last made of (Task 17 fix round 1, T17-RV3):
+        neither host marks those shared, so without them a restart offered
+        a fired one again."""
+        with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT OR REPLACE INTO life_trigger_state "
+                "(id, last_dream_share_episode, last_goal_share_episode) VALUES (1, ?, ?)",
+                (getattr(self, "_last_dream_share_episode", None), getattr(self, "_last_goal_share_episode", None)),
+            )
+            conn.commit()
+
+    def _load_trigger_state(self, cursor) -> None:
+        """Load what :meth:`_save_trigger_state` saved."""
+        try:
+            cursor.execute("SELECT last_dream_share_episode, last_goal_share_episode "
+                           "FROM life_trigger_state WHERE id = 1")
+            row = cursor.fetchone()
+            if row:
+                self._last_dream_share_episode = row[0]
+                self._last_goal_share_episode = row[1]
+        except sqlite3.OperationalError:
+            pass  # Table doesn't exist yet
+
+    def _save_moment_state(self) -> None:
+        """Save the novelty of the moment's cues (Task 18, ruling T18-R6) --
+        only those still recovering -- in a one-row table of its own,
+        created here as ``life_user_turn_state`` is, so a database from
+        before Task 18 needs no migration."""
+        cues = {key: [round(float(penalty), 6), at.isoformat()]
+                for key, (penalty, at) in sorted(self._moment_novelty.items())}
+        with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
+            cursor = conn.cursor()
+            cursor.execute("CREATE TABLE IF NOT EXISTS life_moment_state "
+                           "(id INTEGER PRIMARY KEY CHECK (id = 1), cues TEXT)")
+            cursor.execute("INSERT OR REPLACE INTO life_moment_state (id, cues) VALUES (1, ?)",
+                           (json.dumps(cues),))
+            conn.commit()
+
+    def _load_moment_state(self, cursor) -> None:
+        """Load what :meth:`_save_moment_state` saved; a database from before
+        Task 18 (no table) or an unreadable row leaves every cue fresh."""
+        self._moment_novelty = {}
+        try:
+            cursor.execute("SELECT cues FROM life_moment_state WHERE id = 1")
+            row = cursor.fetchone()
+        except sqlite3.OperationalError:
+            return  # Table doesn't exist yet
+        if not row or not row[0]:
+            return
+        try:
+            self._moment_novelty = {str(key): (float(penalty), datetime.fromisoformat(at))
+                                    for key, (penalty, at) in json.loads(row[0]).items()}
+        except (ValueError, TypeError, AttributeError):
+            logger.warning("The moment's saved novelty could not be read: every cue starts fresh")
+            self._moment_novelty = {}
 
     def _save_memory_time(self) -> None:
         """Save memory & time state to database."""
@@ -6115,7 +8752,8 @@ class LifeService:
             cursor.execute("SELECT * FROM life_memory_time_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._memory_time = MemoryTimeSystem.from_dict(dict(row), rng=self._rng)
+                self._memory_time = MemoryTimeSystem.from_dict(dict(row), rng=self._memory_time_rng,
+                                                               setting=self._setting)
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
@@ -6128,14 +8766,16 @@ class LifeService:
                 INSERT OR REPLACE INTO life_expression_state
                 (id, interaction_count, formality, avg_message_length,
                  emoji_frequency, humor_density, vulnerability_openness,
-                 relationship_stage, last_message_at, avg_response_time, response_times)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 relationship_stage, last_message_at, avg_response_time, response_times,
+                 depth_state)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 data["interaction_count"], data["formality"],
                 data["avg_message_length"], data["emoji_frequency"],
                 data["humor_density"], data["vulnerability_openness"],
                 data["relationship_stage"], data["last_message_at"],
                 data["avg_response_time"], data["response_times"],
+                data["depth_state"],
             ))
             conn.commit()
 
@@ -6145,7 +8785,7 @@ class LifeService:
             cursor.execute("SELECT * FROM life_expression_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._expression = ExpressionSystem.from_dict(dict(row))
+                self._expression = ExpressionSystem.from_dict(dict(row), communication_traits=self._communication_traits())
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
@@ -6227,7 +8867,8 @@ class LifeService:
             cursor.execute("SELECT * FROM life_chaos_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._chaos = ChaosEngine.from_dict(dict(row))
+                self._chaos = ChaosEngine.from_dict(dict(row), rng=self._chaos_rng, params=self._params,
+                                                    setting=self._setting)
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
@@ -6242,8 +8883,8 @@ class LifeService:
                 cursor.execute("""
                     INSERT INTO life_events
                     (event_type, title, description, emotional_impact,
-                     share_urgency, created_at, shared, shared_at, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     share_urgency, created_at, shared, shared_at, source, share_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     event.event_type,
                     event.title,
@@ -6254,6 +8895,7 @@ class LifeService:
                     1 if event.shared else 0,
                     event.shared_at.isoformat() if event.shared_at else None,
                     event.source,
+                    event.share_id,
                 ))
                 event.id = cursor.lastrowid
 
@@ -6274,6 +8916,11 @@ class LifeService:
                         emotional_impact = {}
                     events.append(LifeEvent(
                         id=row["id"],
+                        # A row saved before the share_id column existed has
+                        # it NULL in the DB -- backfill from `id` (mirrors
+                        # LifeEvent.from_dict, which this direct construction
+                        # bypasses) so mark_shared has something to match.
+                        share_id=row["share_id"] or f"event:{row['id']}",
                         event_type=row["event_type"],
                         title=row["title"],
                         description=row["description"] or "",
@@ -6326,30 +8973,45 @@ class LifeService:
             cursor.execute("SELECT * FROM life_body_state WHERE id = 1")
             row = cursor.fetchone()
             if row:
-                self._body = BodySystem.from_dict(dict(row))
+                # Her definition's seeds, as at construction: her body-image
+                # baseline (her parameters) and her substance tendencies, which
+                # the row never held (fix round 1, finding 7).
+                self._body = BodySystem.from_dict(
+                    dict(row), rng=self._body_rng, params=self._params,
+                    substance_tendencies=(getattr(self._definition, 'substance_tendencies', {})
+                                          if self._definition else {}) or {},
+                )
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet
 
     def _save_world(self) -> None:
-        """Save world location to database."""
+        """Save this persona's own current location to database."""
         with contextlib.closing(sqlite3.connect(self._db_path)) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT OR REPLACE INTO life_world_state (id, current_location)
                 VALUES (1, ?)
-            """, (self._world.current_location,))
+            """, (self._current_location,))
             conn.commit()
 
     def _load_world(self, cursor) -> None:
-        """Load world location from database.
+        """Load this persona's own current location from database.
 
         Falls back to: current plan slot → last activity location → 'home'.
+        Always sets this persona's own :attr:`_current_location` (each
+        persona's db_path is her own, even sharing a world in memory -- Task
+        27 / ruling T8-R1). A private (unshared) world is additionally kept
+        in sync directly here, exactly as before this persona's location
+        moved off the world object -- a private world's own ambiance/room
+        description elsewhere still read straight off it.
         """
         try:
             cursor.execute("SELECT current_location FROM life_world_state WHERE id = 1")
             row = cursor.fetchone()
             if row and row["current_location"]:
-                self._world._current_location = row["current_location"]
+                self._current_location = row["current_location"]
+                if not self._shared_world:
+                    self._world._current_location = self._current_location
                 return
         except sqlite3.OperationalError:
             pass  # Table doesn't exist yet — normal on first run
@@ -6361,18 +9023,22 @@ class LifeService:
                 "activity / 'home'", exc_info=True,
             )
 
-        # Fallback: use current plan slot location
+        # Fallback: use current plan slot location (at her local world time)
         if self._daily_planner.current_plan:
-            slot = self._daily_planner.current_plan.get_current_slot()
+            slot = self._daily_planner.current_plan.get_current_slot(self._local_world_now())
             if slot and slot.location:
-                self._world._current_location = slot.location
+                self._current_location = slot.location
+                if not self._shared_world:
+                    self._world._current_location = slot.location
                 return
 
         # Fallback: use last recorded activity location
         if self._recent_activities:
             last_loc = self._recent_activities[0].location
             if last_loc and last_loc != "None":
-                self._world._current_location = last_loc
+                self._current_location = last_loc
+                if not self._shared_world:
+                    self._world._current_location = last_loc
                 return
 
         # Final fallback stays "home" (the __init__ default)
@@ -6408,19 +9074,30 @@ class LifeService:
                     ))
             conn.commit()
 
-    def _load_locations(self, cursor) -> None:
+    #: The sources :meth:`_build_location_registry` gives her setting's own
+    #: places (its places, occupation places and interest places). Her
+    #: profile's places and the ones the user or the LLM named are hers, not
+    #: the setting's.
+    _SETTING_PLACE_SOURCES = ("default", "occupation", "interest")
+
+    def _load_locations(self, cursor, drop_setting_places: bool = False) -> List[str]:
         """Load persisted locations from database and merge into registry.
 
         Only the query is allowed to fail quietly (no table on a first run). A bad
         row is logged and skipped rather than ending the loop: the broad catch that
         used to wrap the whole loop let one malformed row silently truncate the
         persona's known places, leaving a half-populated planner key set.
+
+        With *drop_setting_places* (she was saved in another setting), a saved
+        place of the old setting's (:attr:`_SETTING_PLACE_SOURCES`) that the new
+        one does not have is not restored; the keys of those are returned.
         """
+        dropped: List[str] = []
         try:
             cursor.execute("SELECT * FROM life_locations")
             rows = cursor.fetchall()
         except sqlite3.OperationalError:
-            return  # Table doesn't exist yet — normal on first run
+            return dropped  # Table doesn't exist yet — normal on first run
 
         for row in rows:
             try:
@@ -6431,6 +9108,8 @@ class LifeService:
                     existing.familiarity = row["familiarity"]
                     existing.visit_count = row["visit_count"]
                     existing.last_visit = row["last_visit"]
+                elif drop_setting_places and row["source"] in self._SETTING_PLACE_SOURCES:
+                    dropped.append(key)
                 else:
                     # Restore user/llm-added location
                     self._location_registry[key] = LocationProfile(
@@ -6446,6 +9125,51 @@ class LifeService:
                     self._daily_planner._available_location_keys.add(key)
             except Exception:
                 logger.warning("Skipping unreadable life_locations row", exc_info=True)
+        return dropped
+
+    def _settle_into_setting(self, cursor, saved_setting: str, dropped_places: List[str]) -> None:
+        """Finish loading a persona saved in another setting than hers now.
+
+        Her registry and planner keys already hold only the new setting's
+        places and her own (:meth:`_load_locations` left out the old
+        setting's). This drops what still points at the old setting's, on
+        disk too, so the next load does not bring it back: those places'
+        rows, the day's plan (the old setting's activities at its places --
+        the planner makes a new one), a trip to a place she no longer knows,
+        and being at one: she is home, where a new persona starts (the
+        ``__init__`` default, and ``_load_world``'s last fallback). Her
+        memories, relationships, goals, wants and skills are kept.
+        """
+        known = self._location_registry
+        dropped = []
+        if dropped_places:
+            cursor.executemany("DELETE FROM life_locations WHERE key = ?", [(key,) for key in dropped_places])
+            dropped.append("places " + ", ".join(sorted(dropped_places)))
+
+        if self._daily_planner.current_plan is not None:
+            self._daily_planner.load_state(None, self._daily_planner.all_desires)
+            dropped.append("the day plan")
+        cursor.execute("DELETE FROM life_daily_plan WHERE id = 1")
+
+        if self._transit is not None and self._transit.destination.lower().replace(" ", "_") not in known:
+            dropped.append(f"the trip to {self._transit.destination}")
+            self._transit = None
+            cursor.execute("DELETE FROM life_transit_state WHERE id = 1")
+
+        current = self._current_location or "home"
+        if current != "home" and current.lower().replace(" ", "_") not in known:
+            dropped.append(f"the current location {current} (now home)")
+            self._current_location = "home"
+            if not self._shared_world:
+                self._world._current_location = "home"
+            cursor.execute(
+                "INSERT OR REPLACE INTO life_world_state (id, current_location) VALUES (1, ?)", ("home",),
+            )
+
+        logger.info(
+            "Persona %s saved in setting %r now lives in %r: dropped %s; memories and relationships kept",
+            self._persona_id, saved_setting, self._setting.key, "; ".join(dropped) or "nothing",
+        )
 
     def _save_needs_state(self) -> None:
         """Save the Sustenance engine state to the database."""
@@ -6506,13 +9230,13 @@ class LifeService:
                 INSERT OR REPLACE INTO life_financial_state
                 (id, feeling, saving_for, recent_splurge, balance, savings,
                  monthly_income, monthly_expenses, spending_habit, enabled, currency,
-                 last_payday, last_expense_run, recent_purchases)
-                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 last_payday, last_expense_run, recent_purchases, spend_hour)
+                VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 d["feeling"], d["saving_for"], d["recent_splurge"], d["balance"],
                 d["savings"], d["monthly_income"], d["monthly_expenses"],
                 d["spending_habit"], d["enabled"], d["currency"], d["last_payday"],
-                d["last_expense_run"], d["recent_purchases"],
+                d["last_expense_run"], d["recent_purchases"], d["spend_hour"],
             ))
             conn.commit()
 
@@ -6595,21 +9319,42 @@ class LifeService:
 
         Used when clearing memory or after extended downtime.
         """
-        # Reset energy to neutral
-        self._energy = EnergySystem(core_traits=self._core_traits, now=self._world_clock())
+        # Reset energy to neutral -- on her own sleep schedule (the rebuild used
+        # to drop it for the default one) and started on it, and an AI stays one.
+        self._energy = EnergySystem(
+            sleep_schedule=self._sleep_schedule,
+            core_traits=self._core_traits,
+            is_ai=self._is_ai,
+            now=self._world_clock(),
+            params=self._params,
+        )
+        self._energy.start_on_schedule(self._local_world_now())
 
         # Reset desire system
-        self._desire_system = DesireSystem(core_traits=self._core_traits, rng=self._rng)
+        self._desire_system = DesireSystem(
+            core_traits=self._core_traits, rng=self._desire_rng, gender=self._persona_gender(),
+            params=self._params, setting=self._setting, intimacy_rate=self._intimacy_rate(),
+        )
 
         # Clear recent activities (keep in DB for history)
         self._recent_activities = []
+
+        # Forget her memory stream (Task 12), on disk too: a reset is what a
+        # host calls to clear her memory, and it must not leave the episodes
+        # of the life before it to be recalled.
+        self._memory.clear()
+        # Nothing left to have reflected on (Task 13 fix round 1, Minor 4).
+        self._last_reflection_at = None
+        self._save_reflection_state()
 
         # Clear shareable queue
         self._shareable_queue = []
 
         # Reset goals
-        self._goal_engine = GoalEngine()
-        self._goal_engine.initialize_goals()
+        self._goal_engine = GoalEngine(rng=self._goal_engine_rng, setting=self._setting,
+                                       definition=self._definition, parameters=self._params,
+                                       persona_id=self._persona_id, interests=self._interests)
+        self._goal_engine.initialize_goals(now=self._world_clock()())
 
         # Reset planner
         self._daily_planner = DailyPlanner(
@@ -6619,6 +9364,13 @@ class LifeService:
             persona_locations=self._persona_locations,
             nationality=getattr(self._definition, 'nationality', '') if self._definition else '',
             is_ai=self._is_ai,
+            rng=self._daily_planner_rng,
+            params=self._params,
+            setting=self._setting,
+            persona_id=self._persona_id,
+            preferences=self._preferences,
+            definition=self._definition,
+            media_preferences=self._media_preferences,
         )
 
         # Reset conversation-session and wake latch so a memory clear doesn't
@@ -6633,30 +9385,32 @@ class LifeService:
         # AI personas have no body/finances/home/commute — gate the physical-life
         # engines off so an AI companion doesn't "get hungry" or "pay rent".
         self._is_ai = (getattr(_defn, 'persona_type', 'human') == 'ai') if _defn else False
-        # Energy is built above (before persona_type is known) — thread the AI flag
-        # in now so an AI never sleeps and carries no sleep-physiology in its digest.
-        self._energy._is_ai = self._is_ai
         self._sustenance = SustenanceSystem()
         self._basic_needs = self._sustenance.state  # back-compat alias (same object)
+        self._sustenance_ticked_at = self._world_clock()()
+        self._sustenance_live_since = self._sustenance_ticked_at
+        self._sustenance_gap_charge = None
         self._habitation = HabitationSystem(
             home_type=getattr(_defn, 'home_type', '') if _defn else '',
-            rng=self._rng,
+            rng=self._habitation_rng,
         )
         self._room_state = self._habitation.state  # back-compat alias (same object)
-        self._finance = FinanceSystem(core_traits=self._core_traits, rng=self._rng, now=self._world_clock()())
+        self._finance = FinanceSystem(core_traits=self._core_traits, rng=self._finance_rng,
+                                      now=self._world_clock()(), params=self._params)
         if _defn and getattr(_defn, 'spending_habit', None) is not None:
             self._finance.state.spending_habit = _defn.spending_habit
         self._financial = self._finance.state  # back-compat alias (same state object)
         _occupation = self._occupation or (getattr(_defn, 'occupation', '') if _defn else '')
         _salary = getattr(_defn, 'monthly_salary', None) if _defn else None
-        self._career = CareerSystem(occupation=_occupation, monthly_salary=_salary, rng=self._rng)
+        self._career = CareerSystem(occupation=_occupation, monthly_salary=_salary, rng=self._career_rng,
+                                    setting=self._setting)
         self._apply_occupation_schedule(self._career, _occupation)
         if self._career.monthly_salary > 0:
             self._finance.state.monthly_income = self._career.monthly_salary
         self._media = self._init_media_state()
         self._skills_system = SkillsSystem()
         self._skills = self._skills_system.skills  # alias
-        self._errands = ErrandsSystem(rng=self._rng)
+        self._errands = ErrandsSystem(rng=self._errands_rng)
         self._identity = IdentitySystem(
             npcs=self._build_npcs(self._social_circle_defs), user_info=self._user_info,
             core_traits=self._core_traits,
@@ -6665,20 +9419,28 @@ class LifeService:
             struggles=getattr(self._definition, 'struggles', []) if self._definition else [],
             character_defects=getattr(self._definition, 'character_defects', []) if self._definition else [],
             behavioral_tendencies=getattr(self._definition, 'behavioral_tendencies', {}) if self._definition else {},
-            rng=self._rng,
+            rng=self._identity_rng,
+            params=self._params,
         )
-        self._affect = AffectSystem(
+        self._use_affect(AffectSystem(
             core_traits=self._core_traits,
             emotional_baseline=getattr(self._definition, 'emotional_baseline', {}) if self._definition else {},
-        )
+            params=self._params,
+        ))
+        self._affect_ticked_at = self._world_clock()()
+        self._affect_live_since = self._affect_ticked_at
         self._body = BodySystem(
             hormonal_enabled=getattr(self._definition, 'hormonal_enabled', False) if self._definition else False,
             substance_tendencies=getattr(self._definition, 'substance_tendencies', {}) if self._definition else {},
+            rng=self._body_rng,
+            params=self._params,
         )
         self._cognitive = CognitiveSystem(
             core_traits=self._core_traits,
             intrusive_thought_themes=getattr(self._definition, 'intrusive_thought_themes', []) if self._definition else [],
-            rng=self._rng,
+            rng=self._cognitive_rng,
+            params=self._params,
+            setting=self._setting,
         )
         self._shadow = ShadowSystem(
             behavioral_tendencies=(getattr(self._definition, 'behavioral_tendencies', {}) if self._definition else {}) or {},
@@ -6687,6 +9449,7 @@ class LifeService:
             intrusive_thought_themes=(getattr(self._definition, 'intrusive_thought_themes', []) if self._definition else []) or [],
             substance_tendencies=(getattr(self._definition, 'substance_tendencies', {}) if self._definition else {}) or {},
             core_traits=(getattr(self._definition, 'core_traits', []) if self._definition else []) or [],
+            params=self._params,
         )
         self._sanity = SanitySystem(
             struggles=(getattr(self._definition, 'struggles', []) if self._definition else []) or [],
@@ -6699,17 +9462,18 @@ class LifeService:
         self._drive = DriveSystem(
             core_traits=self._core_traits,
             comfort_zone_seeds=getattr(self._definition, 'comfort_zone_seeds', []) if self._definition else [],
-            rng=self._rng,
+            rng=self._drive_rng,
+            params=self._params,
         )
-        self._behavior = BehaviorSystem()
-        self._memory_time = MemoryTimeSystem(rng=self._rng)
-        self._expression = ExpressionSystem()
+        self._behavior = BehaviorSystem(rng=self._behavior_rng)
+        self._memory_time = MemoryTimeSystem(rng=self._memory_time_rng, setting=self._setting)
+        self._expression = ExpressionSystem(communication_traits=self._communication_traits())
         self._continuity = ContinuitySystem()
         self._character_evolution = CharacterEvolution(
             original_baseline=getattr(self._definition, 'emotional_baseline', {}) if self._definition else {},
             core_traits=getattr(self._definition, 'core_traits', []) if self._definition else [],
         )
-        self._chaos = ChaosEngine()
+        self._chaos = ChaosEngine(rng=self._chaos_rng, params=self._params, setting=self._setting)
 
         # Clear visual description tracking
         self._last_visual_activity = None
@@ -6745,6 +9509,30 @@ class LifeService:
         if downtime_hours < 1.0:
             return {"downtime_hours": downtime_hours, "activities_generated": 0, "mode": "none"}
 
+        # Her affect lives the whole gap (Task 34b), as her hunger does: on the
+        # world clock, the gap's hours up to where her live affect ticks began
+        # (her reload; the live tick charges from there on, so it may come
+        # before this or after), the real gap, not the 48 hours planned below
+        # -- her loneliness after five days away is not her loneliness after
+        # two. A gap that does not reach back past where they began lies in
+        # her live ticks' span (the host's clock jumped while the process
+        # lived on): the live tick charges it, so the catch-up does not.
+        affect_end = self._affect_live_since
+        affect_charged_to = affect_end - timedelta(hours=downtime_hours)
+        charge_affect = self._world_clock()() - timedelta(hours=downtime_hours) < affect_end
+        # Her hunger is charged the hours of the gap once (Task 34c). Her live
+        # tick charges every world hour from where its ticks began (her reload,
+        # which takes its stamp again: the downtime is not charged as lived
+        # time) on, from its stamp. So a gap that reaches back past where they
+        # began (a restart) is the downtime, the catch-up's to charge whole, in
+        # either order; of a gap inside their span (the PC slept, the process
+        # lived on) the catch-up charges only the hours after the live tick's
+        # stamp, and takes the stamp (below): none when the live tick came
+        # first and charged them, all of them when the catch-up comes first.
+        world_now = self._world_clock()()
+        hunger_gap_began = world_now - timedelta(hours=downtime_hours)
+        hunger_lived_through = hunger_gap_began >= self._sustenance_live_since
+
         # Cap at 2 days max — beyond that, just reset to now
         if downtime_hours > 48:
             logger.info(f"Catch-up: {downtime_hours:.1f}h exceeds 48h cap, clamping to 48h")
@@ -6764,14 +9552,18 @@ class LifeService:
         logger.info(f"Catch-up Phase 0: {downtime_hours:.1f}h gap, mode={mode}")
 
         # ── Phase 1: Plan the gap ──
-        # Generate daily plans for each missed day
-        days_to_plan = max(1, min(2, int(downtime_hours / 24) + 1))
+        # Generate daily plans for each missed day: every calendar day the
+        # window touches (48 hours from an evening reach into a third day;
+        # planned as two, its last day had no slot and so no meal -- Task 41)
         plan_day = gap_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        days_to_plan = (now.date() - plan_day.date()).days + 1
         all_slots = []
 
         for d in range(days_to_plan):
             current_day = plan_day + timedelta(days=d)
-            # Use the planner to generate a day plan
+            # Use the planner to generate a day plan (her local world day's:
+            # the gap itself is measured on the host's clock, the downtime
+            # being the host process's)
             try:
                 plan = self._daily_planner.generate_daily_plan(
                     goals=self._goal_engine.active_goals,
@@ -6779,6 +9571,7 @@ class LifeService:
                     available_activities=self._activity_engine.get_all_activities(),
                     recent_activity_names=[a.activity_name for a in self._recent_activities[:5]],
                     work_schedule=self._career_schedule(),
+                    now=self._local_world_now(),
                     habits=self._habit_factors(),
                 )
                 if plan and plan.slots:
@@ -6794,11 +9587,50 @@ class LifeService:
         # Sort slots chronologically
         all_slots.sort(key=lambda x: x[0])
 
-        # Limit to max_activities
-        slots_to_execute = all_slots[:max_activities]
+        # Limit to max_activities -- but every meal she planned in the gap is
+        # eaten, and the rest of the budget is spread over the whole window
+        # (Task 41). Her hunger is charged for every hour of the gap (Tasks
+        # 34b, 34c); with the first ``max_activities`` slots alone, a gap of
+        # two days backfilled its first morning to evening and charged the
+        # other day and a half with no meal: she came back starving, at her
+        # lowest mood, where the host that stayed on had her fed.
+        meal_names = set(self._setting.names_tagged("meal"))
+        meals = [(at, slot) for at, slot in all_slots
+                 if slot.activity_name in meal_names and (self._is_ai or not self._is_sleep_hour(at.hour))]
+        others = [pair for pair in all_slots if pair not in meals]
+        room = max(0, max_activities - len(meals))
+        if len(others) > room:
+            others = [others[int(i * len(others) / room)] for i in range(room)]
+        slots_to_execute = sorted(meals + others, key=lambda x: x[0])
         logger.info(f"Catch-up Phase 1: {len(slots_to_execute)} activities planned across {days_to_plan} days")
 
         # ── Phase 2: Execute plans (tick all engines with backdated timestamps) ──
+        # Her hunger is charged for the whole gap: the hours before each
+        # backfilled activity, then (below) the rest of it (fix round 1,
+        # finding 4: one five-minute tick per backfilled hour was charged,
+        # while each backfilled meal relieved a whole meal's worth) -- of a gap
+        # she lived through, only its hours after the live tick's stamp (Task
+        # 34c, above): the hours of the gap before them were charged already.
+        # But when the live tick came first and charged the gap's hours at
+        # once (a paused host's hours, ended inside this gap), her hunger and
+        # nutrition go back to what they were at their start, and the stamp
+        # with them: the catch-up lives those hours again, in time order with
+        # its meals, as with the catch-up first (fix round 1, I-1: each meal's
+        # relief came after all of the gap's hours, so her end hunger
+        # depended on the order where the relief met the clamp at 0). Of a gap
+        # she lived through, every hour since the stamp is charged, the 48
+        # hours planned below or not, as the live tick charges them.
+        hunger_charged_to = gap_start
+        if hunger_lived_through:
+            gap_charge = self._sustenance_gap_charge
+            if gap_charge is not None and gap_charge[1] > hunger_gap_began:
+                began, _ended, hunger, nutrition = gap_charge
+                self._sustenance.state.hunger = hunger
+                self._sustenance.state.nutrition = nutrition
+                self._sustenance_ticked_at = began
+            uncharged = max(0.0, (world_now - self._sustenance_ticked_at).total_seconds() / 3600)
+            hunger_charged_to = now - timedelta(hours=uncharged)
+        self._sustenance_gap_charge = None
         for slot_time, slot in slots_to_execute:
             activity_name = slot.activity_name
             location = slot.location or "home"
@@ -6815,16 +9647,27 @@ class LifeService:
             end_time = slot_time + timedelta(hours=duration_hours)
             narrative = self._get_catchup_narrative(activity_name, hour)
 
+            # Her affect first: the hours before this activity, up to its
+            # instant on the world clock (as far back from the gap's end),
+            # asleep in those of them that are her sleep hours; then the
+            # activity.
+            if charge_affect:
+                affect_at = affect_end - (now - slot_time)
+                self._tick_affect_span_for_catchup(affect_charged_to, affect_at, now - affect_end)
+                affect_charged_to = max(affect_charged_to, affect_at)
+
             # Tick engines with backdated context
             self._tick_engines_for_catchup(
                 activity_name=activity_name,
                 timestamp=slot_time,
                 weather=self._world.weather.value if hasattr(self._world.weather, 'value') else str(self._world.weather),
                 season=self._world.season.value if hasattr(self._world, 'season') and hasattr(self._world.season, 'value') else "spring",
+                hours=max(0.0, (slot_time - hunger_charged_to).total_seconds() / 3600),
             )
+            hunger_charged_to = max(hunger_charged_to, slot_time)
 
-            # Move world to this location
-            self._world.move_to(location)
+            # Move to this location
+            _move_persona_to(self, location)
 
             log = ActivityLog(
                 activity_name=activity_name,
@@ -6840,19 +9683,30 @@ class LifeService:
             self._record_activity(log)
             generated_activities.append(log)
 
+        # Her affect's rest of the gap, to its end (the whole gap when no slot
+        # was executed), before her hunger is charged for it: like each slot's
+        # hours, these begin with her hunger as the last activity left it.
+        if charge_affect:
+            self._tick_affect_span_for_catchup(affect_charged_to, affect_end, now - affect_end)
+        # The rest of the gap, after the last backfilled activity; the live
+        # ticks then go on from now, so the gap is never charged twice.
+        if not self._is_ai:
+            self._sustenance.tick(now=now, hours=max(0.0, (now - hunger_charged_to).total_seconds() / 3600))
+            self._sustenance_ticked_at = self._world_clock()()
+
         logger.info(f"Catch-up Phase 2: Executed {len(generated_activities)} activities")
 
         # ── Phase 3: (Narrative generation happens at next chat, via pipeline) ──
 
         # ── Phase 4: Set current state to NOW ──
         self._world.tick()
-        self._energy.adjust_for_time(self._world.time_of_day, now_hour=self.persona_local_hour())
+        self._energy.adjust_for_time(self._persona_time_of_day, now_hour=self.persona_local_hour())
 
-        # Sync location to current plan slot
+        # Sync location to current plan slot (at her local world time)
         if self._daily_planner.current_plan:
-            slot = self._daily_planner.current_plan.get_current_slot()
+            slot = self._daily_planner.current_plan.get_current_slot(self._local_world_now())
             if slot and slot.location:
-                self._world.move_to(slot.location)
+                _move_persona_to(self, slot.location)
 
         # Save all engine state
         self._save_state()
@@ -6868,6 +9722,8 @@ class LifeService:
         self._save_identity()
         self._save_goals()
         self._save_plan()
+        # The people she lives with see her as the catch-up left her (Task 11).
+        self._publish_household_state()
 
         logger.info(f"Catch-up complete: {len(generated_activities)} activities for {downtime_hours:.1f}h gap")
 
@@ -6896,7 +9752,46 @@ class LifeService:
         except Exception:
             return ""
 
-    def _habit_factors(self) -> Dict[str, Dict[str, float]]:
+    def _intimacy_rate(self) -> Optional[float]:
+        """Her definition's ``intimacy_rate`` (spec R6): ``None`` -- unset, or no
+        definition -- keeps today's chance (DesireSystem)."""
+        return getattr(self._definition, "intimacy_rate", None) if self._definition is not None else None
+
+    def _persona_gender(self) -> str:
+        """The current persona's gender, from ``appearance_details["gender"]``
+        (:meth:`PersonalityDefinition.from_concept`'s slot for it, and what a
+        parsed profile's demographics land in). Unset/no definition -> ``""``,
+        which :func:`pronoun_render.resolve_gender` renders as they/them --
+        never a guessed specific gender."""
+        if not self._definition:
+            return ""
+        details = getattr(self._definition, "appearance_details", None) or {}
+        return details.get("gender", "")
+
+    def _render_text(self, text: str, **extra) -> str:
+        """Fill persona-pronoun tokens (from :meth:`_persona_gender`) and
+        user-reference tokens (from ``user_info``, never "the user") in
+        prompt-bound / user-visible text. See
+        :func:`aura_life.personas.pronoun_render.render_line`."""
+        return _render_pronoun_line(text, gender=self._persona_gender(), user=self._user_info, **extra)
+
+    def _user_ref(self) -> str:
+        """The user's display name, or "them" when none is on record --
+        never the literal "the user"."""
+        return _user_ref_tokens(self._user_info)["user"]
+
+    def _render_career_status(self, status: dict) -> dict:
+        """CareerSystem stores `recent_work_event` as the tokenized text it
+        shares with `affect.affect_system.WORK_EVENT_EMOTIONS` (an exact-string
+        lookup that must see the unrendered form -- see CareerSystem.tick).
+        Render it only here, at the export/status boundary, so the mood lookup
+        never sees a persona's pronoun and the exported text never leaks a
+        raw `{poss}`-style token."""
+        if status.get("recent_work_event"):
+            status["recent_work_event"] = self._render_text(status["recent_work_event"])
+        return status
+
+    def _habit_factors(self) -> Dict[str, Dict[str, Tuple[float, float]]]:
         """Her habits now, per part of her day, for the planner: from the dated history, on the world clock (its
         instants are world-clock ones), her free time only (``NOT_HABIT_FORMING`` left out)."""
         return self._behavior.habit_factors(self._world_clock()(), exclude=NOT_HABIT_FORMING)
@@ -6918,10 +9813,117 @@ class LifeService:
         clock = getattr(self._world, "now", None)
         return clock if callable(clock) else datetime.now
 
+    @property
+    def _persona_time_of_day(self):
+        """This persona's own time-of-day phase (a :class:`~aura_life.models.TimeOfDay`).
+
+        A private world already advances on this persona's own schedule, so
+        its tracked ``time_of_day`` is already hers -- returned unchanged. A
+        world this service was handed may be shared with other personas
+        (``self._world.time_of_day`` would then reflect whichever persona's
+        schedule the shared instance holds, not necessarily this one's), so
+        this asks the world for this persona's own phase fresh, from
+        ``self._sleep_schedule``, via :meth:`WorldEnvironment.get_time_of_day`
+        when the injected world supports it. A duck-typed world that predates
+        that method (see
+        ``test_a_duck_typed_world_without_a_clock_does_not_lose_the_engine``)
+        falls back to its plain ``time_of_day``, exactly as before.
+        """
+        if not self._shared_world:
+            return self._world.time_of_day
+        get_time_of_day = getattr(self._world, "get_time_of_day", None)
+        if callable(get_time_of_day):
+            return get_time_of_day(self._sleep_schedule)
+        return self._world.time_of_day
+
+    def _world_overrides(self) -> dict:
+        """Keyword overrides for a ``WorldEnvironment`` call, scoped to this persona.
+
+        Empty for a private world: nothing else ever holds its data, so its
+        own tracked fields already are this persona's, and passing them
+        explicitly would turn a cached read into a live recompute for no
+        reason (``WorldEnvironment.get_time_of_day`` and ``get_status`` take
+        the *recompute-at-now* branch whenever ``sleep_schedule`` is not
+        ``None`` -- passing this persona's own, real schedule unconditionally
+        was exactly the bug: a private world ticked once and then read again
+        after the clock moved on, with no second tick in between, recomputed
+        the phase for *now* instead of returning the phase as of that tick,
+        diverging from :attr:`_persona_time_of_day`, which never recomputes
+        for a private world). For a world this service was handed, this
+        persona's own locations/schedule/current location (Task 27 / ruling
+        T8-R1 added the last one: a shared world's own ``current_location``
+        is physically wherever whichever persona moved it last, never this
+        one's) and her setting (Task 9: a place her profile does not
+        describe, and the weather, read from her setting, not the shared
+        world's), so ``get_status``/``export_state`` describe her
+        instead of whichever persona's data the shared instance holds.
+        """
+        if not self._shared_world:
+            return {}
+        return {
+            "persona_locations": self._persona_locations,
+            "sleep_schedule": self._sleep_schedule,
+            "current_location": self._current_location,
+            "setting": self._setting,
+        }
+
+    def _world_status(self) -> dict:
+        """This persona's view of ``self._world.get_status()`` (see :meth:`_world_overrides`).
+
+        A duck-typed handed world whose ``get_status`` predates these
+        keywords (took no arguments) still works: the call falls back to the
+        plain, argument-less form on ``TypeError``, mirroring the
+        ``getattr``/``callable`` tolerance :attr:`_persona_time_of_day` has
+        for ``get_time_of_day``.
+        """
+        try:
+            return self._world.get_status(**self._world_overrides())
+        except TypeError:
+            return self._world.get_status()
+
+    def _world_export(self) -> dict:
+        """This persona's view of ``self._world.export_state()`` (see :meth:`_world_overrides`).
+
+        Same duck-type fallback as :meth:`_world_status`.
+        """
+        try:
+            return self._world.export_state(**self._world_overrides())
+        except TypeError:
+            return self._world.export_state()
+
     def persona_local_now(self):
         """Return 'now' in the persona's local timezone (or server-local fallback)."""
         from aura_life.hooks import persona_now
         return persona_now(self._persona_timezone())
+
+    def _local_world_now(self) -> datetime:
+        """Her local wall time for her sleep: where she lives, on the world's clock.
+
+        A persona with a timezone reads the host's persona clock
+        (:meth:`persona_local_now`), which knows that zone. One without reads
+        the world clock (:meth:`_world_clock`): on a host whose world runs on
+        the wall clock that is the same instant ``persona_local_now()`` gives,
+        and on a host that simulates time it is the clock that moves with the
+        simulation -- so neither a new persona's first state nor her nights
+        depend on the hour the host process happens to run at.
+        """
+        if self._persona_timezone():
+            return self.persona_local_now()
+        return self._world_clock()()
+
+    def _local_world_instant(self, instant: datetime) -> datetime:
+        """``instant``, a naive instant on the world clock, as her local world
+        time (naive): shifted as :meth:`_local_world_now` is shifted from the
+        world's now -- not at all for a persona without a timezone, by her
+        zone's lead on the world's clock for one with (Task 31, ruling T31-R3:
+        ``add_social_plan``'s ``at`` is on the world clock, her plan's hours are
+        her own). The shift is taken in whole minutes, as a zone's offset is,
+        so the moment between reading the two clocks (on a host whose world
+        runs on the wall clock) cannot carry an instant across an hour."""
+        if not self._persona_timezone():
+            return instant
+        lead = self._local_world_now().replace(tzinfo=None) - self._world_clock()()
+        return instant + timedelta(minutes=round(lead.total_seconds() / 60))
 
     def persona_local_hour(self) -> int:
         """Return the persona's current local hour (0-23).
@@ -6987,8 +9989,10 @@ class LifeService:
 
         Used to gate spontaneous proactive outreach — a sleeping persona isn't
         doing things to share. Trusts the live activity first ("sleeping"), then
-        falls back to the sleep-schedule hour window so it's correct even if the
-        sim hasn't ticked recently.
+        her sleep state (:meth:`EnergySystem.is_asleep`): a state with a
+        duration that the activity tick moves, a new persona starts in, and a
+        reload or downtime catch-up restores -- no longer "is this hour inside
+        her window", which called her asleep through ticks she spent awake.
 
         AI personas never sleep — they're awake at all times — so this is always
         False for them.
@@ -7012,20 +10016,130 @@ class LifeService:
                 self._forced_wake_at = None  # conversation lapsed — she can sleep again
             if (self.current_activity_name or "").lower() == "sleeping":
                 return True
-            return self._is_sleep_hour(self.persona_local_hour())
+            return self._energy.is_asleep()
         except Exception:
             return False
 
+    def _tick_affect(self, hours: float, now: datetime, asleep: bool,
+                     on_schedule_at: Optional[datetime] = None) -> None:
+        """One affect tick (:meth:`AffectSystem.tick`) of ``hours`` world hours
+        ending at the world instant ``now``: the live energy tick's, and the
+        downtime catch-up's for the hours of the gap (Task 34b).
+
+        Needs that pull mood down: her hunger, her sleep pressure and the worst
+        of illness, injury and pain; and whether she is ``asleep``, which
+        quiets it. An AI persona has no body to pull it.
+
+        ``on_schedule_at`` (the catch-up's, Task 41): her local wall time at
+        the start of these hours. Her sleep pressure and her hours awake are
+        then what her schedule gives there
+        (:meth:`EnergySystem.pressure_on_schedule`), not the energy state the
+        reload left: through a gap that state is the evening the host went
+        down (0.83 and fifteen hours awake for three days, in the run that
+        found it), and it is set to the present only once the catch-up ends.
+
+        One tick at a time (``_affect_tick_lock``): the live tick and the
+        catch-up run on different threads."""
+        hours_awake = self._energy.hours_awake
+        if self._is_ai:
+            sleep_pressure = illness = 0.0
+        else:
+            sleep_pressure = self._energy.sleep_pressure
+            if on_schedule_at is not None:
+                sleep_pressure, hours_awake = self._energy.pressure_on_schedule(on_schedule_at)
+            illness = max(
+                self._body.health.illness_severity,
+                self._body.health.injury_severity,
+                self._body.comfort.pain_level,
+            )
+        with self._affect_tick_lock:
+            self._affect.tick(
+                body_state={
+                    "hunger": self._basic_needs.hunger,
+                    "hours_awake": hours_awake,
+                    "sleep_pressure": sleep_pressure,
+                    "illness": illness,
+                    "asleep": asleep,
+                },
+                social_state={"recent_events": self._social.get_recent_events() if hasattr(self._social, 'get_recent_events') else []},
+                weather=self._world.weather.value if hasattr(self._world.weather, 'value') else str(self._world.weather),
+                season=self._world.season.value if hasattr(self._world.season, 'value') else str(self._world.season),
+                hours=hours,
+                now=now,
+            )
+
+    def _tick_affect_for_catchup(self, at: datetime, since: datetime, asleep: bool,
+                                 wall_since: Optional[datetime] = None) -> None:
+        """The catch-up's affect tick (Task 34b): the world hours from ``since``
+        to ``at``, at ``at``; ``wall_since`` is the host's wall time at
+        ``since``, where her schedule is read for her sleep pressure (Task
+        41). A failure is logged and the catch-up goes on, as
+        :meth:`_tick_engines_for_catchup` does (its saves are not lost)."""
+        try:
+            self._tick_affect(max(0.0, (at - since).total_seconds() / 3600), at, asleep,
+                              on_schedule_at=wall_since)
+        except Exception as e:
+            logger.warning(f"Catch-up affect tick failed at {at}: {e}")
+
+    def _tick_affect_span_for_catchup(self, since: datetime, at: datetime, to_wall: timedelta) -> None:
+        """The catch-up's affect ticks for one span of the gap, the world hours
+        from ``since`` to ``at`` (Task 34b fix round 1): split where her sleep
+        hours begin or end, each part asleep exactly when its hours are her
+        sleep hours (an AI persona's never are). The hours are judged on the
+        host's hour, world instant + ``to_wall``, as the catch-up's sleep
+        slots are; a span of no hours is one tick of none."""
+        def asleep_at(instant: datetime) -> bool:
+            return not self._is_ai and self._is_sleep_hour((instant + to_wall).hour)
+
+        start = since
+        while True:
+            asleep = asleep_at(start)
+            end = at
+            boundary = (start + to_wall).replace(minute=0, second=0, microsecond=0) + timedelta(hours=1) - to_wall
+            while boundary < at:
+                if asleep_at(boundary) != asleep:
+                    end = boundary
+                    break
+                boundary += timedelta(hours=1)
+            self._tick_affect_for_catchup(end, start, asleep, start + to_wall)
+            if end >= at:
+                return
+            start = end
+
+    def _give_substance(self, activity_name: str, tags, now: Optional[datetime] = None) -> None:
+        """Tell her body she had ``activity_name`` (a drink or a smoke by its
+        name or its tags: ``BodySystem.on_substance_activity``) -- unless she is
+        an AI persona: she has no body, and no drink reaches one by any path,
+        her own pick, a plan slot, a housemate's activity or the catch-up,
+        whatever tags the activity carries; the tag-based exclusions
+        (:meth:`_excluded_activities`, her plan) stay as well (humanness Task
+        19, ruling T19-R6). ``now``: when she had it -- the catch-up passes
+        the backfilled activity's instant (ruling T19a-R1); without it, the
+        world's instant."""
+        if self._is_ai:
+            return
+        self._body.on_substance_activity(activity_name, tags=tags,
+                                         now=now if now is not None else self._world_clock()())
+
     def _tick_engines_for_catchup(self, activity_name: str, timestamp: datetime,
-                                   weather: str, season: str):
-        """Tick all engines once for a catch-up activity (lightweight, no DB writes)."""
+                                   weather: str, season: str, hours: Optional[float] = None):
+        """Tick all engines once for a catch-up activity (lightweight, no DB writes).
+
+        ``hours``: the backdated world hours since the catch-up's previous
+        activity (or the gap's start), which her hunger rises by before this
+        activity (a meal then relieves it); ``None`` is one energy interval,
+        as a tick without it always charged."""
         try:
             # Affect: activity emotions
             self._affect.on_activity(activity_name)
 
-            # Body: activity effects
-            self._body.on_activity(activity_name)
-            self._body.on_substance_activity(activity_name)
+            # Body: activity effects, her last workout stamped with the
+            # backfilled activity's own instant (ruling T19a-R1): her
+            # fitness ages that stamp on the world's clock.
+            self._body.on_activity(activity_name, now=timestamp)
+            self._give_substance(
+                activity_name, getattr(self._activity_engine.get_activity(activity_name), "tags", frozenset()),
+                now=timestamp)
 
             # Cognitive: activity engagement
             self._cognitive.on_activity(activity_name)
@@ -7049,20 +10163,25 @@ class LifeService:
             # Physical-life engines accrue at the backdated time so the ledgers stay
             # consistent across downtime — humans only (AI personas have none of this).
             if not self._is_ai:
-                self._finance.on_activity(activity_name)
+                self._finance.on_activity(activity_name, now=timestamp)
                 self._finance.tick(now=timestamp)
                 self._career.on_activity(activity_name)
                 self._career.tick(now=timestamp)
                 self._habitation.on_activity(activity_name)
-                self._sustenance.on_activity(activity_name, now=timestamp)
-                self._sustenance.tick(now=timestamp)
+                # The hours before this activity first, then the activity: a
+                # backfilled meal relieves the hunger they built.
+                self._sustenance.tick(now=timestamp, hours=hours)
+                self._sustenance.on_activity(activity_name, now=timestamp,
+                                             meal=activity_name in self._setting.names_tagged("meal"))
                 self._errands.on_activity(activity_name)
                 self._errands.tick(now=timestamp)
 
-            # Goal progress (expects ActivityLog, not str)
+            # Goal progress (expects ActivityLog, not str), stamped with the
+            # backfilled activity's instant too (ruling T19a-R1): her
+            # motivation ages her last progress on the world's clock.
             from aura_life.models import ActivityLog
             self._goal_engine.update_progress_from_activity(
-                ActivityLog(activity_name=activity_name)
+                ActivityLog(activity_name=activity_name), now=timestamp
             )
 
         except Exception as e:
@@ -7093,36 +10212,43 @@ class LifeService:
             return ActivityCategory.MENTAL
         if activity_name in physical:
             # There is no PHYSICAL category: the activity's own (yoga is REST, a run EXPLORATION), else EXPLORATION.
+            # Main's 0.5.0 fix is the released behaviour, so it wins over the branch's all-EXPLORATION mapping.
             known = self._activity_engine.get_activity(activity_name)
             return known.category if known else ActivityCategory.EXPLORATION
         if activity_name in social:
             return ActivityCategory.SOCIAL
         return ActivityCategory.REST
 
+    def _catch_up_line(self, pool: List[str]) -> str:
+        """One line from a catch-up pool of her setting (a service-stream
+        draw), or "" when the pool is empty (no draw)."""
+        return self._service_rng.choice(pool) if pool else ""
+
     def _get_catchup_narrative(self, activity_name: str, hour: int) -> str:
-        """Generate a simple narrative for a catch-up activity."""
+        """Generate a simple narrative for a catch-up activity, from her
+        setting's catch-up texts (``SettingSpec.catch_up``): its sleep line,
+        a morning-routine line, or the activity's own; anything else (or a
+        text her setting leaves empty) is told generically."""
+        catch_up = self._setting.catch_up
+        # A morning-routine line is drawn on every call, whatever the activity:
+        # the dict literal this replaced drew it while being built.
         narratives = {
-            "sleeping": "She slept peacefully through the night",
-            "morning_routine": random.choice([
-                "She started her day with a warm shower and coffee",
-                "She did some light stretching and had breakfast",
-            ]),
-            "reading": "She spent time lost in a book",
-            "cooking a meal": "She prepared something to eat",
-            "relaxing": "She took some time to relax",
-            "going for a run": "She went for a run to clear her head",
-            "yoga": "She did a yoga session",
-            "journaling": "She spent some time journaling",
+            **catch_up.by_activity,
+            "sleeping": catch_up.sleep,
+            "morning_routine": self._catch_up_line(catch_up.morning_routine),
         }
-        return narratives.get(activity_name,
-                              f"She spent some time {activity_name.replace('_', ' ')}")
+        template = (narratives.get(activity_name)
+                    or "{Subj} spent some time " + activity_name.replace('_', ' '))
+        return self._render_text(template)
 
     def _get_activity_for_hour(self, hour: int) -> tuple:
         """
         Get appropriate activity for a given hour based on persona's sleep schedule.
 
-        Returns (activity_name, category, narrative) tuple.
+        Returns (activity_name, category, narrative) tuple; the narratives are
+        her setting's catch-up texts (``SettingSpec.catch_up``).
         """
+        catch_up = self._setting.catch_up
         # Get persona's sleep schedule (or defaults)
         wake_hour = self._energy.wake_hour
         bedtime_hour = self._energy.bedtime_hour
@@ -7139,7 +10265,7 @@ class LifeService:
             return (
                 "sleeping",
                 ActivityCategory.REST,
-                "She slept peacefully through the night"
+                self._render_text(catch_up.sleep)
             )
 
         # Calculate hours since wake time for activity selection
@@ -7155,64 +10281,45 @@ class LifeService:
             return (
                 "morning_routine",
                 ActivityCategory.REST,
-                random.choice([
-                    "She started her day with a warm shower and coffee",
-                    "She did some light stretching and had breakfast",
-                    "She enjoyed a quiet morning, easing into the day",
-                ])
+                self._render_text(self._catch_up_line(catch_up.morning_routine))
             )
         elif hours_awake < 5:
             # Morning activity
-            activity_name = random.choice(["reading", "learning", "creative_work"])
+            activity_name = self._service_rng.choice(["reading", "learning", "creative_work"])
             return (
                 activity_name,
                 ActivityCategory.CREATIVE if "creative" in activity_name else ActivityCategory.MENTAL,
-                random.choice([
-                    "She spent the morning lost in a fascinating book",
-                    "She worked on a creative project that had been on her mind",
-                    "She explored some new ideas and took notes",
-                ])
+                self._render_text(self._catch_up_line(catch_up.morning_activity))
             )
         elif hours_awake < 7:
             # Midday / lunch
             return (
                 "cooking",
                 ActivityCategory.REST,
-                random.choice([
-                    "She prepared a light lunch and enjoyed eating slowly",
-                    "She made something simple but satisfying to eat",
-                ])
+                self._render_text(self._catch_up_line(catch_up.midday))
             )
         elif hours_awake < 11:
             # Afternoon
-            activity_name = random.choice(["exploring_interests", "gentle_walk", "creative_work"])
+            activity_name = self._service_rng.choice(["exploring_interests", "gentle_walk", "creative_work"])
             return (
                 activity_name,
                 ActivityCategory.CREATIVE,
-                random.choice([
-                    "She spent the afternoon exploring things that interested her",
-                    "She went for a walk and let her mind wander",
-                    "She worked on something creative, losing track of time",
-                ])
+                self._render_text(self._catch_up_line(catch_up.afternoon))
             )
         elif hours_awake < 14:
             # Evening
-            activity_name = random.choice(["relaxing", "watching_sunset", "evening_routine"])
+            activity_name = self._service_rng.choice(["relaxing", "watching_sunset", "evening_routine"])
             return (
                 activity_name,
                 ActivityCategory.REST,
-                random.choice([
-                    "She relaxed as the day wound down",
-                    "She watched the evening sky change colors",
-                    "She settled into her evening routine",
-                ])
+                self._render_text(self._catch_up_line(catch_up.evening))
             )
         else:
             # Late evening / winding down
             return (
                 "winding_down",
                 ActivityCategory.REST,
-                "She prepared for sleep, feeling pleasantly tired"
+                self._render_text(catch_up.late)
             )
 
     # ============= Calendar CRUD =============
@@ -7378,21 +10485,23 @@ class LifeService:
                 # Set urgency based on proximity
                 if days_until < 1:
                     urgency = 0.7
-                    hint_prefix = "Today is the day"
                 elif days_until < 2:
                     urgency = 0.6
-                    hint_prefix = "Tomorrow is"
                 else:
                     urgency = 0.45
-                    hint_prefix = f"Coming up in {int(days_until)} days"
 
                 # Boost for high-importance or strong-feeling events
                 if row["importance"] > 0.7 or row["feeling"] not in ("neutral", ""):
                     urgency = min(urgency + 0.1, 1.0)
 
+                # The day it is on, by the calendar and in words (Task 17):
+                # an event under a day away can be tomorrow's.
+                day_gap = (event_date.date() - now.date()).days
+                when = ("today" if day_gap <= 0 else "tomorrow" if day_gap == 1
+                        else f"in {_number_words(day_gap)} days")
                 hint = (
-                    f"{hint_prefix}: {row['event_name']}. "
-                    f"Bring it up naturally — ask them about it or wish them well."
+                    f"{_user_ref_tokens(self._user_info)['user_Poss']} event '{row['event_name']}'"
+                    f" is {when}. Bring it up naturally — ask them about it or wish them well."
                 )
 
                 if self._life_trigger_cooled_down("upcoming_event", now):
@@ -7456,7 +10565,8 @@ class LifeService:
                     urgency=0.7,
                     emotional_weight=0.7,
                     prompt_hint=(
-                        f"The user's event '{row['event_name']}' just happened."
+                        f"{_user_ref_tokens(self._user_info)['user_Poss']} event"
+                        f" '{row['event_name']}' just happened."
                         f" Ask warmly how it went — you remembered it mattered to them."
                     ),
                 )
@@ -7482,12 +10592,16 @@ class LifeService:
             )
 
     def _generate_gap_narrative(self, hours: float) -> str:
-        """Generate a narrative summarizing a long gap period."""
+        """Generate a narrative summarizing a long gap period (her setting's
+        ``catch_up.gap_week`` / ``gap_days`` / ``gap_short``). Each is
+        rendered: the contemporary ``gap_days`` carries no token, so it reads
+        as it always did, and another setting's may carry one."""
         days = hours / 24
+        catch_up = self._setting.catch_up
 
         if days >= 7:
-            return "The past week has been a mix of quiet routines and small adventures. She's been keeping busy with her usual interests."
+            return self._render_text(catch_up.gap_week)
         elif days >= 2:
-            return "The last few days passed in a comfortable rhythm of activities, rest, and contemplation."
+            return self._render_text(catch_up.gap_days)
         else:
-            return "She spent the time in her usual way - a blend of rest, creativity, and quiet moments."
+            return self._render_text(catch_up.gap_short)

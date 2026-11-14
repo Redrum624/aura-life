@@ -25,7 +25,7 @@ logger = __import__("logging").getLogger(__name__)
 MILESTONE_PATTERNS = {
     "first_vulnerability": {
         "name": "First vulnerability",
-        "description": "The first time she shared something truly personal",
+        "description": "The first time {subj} shared something truly personal",
     },
     "first_disagreement": {
         "name": "First disagreement",
@@ -236,13 +236,18 @@ class ContinuitySystem:
         if activity_summary:
             top_activity = max(activity_summary, key=activity_summary.get)
             return f"the {top_activity} month"
-        # Mood-based fallback
+        # Mood-based fallback. The mood labels AffectSystem gives now
+        # (affect_system.MOOD_LABELS) take the titles of the retired ones they
+        # replace: low for "blue", anxious for "raw", happy for "bright".
         mood_titles = {
             "content": "a quiet, good stretch",
             "blue": "the heavy weeks",
+            "low": "the heavy weeks",
             "restless": "the restless month",
             "bright": "everything clicking",
+            "happy": "everything clicking",
             "raw": "when everything felt too much",
+            "anxious": "when everything felt too much",
         }
         return mood_titles.get(mood, "another month, passing")
 
@@ -259,9 +264,9 @@ class ContinuitySystem:
             parts.append("A low-energy stretch — dragging through most days.")
         elif energy > 0.7:
             parts.append("High energy this month — felt capable and present.")
-        if mood == "blue":
+        if mood in ("blue", "low"):
             parts.append("The overall mood was heavy.")
-        elif mood == "bright":
+        elif mood in ("bright", "happy"):
             parts.append("Generally bright and engaged.")
         elif mood == "restless":
             parts.append("A restless, searching period.")
@@ -322,7 +327,7 @@ class ContinuitySystem:
             summary = summary[:497] + "..."
 
         chapter = LifeChapter(
-            title=f"before — who {persona_name or 'she'} was",
+            title=f"before — who {persona_name or 'they'} was",
             period_start=None,  # No specific start date for backstory
             summary=summary,
             turning_points=[],
@@ -349,9 +354,12 @@ class ContinuitySystem:
         if len(self._anniversaries) > self.MAX_ANNIVERSARIES:
             self._anniversaries = self._anniversaries[-self.MAX_ANNIVERSARIES:]
 
-    def get_upcoming_anniversaries(self, days_ahead: int = 7) -> List[Anniversary]:
-        """Get anniversaries coming up in the next N days."""
-        now = datetime.now()
+    def get_upcoming_anniversaries(self, days_ahead: int = 7, *,
+                                   now: Optional[datetime] = None) -> List[Anniversary]:
+        """Get anniversaries coming up in the next N days after ``now`` (the
+        world instant ``LifeService`` passes, humanness Task 19; the host's
+        clock when omitted)."""
+        now = now if now is not None else datetime.now()
         upcoming = []
         for ann in self._anniversaries:
             try:
@@ -408,12 +416,13 @@ class ContinuitySystem:
 
     # ============= Export / Serialize =============
 
-    def export_state(self) -> dict:
-        """Structured export for pipeline digest."""
+    def export_state(self, *, now: Optional[datetime] = None) -> dict:
+        """Structured export for pipeline digest (anniversaries upcoming at
+        ``now``: :meth:`get_upcoming_anniversaries`)."""
         result = {}
 
         # Upcoming anniversaries
-        upcoming = self.get_upcoming_anniversaries(7)
+        upcoming = self.get_upcoming_anniversaries(7, now=now)
         if upcoming:
             result["upcoming_anniversaries"] = [
                 {"name": a.name, "date": a.date}

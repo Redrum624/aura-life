@@ -1,0 +1,210 @@
+{
+ "source": "tests/sim_helpers.run_days([SimPersona('control')], 1, seed=1, cadence=PRODUCTION), every activity tick's recorded activity, minutes after sim_helpers.DEFAULT_START",
+ "start": "2026-10-05T15:00:00",
+ "activities": [
+  [
+   20,
+   "making tea"
+  ],
+  [
+   40,
+   "cooking a meal"
+  ],
+  [
+   60,
+   "trying a new recipe"
+  ],
+  [
+   80,
+   "trying a new recipe"
+  ],
+  [
+   100,
+   "trying a new recipe"
+  ],
+  [
+   120,
+   "thinking about user"
+  ],
+  [
+   140,
+   "thinking about user"
+  ],
+  [
+   160,
+   "thinking about user"
+  ],
+  [
+   180,
+   "listening to music"
+  ],
+  [
+   200,
+   "listening to music"
+  ],
+  [
+   220,
+   "listening to music"
+  ],
+  [
+   240,
+   "reading something steamy"
+  ],
+  [
+   260,
+   "having dinner"
+  ],
+  [
+   280,
+   "having dinner"
+  ],
+  [
+   300,
+   "baking something"
+  ],
+  [
+   320,
+   "touching oneself"
+  ],
+  [
+   340,
+   "baking something"
+  ],
+  [
+   360,
+   "making hot chocolate"
+  ],
+  [
+   380,
+   "making hot chocolate"
+  ],
+  [
+   400,
+   "taking a long bath"
+  ],
+  [
+   420,
+   "getting ready for bed"
+  ],
+  [
+   440,
+   "exploring one's body"
+  ],
+  [
+   460,
+   "getting ready for bed"
+  ],
+  [
+   480,
+   "yoga"
+  ],
+  [
+   500,
+   "stargazing"
+  ],
+  [
+   520,
+   "sleeping"
+  ],
+  [
+   960,
+   "intense self-pleasure"
+  ],
+  [
+   980,
+   "waking up"
+  ],
+  [
+   1000,
+   "waking up"
+  ],
+  [
+   1020,
+   "having breakfast"
+  ],
+  [
+   1040,
+   "having breakfast"
+  ],
+  [
+   1060,
+   "having breakfast"
+  ],
+  [
+   1080,
+   "making tea"
+  ],
+  [
+   1100,
+   "making tea"
+  ],
+  [
+   1120,
+   "making tea"
+  ],
+  [
+   1140,
+   "learning something new"
+  ],
+  [
+   1160,
+   "learning something new"
+  ],
+  [
+   1180,
+   "learning something new"
+  ],
+  [
+   1200,
+   "beach day"
+  ],
+  [
+   1220,
+   "beach day"
+  ],
+  [
+   1240,
+   "beach day"
+  ],
+  [
+   1260,
+   "having lunch"
+  ],
+  [
+   1280,
+   "having lunch"
+  ],
+  [
+   1300,
+   "having lunch"
+  ],
+  [
+   1320,
+   "picnic in the park"
+  ],
+  [
+   1340,
+   "picnic in the park"
+  ],
+  [
+   1360,
+   "picnic in the park"
+  ],
+  [
+   1380,
+   "going for a run"
+  ],
+  [
+   1400,
+   "relaxing"
+  ],
+  [
+   1420,
+   "going for a run"
+  ],
+  [
+   1440,
+   "collecting autumn leaves"
+  ]
+ ]
+}

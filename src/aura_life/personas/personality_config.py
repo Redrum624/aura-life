@@ -104,6 +104,20 @@ class PersonalityDefinition:
     appearance_origin: str = "local"       # local | adopted | immigrant | expat
     languages: List[str] = field(default_factory=lambda: list(get_default_languages()))
 
+    # Humanness program Task 7 fields (spec §4.1/§4.2). Defaults keep today's
+    # behaviour: a profile that sets none of these parses/behaves exactly as
+    # it did before this task.
+    example_dialogue: List[List[Tuple[str, str]]] = field(default_factory=list)
+    state_expressions: Dict[str, str] = field(default_factory=dict)
+    traits: Dict[str, float] = field(default_factory=dict)
+    setting: str = ""                      # "" -> the default "contemporary" pack
+    household: List[str] = field(default_factory=list)
+    attachment_style: str = ""             # secure | anxious | avoidant
+    intimacy_rate: Optional[float] = None  # None = unset (today's behaviour)
+    never_say: List[str] = field(default_factory=list)
+    allow_phrases: List[str] = field(default_factory=list)
+    personal_goal: str = ""                # the generator concept's "goal" (from_concept only)
+
     @classmethod
     def from_concept(cls, concept: Mapping[str, Any], **overrides) -> "PersonalityDefinition":
         """Build a definition from a generator concept (`build_genre_concept`,
@@ -111,8 +125,9 @@ class PersonalityDefinition:
         carried the way the profile loaders carry them — `age_range=str(age)`,
         `appearance_details={"gender": …, "age": …}` — and a hex-string
         `theme_color` is parsed to the ARGB int the field holds, exactly as
-        `profile_db.load_profile` does. The rest (archetype, genre, goal, …) is
-        dropped; `overrides` win last.
+        `profile_db.load_profile` does. `goal` is carried into `personal_goal`
+        (Task 7, spec §4.2). The rest (archetype, genre, …) is dropped;
+        `overrides` win last.
 
         This is the bridge between the generator and `LifeService(definition=...)`:
         handing the raw dict over *looks* fine — every engine reads the definition
@@ -133,6 +148,8 @@ class PersonalityDefinition:
             kwargs.setdefault("age_range", str(concept["age"]))
         if details:
             kwargs["appearance_details"] = details
+        if concept.get("goal") is not None:
+            kwargs.setdefault("personal_goal", concept["goal"])
         kwargs.update(overrides)
         if isinstance(kwargs.get("theme_color"), str):
             kwargs["theme_color"] = _argb("theme_color", kwargs["theme_color"])

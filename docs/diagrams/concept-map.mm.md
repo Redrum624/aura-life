@@ -8,11 +8,12 @@ markmap:
 # aura-life
 
 ## The seam — *host ↔ engine*
-### 🔌 `hooks` — *12 functions, imports `typing` only*
+### 🔌 `hooks` — *13 functions, imports `typing` only*
 - `get_config`, `get_user_data_root`, `get_persona_datastore`
 - `get_llm_service`, `get_weather_service`, `get_image_service`
 - `geocode`, `resolve_timezone`, `persona_now`
 - `get_schedule_phase`, `resolve_outfit_for_context`, `generate_and_update`
+- `embed` — *optional by design: the memory stream's relevance*
 ### ⚠️ `HookNotConfigured` — *subclasses `ImportError`*
 - unconfigured hook → that feature degrades, the tick still completes
 ### 🔧 `defaults` — *`persona_now`, the one library default*

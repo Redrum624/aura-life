@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .personality_config import get_default_languages as _default_languages
+from .keys import STATE_KEYS, TRAIT_KEYS, NPC_KINDS
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,51 @@ class ParsedProfile:
         default_factory=lambda: list(_default_languages())
     )
 
+    # Task 7 (aura humanness program, spec §4.1/§4.2) -----------------------
+
+    # == EXAMPLE DIALOGUE == -- blocks of (speaker, line) pairs, speaker is
+    # "{{user}}" or the persona's Name. A block with no parseable lines is
+    # dropped; see parse_warnings.
+    example_dialogue: List[List[Tuple[str, str]]] = field(default_factory=list)
+
+    # == STATE EXPRESSIONS == -- STATE_KEYS (or an unknown key, kept anyway
+    # and reported by validate()) -> free-text description of how that state
+    # shows for this persona.
+    state_expressions: Dict[str, str] = field(default_factory=dict)
+
+    # == ENGINE SEEDS == "Traits:" -- TRAIT_KEYS (or an unknown key, kept
+    # anyway) -> explicit value in 0..1. A value outside 0..1 or unparsable
+    # is dropped, never clamped; see parse_warnings.
+    traits: Dict[str, float] = field(default_factory=dict)
+
+    # == ENGINE SEEDS == "Setting:" -- a setting-pack key (aura_life.settings,
+    # a later task); "" means the default "contemporary" pack.
+    setting: str = ""
+
+    # == ENGINE SEEDS == "Household:" -- comma-separated persona ids this
+    # persona lives with.
+    household: List[str] = field(default_factory=list)
+
+    # == ENGINE SEEDS == "Attachment Style:" -- secure | anxious | avoidant.
+    attachment_style: str = ""
+
+    # == ENGINE SEEDS == "Intimacy Rate:" -- optional 0..1; None = unset
+    # (today's behaviour keeps applying). A value outside 0..1 or unparsable
+    # is dropped, never clamped; see parse_warnings.
+    intimacy_rate: Optional[float] = None
+
+    # == VOICE & COMMUNICATION == "Never Say:" / "Allow Phrases:" --
+    # semicolon-separated phrases for the host's phrase filter.
+    never_say: List[str] = field(default_factory=list)
+    allow_phrases: List[str] = field(default_factory=list)
+
+    # Warnings recorded DURING parsing for structural drops that validate()
+    # cannot reconstruct from the final field values alone (a value dropped
+    # for being out of range/unparsable, or an EXAMPLE DIALOGUE block with no
+    # parseable lines). validate() merges these into its returned list; not
+    # part of to_personality_definition()'s output or ProfileDatabase.
+    parse_warnings: List[str] = field(default_factory=list, repr=False)
+
     def validate(self) -> List[str]:
         """Validate the parsed profile and return a list of warnings.
 
@@ -139,6 +185,33 @@ class ParsedProfile:
             warnings.append("Missing 'Voice Style'")
         if not self.appearance_details:
             warnings.append("Missing 'Visual Appearance' — image generation will use defaults")
+
+        # Task 7: unknown STATE_KEYS / TRAIT_KEYS / NPC_KINDS are kept, not
+        # dropped -- surfaced here so an authored profile can catch a typo
+        # without losing the (possibly deliberate) custom entry.
+        for key in self.state_expressions:
+            if key not in STATE_KEYS:
+                warnings.append(
+                    f"STATE EXPRESSIONS: unknown state key '{key}' (not in STATE_KEYS) — kept"
+                )
+        for key in self.traits:
+            if key not in TRAIT_KEYS:
+                warnings.append(
+                    f"Traits: unknown trait key '{key}' (not in TRAIT_KEYS) — kept"
+                )
+        for npc in self.social_circle:
+            kind = npc.get("kind")
+            if kind and kind not in NPC_KINDS:
+                warnings.append(
+                    f"SOCIAL CIRCLE: unknown NPC kind '{kind}' for "
+                    f"'{npc.get('name', '?')}' (not in NPC_KINDS) — kept"
+                )
+
+        # Value-level drops recorded during parsing (Traits/Intimacy Rate out
+        # of range or unparsable; an EXAMPLE DIALOGUE block with no
+        # parseable lines) -- these can't be reconstructed from the final
+        # field values alone, since the invalid value was never kept.
+        warnings.extend(self.parse_warnings)
 
         for w in warnings:
             logger.warning(f"Profile '{self.name or '?'}': {w}")
@@ -229,6 +302,22 @@ class ParsedProfile:
             "cultural_summary": self.cultural_summary,
             "appearance_origin": self.appearance_origin,
             "languages": list(self.languages),
+            # Previously parsed but never emitted here (Task 7, spec §4.2) --
+            # ParsedProfile.behavioral_quirks -> PersonalityDefinition.quirks.
+            "quirks": list(self.behavioral_quirks),
+            "communication_traits": list(self.communication_traits),
+            "avoids": list(self.avoids),
+            "relationship_style": self.relationship_style,
+            # Task 7 new fields (spec §4.1/§4.2)
+            "example_dialogue": [list(block) for block in self.example_dialogue],
+            "state_expressions": dict(self.state_expressions),
+            "traits": dict(self.traits),
+            "setting": self.setting,
+            "household": list(self.household),
+            "attachment_style": self.attachment_style,
+            "intimacy_rate": self.intimacy_rate,
+            "never_say": list(self.never_say),
+            "allow_phrases": list(self.allow_phrases),
         }
 
     def _parse_color(self, color_str: str) -> int:
@@ -252,6 +341,8 @@ class ProfileParser:
         "== BACKSTORY & DEPTH ==",
         "== PERSONALITY TRAITS",
         "== VOICE & COMMUNICATION ==",
+        "== EXAMPLE DIALOGUE ==",
+        "== STATE EXPRESSIONS ==",
         "== SLEEP SCHEDULE ==",
         "== VISUAL APPEARANCE",
         "== LOCATIONS ==",
@@ -293,6 +384,12 @@ class ProfileParser:
 
         if "VOICE & COMMUNICATION" in sections:
             cls._parse_voice_communication(sections["VOICE & COMMUNICATION"], profile)
+
+        if "EXAMPLE DIALOGUE" in sections:
+            cls._parse_example_dialogue(sections["EXAMPLE DIALOGUE"], profile)
+
+        if "STATE EXPRESSIONS" in sections:
+            cls._parse_state_expressions(sections["STATE EXPRESSIONS"], profile)
 
         if "SLEEP SCHEDULE" in sections:
             cls._parse_sleep_schedule(sections["SLEEP SCHEDULE"], profile)
@@ -348,6 +445,10 @@ class ProfileParser:
                     current_section = "PERSONALITY TRAITS"
                 elif "VOICE" in section_name or "COMMUNICATION" in section_name:
                     current_section = "VOICE & COMMUNICATION"
+                elif "EXAMPLE DIALOGUE" in section_name:
+                    current_section = "EXAMPLE DIALOGUE"
+                elif "STATE EXPRESSIONS" in section_name:
+                    current_section = "STATE EXPRESSIONS"
                 elif "SLEEP" in section_name or "SCHEDULE" in section_name:
                     current_section = "SLEEP SCHEDULE"
                 elif "VISUAL APPEARANCE" in section_name or "IMAGE GENERATION" in section_name:
@@ -419,7 +520,10 @@ class ProfileParser:
             elif key == "home type":
                 profile.home_type = value
             elif key == "persona type":
-                profile.persona_type = "ai" if "ai" in value.lower() else "human"
+                # Exact match only: a substring test misclassified "Human
+                # (Haitian)" and "human, trained sailor" as AI, since both
+                # contain the substring "ai" ("Hai...", "tr-ai-ned").
+                profile.persona_type = "ai" if value.lower() in ("ai", "a.i.", "artificial intelligence") else "human"
             elif key == "orientation":
                 profile.orientation = value.lower().strip()
             elif key == "theme color":
@@ -584,6 +688,136 @@ class ProfileParser:
                     profile.tts_repetition_penalty = float(value)
                 except ValueError:
                     pass
+            elif key == "never say":
+                profile.never_say = [p.strip() for p in value.split(";") if p.strip()]
+            elif key == "allow phrases":
+                profile.allow_phrases = [p.strip() for p in value.split(";") if p.strip()]
+
+    _USER_MARKER_RE = re.compile(r'^\{\{\s*user\s*\}\}$', re.IGNORECASE)
+
+    @classmethod
+    def _example_dialogue_turn_speaker(cls, prefix: str, persona_name: str) -> Optional[str]:
+        """Return the canonical speaker label if `prefix` (the text before a
+        line's first colon) names a recognized turn-starting speaker, else
+        None.
+
+        A turn starts ONLY when the prefix is "{{user}}" (internal spacing
+        tolerated and normalized, e.g. "{{ user }}") or the profile's own
+        Name, matched case-insensitively but normalized to the Name exactly
+        as authored in BASIC INFO -- never to the case used in the dialogue
+        line. Anything else (including a plain word followed by a colon,
+        e.g. a wrapped line that happens to contain "this thing: ...") is
+        not a speaker and the caller treats it as a continuation.
+        """
+        candidate = prefix.strip()
+        if cls._USER_MARKER_RE.match(candidate):
+            return "{{user}}"
+        if persona_name and candidate.lower() == persona_name.lower():
+            return persona_name
+        return None
+
+    @classmethod
+    def _parse_example_dialogue(cls, text: str, profile: ParsedProfile):
+        """Parse EXAMPLE DIALOGUE (spec §4.1): blocks of "Speaker: line",
+        speaker is "{{user}}" or the persona's Name, blocks separated by a
+        line "<START>".
+
+        A line only STARTS a new turn when its prefix (before the first
+        colon) is recognized by _example_dialogue_turn_speaker(); every
+        other non-blank line -- whether or not it contains a colon -- is a
+        WRAPPED CONTINUATION of the previous turn, joined onto it with a
+        single space. This is what keeps a colon inside a wrapped line
+        (e.g. "...something that's been on my mind for a while: is
+        everything okay?") from being misread as a new speaker: only the
+        recognized-speaker prefix check can start a turn, a bare colon
+        never does. Text is otherwise kept verbatim -- only each line's own
+        leading/trailing whitespace is trimmed, exactly like every other
+        value in this parser; inner punctuation is never touched.
+
+        A continuation line that appears before any turn has started in its
+        block is an orphan: dropped, recorded in profile.parse_warnings. A
+        block that ends up with zero parseable lines (e.g. two "<START>"
+        markers in a row, or a block that was only orphan continuations) is
+        also dropped and recorded the same way -- it is not silently kept
+        as an empty block, since a later task renders these as prior turns.
+        """
+        blocks: List[List[Tuple[str, str]]] = []
+        current: List[Tuple[str, str]] = []
+        started = False
+        persona_name = (profile.name or "").strip()
+
+        def _flush():
+            nonlocal current
+            if started:
+                if current:
+                    blocks.append(current)
+                else:
+                    profile.parse_warnings.append(
+                        "EXAMPLE DIALOGUE: a block had no parseable lines — dropped"
+                    )
+            current = []
+
+        for line in text.split("\n"):
+            if line.strip() == "<START>":
+                _flush()
+                started = True
+                continue
+            if not started:
+                continue
+            stripped = line.strip()
+            if not stripped:
+                continue
+
+            speaker = None
+            value = ""
+            if ":" in stripped:
+                prefix, rest = stripped.split(":", 1)
+                canonical = cls._example_dialogue_turn_speaker(prefix, persona_name)
+                if canonical is not None:
+                    speaker = canonical
+                    value = rest.strip()
+
+            if speaker is not None:
+                if value:
+                    current.append((speaker, value))
+                # A recognized "Speaker:" with nothing after it carries no
+                # text to add; it is silently skipped, same as before.
+                continue
+
+            # Continuation: not a recognized turn start, whether because
+            # there was no colon at all or because the colon's prefix
+            # wasn't "{{user}}"/the persona's Name.
+            if current:
+                prev_speaker, prev_text = current[-1]
+                current[-1] = (prev_speaker, prev_text + " " + stripped)
+            else:
+                profile.parse_warnings.append(
+                    "EXAMPLE DIALOGUE: a continuation line before any turn in its block — dropped"
+                )
+        _flush()
+
+        profile.example_dialogue = blocks
+
+    @classmethod
+    def _parse_state_expressions(cls, text: str, profile: ParsedProfile):
+        """Parse STATE EXPRESSIONS (spec §4.1): one "key: free text" line per
+        state. Keys are normalized like every other section key (lowercased,
+        spaces -> underscores); a key outside STATE_KEYS is kept as-is and
+        reported by validate(), never dropped.
+        """
+        for line in text.split("\n"):
+            line = line.strip()
+            if not line or ":" not in line:
+                continue
+
+            key, value = line.split(":", 1)
+            key = key.strip().lower().replace(" ", "_")
+            value = value.strip()
+
+            if not key or not value:
+                continue
+
+            profile.state_expressions[key] = value
 
     @classmethod
     def _parse_sleep_schedule(cls, text: str, profile: ParsedProfile):
@@ -742,7 +976,11 @@ class ProfileParser:
     def _parse_social_circle(cls, text: str, profile: ParsedProfile):
         """Parse SOCIAL CIRCLE section.
 
-        Each line: "- Name: relationship, personality brief, shared interests: x, y, z"
+        Each line: "- Name [kind]: relationship, personality brief, shared interests: x, y, z"
+        (spec §4.1). The "[kind]" tag is optional; its absence means "friend"
+        (the spec's documented default). A bracketed value outside NPC_KINDS
+        is kept verbatim (lowercased), never coerced to the default --
+        validate() reports the mismatch as a warning instead.
         """
         for line in text.split("\n"):
             line = line.strip()
@@ -753,13 +991,20 @@ class ProfileParser:
             if ":" not in item:
                 continue
 
-            # Split "Name: rest"
+            # Split "Name [kind]: rest"
             name_part, rest = item.split(":", 1)
-            name = name_part.strip()
+            name_part = name_part.strip()
             rest = rest.strip()
 
+            kind = "friend"  # spec §4.1 default when "[kind]" is absent
+            name = name_part
+            kind_match = re.match(r'^(.*\S)\s*\[\s*([^\]]+?)\s*\]$', name_part)
+            if kind_match:
+                name = kind_match.group(1).strip()
+                kind = kind_match.group(2).strip().lower()
+
             # Parse "relationship, personality, shared interests: x, y, z"
-            npc = {"name": name}
+            npc = {"name": name, "kind": kind}
 
             if "shared interests:" in rest.lower():
                 main_part, interests_part = rest.lower().split("shared interests:", 1)
@@ -882,6 +1127,77 @@ class ProfileParser:
             elif line.startswith("Hormonal Enabled:"):
                 val = line.split(":", 1)[1].strip().lower()
                 profile.hormonal_enabled = val in ("yes", "true", "1")
+            elif line.startswith("Traits:"):
+                rest = line.split(":", 1)[1].strip()
+                if rest:
+                    cls._parse_traits(rest, profile)
+            elif line.startswith("Setting:"):
+                profile.setting = line.split(":", 1)[1].strip()
+            elif line.startswith("Household:"):
+                rest = line.split(":", 1)[1].strip()
+                if rest:
+                    profile.household = [p.strip() for p in rest.split(",") if p.strip()]
+            elif line.startswith("Attachment Style:"):
+                val = line.split(":", 1)[1].strip().lower()
+                if val in ("secure", "anxious", "avoidant"):
+                    profile.attachment_style = val
+                elif val:
+                    profile.parse_warnings.append(
+                        f"Attachment Style: '{val}' is not secure/anxious/avoidant — dropped"
+                    )
+            elif line.startswith("Intimacy Rate:"):
+                rest = line.split(":", 1)[1].strip()
+                if rest:
+                    cls._parse_intimacy_rate(rest, profile)
+
+    @classmethod
+    def _parse_traits(cls, rest: str, profile: ParsedProfile):
+        """Parse the ENGINE SEEDS "Traits:" line (spec §4.1): comma-separated
+        "key value" pairs (e.g. "sociability 0.2, volatility 0.3"). A key
+        outside TRAIT_KEYS is kept (validate() reports it); a value outside
+        0..1 or unparsable is dropped -- never clamped -- and recorded in
+        profile.parse_warnings for validate() to surface.
+        """
+        for pair in rest.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            tokens = pair.split()
+            if len(tokens) != 2:
+                profile.parse_warnings.append(f"Traits: unparsable entry '{pair}' — dropped")
+                continue
+            key, raw_value = tokens
+            key = key.strip().lower()
+            try:
+                value = float(raw_value)
+            except ValueError:
+                profile.parse_warnings.append(
+                    f"Traits: '{key}' value '{raw_value}' is unparsable — dropped"
+                )
+                continue
+            if not (0.0 <= value <= 1.0):
+                profile.parse_warnings.append(
+                    f"Traits: '{key}' value {value} is outside 0..1 — dropped"
+                )
+                continue
+            profile.traits[key] = value
+
+    @classmethod
+    def _parse_intimacy_rate(cls, rest: str, profile: ParsedProfile):
+        """Parse the ENGINE SEEDS "Intimacy Rate:" line (spec §4.1/R6): an
+        optional float 0..1. A value outside 0..1 or unparsable is dropped --
+        never clamped -- and recorded in profile.parse_warnings; omitted
+        keeps profile.intimacy_rate at None (unset).
+        """
+        try:
+            value = float(rest)
+        except ValueError:
+            profile.parse_warnings.append(f"Intimacy Rate: '{rest}' is unparsable — dropped")
+            return
+        if not (0.0 <= value <= 1.0):
+            profile.parse_warnings.append(f"Intimacy Rate: {value} is outside 0..1 — dropped")
+            return
+        profile.intimacy_rate = value
 
     @classmethod
     def _parse_location_section(cls, text: str, profile: ParsedProfile):

@@ -45,9 +45,10 @@ def _dump(path, skip="profile_social_circle"):
 def test_replaces_circle_and_reads_back(db):
     db.set_social_circle(NEW)
     for data in (db.load(), db.load_raw()):
+        # The branch's load() adds each person's kind (Task 7; "friend" when the row has none): an addition.
         assert data["social_circle"] == [
-            {"name": "Maya", "relationship": "best friend", "personality": "bubbly", "shared_interests": "hiking, film"},
-            {"name": "Jo", "relationship": "sister", "personality": "dry", "shared_interests": "chess, tea"},
+            {"name": "Maya", "relationship": "best friend", "personality": "bubbly", "shared_interests": "hiking, film", "kind": "friend"},
+            {"name": "Jo", "relationship": "sister", "personality": "dry", "shared_interests": "chess, tea", "kind": "friend"},
         ]
 
 

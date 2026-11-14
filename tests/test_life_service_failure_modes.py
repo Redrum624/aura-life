@@ -186,7 +186,10 @@ def test_excitement_share_trigger_failure_is_logged(tmp_path, caplog):
         raise RuntimeError("follow-up manager is broken")
 
     svc = _svc(tmp_path, follow_up_provider=_broken)
-    event = LifeEvent(
+    # Task 17: the trigger is made of her memory of one of her life events
+    # (the episode carrying its share id), so the event is recorded and
+    # remembered -- a bare LifeEvent no longer reaches the provider at all.
+    event = svc._life_events.record_event(
         event_type="achievement",
         title="something good",
         description="it went well",
@@ -196,6 +199,7 @@ def test_excitement_share_trigger_failure_is_logged(tmp_path, caplog):
 
     with caplog.at_level(logging.WARNING, logger=LOGGER_NAME):
         svc._bridge_life_event(event)
+        svc._remember("finishing something good", tags=("achievement", event.share_id))
 
     assert any(r.levelno >= logging.WARNING for r in caplog.records), (
         "a dead EXCITEMENT_SHARE trigger left no trace at all"

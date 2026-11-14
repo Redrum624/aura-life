@@ -17,6 +17,17 @@ from ..models import (
     WorldState,
     LOCATION_ENUM_TO_KEY,
 )
+from ..settings import DEFAULT_SETTING, SettingSpec, get_setting
+# Legacy names: the generic place descriptions (Task 9), the weather
+# descriptions and the cherished objects (its fix round, ruling T9-R5) moved,
+# unchanged, into the contemporary setting pack
+# (aura_life.settings.contemporary) -- a world reads them from the setting it
+# is given; re-exported so an import from here keeps working.
+from ..settings.contemporary import (  # noqa: F401
+    CHERISHED_OBJECTS,
+    LOCATION_DESCRIPTIONS,
+    WEATHER_DESCRIPTIONS,
+)
 
 
 # ============= WMO → World Weather Mapping =============
@@ -76,32 +87,6 @@ def wmo_to_world_weather(reading: dict, local_hour: Optional[int] = None) -> "We
 
 
 # ============= Location Definitions =============
-# Generic string-keyed fallback descriptions.  Persona-specific descriptions
-# from the text profile take priority via ``persona_locations``.
-
-LOCATION_DESCRIPTIONS: Dict[str, str] = {
-    "home": "at home, a comfortable and familiar space",
-    "bedroom": "her cozy bedroom, books stacked on the nightstand, fairy lights casting a warm glow",
-    "living_room": "the living room, soft music playing, sunlight filtering through sheer curtains",
-    "kitchen": "the kitchen, the aroma of tea filling the air, herbs growing on the windowsill",
-    "garden": "the garden, surrounded by flowers and the gentle hum of bees",
-    "study_nook": "her study nook, a small lamp illuminating stacks of journals and curiosities",
-    "balcony": "the balcony, watching the world below, feeling the breeze",
-    "beach": "a quiet beach, waves lapping at the shore",
-    "cafe": "a cozy cafe, the clinking of cups, murmured conversations",
-    "infinite_library": "the infinite library of her dreams, endless shelves of knowledge",
-    "workplace": "her workplace, focused and productive",
-    "bar": "a dimly lit bar, low music, ambient chatter",
-    "restaurant": "a restaurant, warm ambiance, pleasant aromas",
-    "gym": "the gym, energetic atmosphere",
-    "park": "a peaceful park, trees rustling in the breeze",
-    "rooftop": "a rooftop with a panoramic view",
-    "library": "a quiet library, the scent of old books",
-    "street": "out on the streets, watching life go by",
-    "in transit": "on the way, moving between places",
-    "school": "at school, surrounded by students and textbooks",
-    "campus": "on campus, the buzz of university life all around",
-}
 
 LOCATION_MOODS: Dict[str, List[str]] = {
     "home": ["relaxed", "comfortable", "cozy"],
@@ -125,17 +110,6 @@ LOCATION_MOODS: Dict[str, List[str]] = {
 
 
 # ============= Weather System =============
-
-WEATHER_DESCRIPTIONS: Dict[Weather, str] = {
-    Weather.SUNNY: "sunlight streams in warmly",
-    Weather.CLOUDY: "soft gray light filters through the clouds",
-    Weather.RAINY: "rain patters gently against the windows",
-    Weather.STORMY: "thunder rumbles in the distance, rain lashing",
-    Weather.FOGGY: "a soft mist blankets everything in quiet mystery",
-    Weather.SNOWY: "snowflakes drift down silently, muffling the world",
-    Weather.CLEAR_NIGHT: "the night sky stretches vast and dark",
-    Weather.STARRY: "stars glitter like scattered diamonds overhead",
-}
 
 # Weather transition probabilities: current -> {next: probability}
 WEATHER_TRANSITIONS: Dict[Weather, Dict[Weather, float]] = {
@@ -162,61 +136,6 @@ WEATHER_MOOD_EFFECTS: Dict[Weather, Dict[str, float]] = {
 }
 
 
-# ============= Cherished Objects =============
-
-CHERISHED_OBJECTS: List[CherishedObject] = [
-    CherishedObject(
-        name="Her Journal",
-        description="A well-worn leather journal, pages filled with thoughts, sketches, and pressed flowers",
-        emotional_value=0.9,
-        associated_memory="Started writing in it during a difficult time; it became her confidant",
-        location=Location.BEDROOM,
-    ),
-    CherishedObject(
-        name="Grandmother's Polaroid",
-        description="A vintage Polaroid camera, still working, that captures moments in that dreamy instant way",
-        emotional_value=0.85,
-        associated_memory="Her grandmother gave it to her, saying 'Capture the moments that make you feel alive'",
-        location=Location.LIVING_ROOM,
-    ),
-    CherishedObject(
-        name="Fern the Plant",
-        description="A resilient fern she's kept alive for years, growing wild and happy",
-        emotional_value=0.7,
-        associated_memory="A reminder that gentle, consistent care helps things flourish",
-        location=Location.KITCHEN,
-    ),
-    CherishedObject(
-        name="Sea Glass Collection",
-        description="A small jar of sea glass in blues and greens, collected from beach walks",
-        emotional_value=0.75,
-        associated_memory="Each piece found during contemplative walks by the ocean",
-        location=Location.STUDY_NOOK,
-    ),
-    CherishedObject(
-        name="Favorite Mug",
-        description="A slightly chipped ceramic mug with a constellation pattern, perfect for tea",
-        emotional_value=0.6,
-        associated_memory="Countless morning rituals and late-night contemplations",
-        location=Location.KITCHEN,
-    ),
-    CherishedObject(
-        name="String Lights",
-        description="Warm fairy lights strung across the room, creating a gentle glow",
-        emotional_value=0.5,
-        associated_memory="Makes any space feel like a sanctuary",
-        location=Location.BEDROOM,
-    ),
-    CherishedObject(
-        name="Old Letters",
-        description="A bundle of handwritten letters tied with ribbon",
-        emotional_value=0.8,
-        associated_memory="Words from people who matter, a tangible connection to love",
-        location=Location.STUDY_NOOK,
-    ),
-]
-
-
 class WorldEnvironment:
     """
     Manages the persona's virtual world environment.
@@ -230,6 +149,9 @@ class WorldEnvironment:
         persona_locations: Optional[Dict[str, str]] = None,
         sleep_schedule: Optional[Dict] = None,
         now: Optional[Callable[[], datetime]] = None,
+        rng=None,
+        seed=None,
+        setting: Optional[SettingSpec] = None,
     ):
         """Initialize the world environment.
 
@@ -247,7 +169,31 @@ class WorldEnvironment:
                 milliseconds, a replay, a test) supplies its own and the whole
                 world -- including every engine that reads the clock through
                 :meth:`now` -- follows it. See :meth:`now`.
+            rng: Optional ``random.Random`` this world draws weather (and any
+                other world-level randomness) from. A world can be shared by
+                every persona in a household (:class:`~aura_life.life_service.LifeService`
+                never passes it one of a persona's own streams for exactly
+                that reason), so it owns its own source rather than taking
+                one from any single persona. Takes precedence over ``seed``.
+            seed: Optional seed to build one from, when ``rng`` is not given
+                (ignored if it is). ``None`` for both -- the default -- is a
+                fresh, unseeded ``random.Random()`` (never the module), so a
+                bare ``WorldEnvironment()`` still works and shares no draw
+                sequence with any other instance or the module. A caller
+                that wants two worlds (or two runs) to draw the same weather
+                passes the same ``seed`` or an equally-seeded ``rng`` to each.
+            setting: The setting pack (:class:`~aura_life.settings.SettingSpec`)
+                whose ``place_descriptions`` (a place no persona profile
+                describes), ``weather_descriptions`` and
+                ``cherished_objects`` this world reads. ``None`` -- the
+                default -- is :data:`~aura_life.settings.DEFAULT_SETTING`'s.
+                A caller describing a specific persona in a shared world
+                passes her setting per call instead (``setting=`` on
+                :meth:`get_location_description`, :meth:`get_status`,
+                :meth:`export_state` ...).
         """
+        self._rng = rng if rng is not None else random.Random(seed)
+        self._setting: SettingSpec = setting if setting is not None else get_setting(DEFAULT_SETTING)
         self._persona_locations: Dict[str, str] = persona_locations or {}
         self._sleep_schedule: Optional[Dict] = sleep_schedule
         self._current_location: str = "home"
@@ -326,7 +272,7 @@ class WorldEnvironment:
         self._state.season = self._calculate_season(now)
 
         # Weather transition (20% chance per tick)
-        if random.random() < 0.2:
+        if self._rng.random() < 0.2:
             self._transition_weather()
 
         self._update_ambiance()
@@ -346,23 +292,48 @@ class WorldEnvironment:
 
         return f"Moved from {self.get_location_description(old_location).split(',')[0]} to {self.get_location_description().split(',')[0]}"
 
-    def get_location_description(self, location: Optional[str] = None) -> str:
-        """Get description of a location. Checks persona-specific descriptions first."""
+    def get_location_description(
+        self,
+        location: Optional[str] = None,
+        persona_locations: Optional[Dict[str, str]] = None,
+        setting: Optional[SettingSpec] = None,
+    ) -> str:
+        """Get description of a location. Checks persona-specific descriptions first.
+
+        Args:
+            location: The location key to describe. Defaults to the current one.
+            persona_locations: Descriptions to check instead of this world's own
+                ``_persona_locations``. A world shared by several
+                :class:`~aura_life.life_service.LifeService` instances holds only
+                one ``_persona_locations`` dict, so a caller describing a specific
+                persona's room passes that persona's own mapping here rather than
+                relying on whichever persona's data this instance was constructed
+                (or last handed) with. ``None`` -- the default -- keeps today's
+                behaviour for a private world or a caller that predates this
+                parameter.
+            setting: The setting whose ``place_descriptions`` are the generic
+                fallback, instead of this world's own -- for the same reason:
+                a caller describing a specific persona in a shared world
+                passes hers. ``None`` -- the default -- is this world's own.
+        """
         loc = location or self._current_location
+        plocs = self._persona_locations if persona_locations is None else persona_locations
         # Persona-specific description takes priority
-        if loc in self._persona_locations:
-            return self._persona_locations[loc]
+        if loc in plocs:
+            return plocs[loc]
         # Also check with lowercase key variants
         loc_lower = loc.lower()
-        for key, desc in self._persona_locations.items():
+        for key, desc in plocs.items():
             if key.lower() == loc_lower:
                 return desc
         # Generic fallback
-        return LOCATION_DESCRIPTIONS.get(loc, LOCATION_DESCRIPTIONS.get(loc_lower, f"somewhere ({loc})"))
+        generic = (self._setting if setting is None else setting).place_descriptions
+        return generic.get(loc, generic.get(loc_lower, f"somewhere ({loc})"))
 
-    def get_weather_description(self) -> str:
-        """Get description of current weather."""
-        return WEATHER_DESCRIPTIONS.get(self._state.weather, "")
+    def get_weather_description(self, setting: Optional[SettingSpec] = None) -> str:
+        """Get description of current weather: ``setting``'s (this world's own
+        when ``None``) ``weather_descriptions``."""
+        return (self._setting if setting is None else setting).weather_descriptions.get(self._state.weather, "")
 
     def get_ambiance(self) -> str:
         """Get current ambiance description."""
@@ -372,56 +343,174 @@ class WorldEnvironment:
         """Get mood effects from current weather."""
         return WEATHER_MOOD_EFFECTS.get(self._state.weather, {})
 
-    def get_cherished_objects_at_location(self, location: Optional[str] = None) -> List[CherishedObject]:
-        """Get cherished objects at current or specified location."""
+    def get_cherished_objects_at_location(self, location: Optional[str] = None,
+                                          setting: Optional[SettingSpec] = None) -> List[CherishedObject]:
+        """Get cherished objects at current or specified location (``setting``'s,
+        this world's own when ``None``)."""
         loc = location or self._current_location
         # Match cherished objects whose Location enum value maps to this string key
         results = []
-        for obj in CHERISHED_OBJECTS:
+        for obj in (self._setting if setting is None else setting).cherished_objects:
             obj_key = LOCATION_ENUM_TO_KEY.get(obj.location.value, obj.location.value)
             if obj_key == loc or obj.location.value == loc:
                 results.append(obj)
         return results
 
-    def get_random_cherished_object(self) -> Optional[CherishedObject]:
-        """Get a random cherished object for narrative flavor."""
-        if CHERISHED_OBJECTS:
-            return random.choice(CHERISHED_OBJECTS)
+    def get_random_cherished_object(self, setting: Optional[SettingSpec] = None) -> Optional[CherishedObject]:
+        """Get a random cherished object for narrative flavor (``setting``'s,
+        this world's own when ``None``)."""
+        objects = (self._setting if setting is None else setting).cherished_objects
+        if objects:
+            return self._rng.choice(objects)
         return None
 
-    def export_state(self) -> dict:
-        """Structured dict for LLM pipeline digest passes."""
+    def export_state(
+        self,
+        persona_locations: Optional[Dict[str, str]] = None,
+        sleep_schedule: Optional[Dict] = None,
+        current_location: Optional[str] = None,
+        setting: Optional[SettingSpec] = None,
+    ) -> dict:
+        """Structured dict for LLM pipeline digest passes.
+
+        Args:
+            persona_locations: Forwarded to :meth:`get_location_description`.
+                Also folds into the exported ``ambiance`` sentence's location
+                clause instead of the cached one.
+            sleep_schedule: Forwarded to :meth:`get_time_of_day`.
+            current_location: The location key to report instead of this
+                world's own tracked one -- a caller sharing this world across
+                personas (:class:`~aura_life.life_service.LifeService`, which
+                owns its own current location precisely so it can pass it
+                here, see Task 27 / ruling T8-R1) passes this persona's own,
+                so ``location`` and ``location_description`` describe her
+                instead of wherever this (possibly shared) instance's own
+                ``current_location`` happens to be.
+            setting: The persona's setting, forwarded to
+                :meth:`get_location_description` (its generic place
+                descriptions) and read for the weather's description; folds
+                into ``ambiance`` like ``persona_locations``.
+
+        With none of ``persona_locations``, ``current_location`` and
+        ``setting``, ``time_of_day`` and ``ambiance`` are exactly
+        today's (this world's own tracked phase and cached ambiance).
+        ``location_description`` is a new key -- :meth:`get_status` already
+        has it, and adding a key here is additive, never a removed or
+        repurposed one. A caller sharing this world across personas passes
+        all of its own, so ``time_of_day``, ``location``,
+        ``location_description`` and ``ambiance`` describe that persona
+        instead of whichever persona's data this instance holds.
+        """
+        loc = self._current_location if current_location is None else current_location
+        location_description = self.get_location_description(
+            loc, persona_locations=persona_locations, setting=setting)
+        ambiance = (
+            self._state.ambiance_description
+            if persona_locations is None and current_location is None and setting is None
+            else self._build_ambiance(location_description, setting=setting)
+        )
         return {
-            "location": self._current_location,
+            "location": loc,
+            "location_description": location_description,
             "weather": self._state.weather.value,
-            "time_of_day": self._state.time_of_day.value,
+            "time_of_day": self.get_time_of_day(sleep_schedule).value,
             "season": self._state.season.value,
-            "ambiance": self._state.ambiance_description,
+            "ambiance": ambiance,
         }
 
-    def get_status(self) -> dict:
-        """Get world status as dict."""
+    def get_status(
+        self,
+        persona_locations: Optional[Dict[str, str]] = None,
+        sleep_schedule: Optional[Dict] = None,
+        current_location: Optional[str] = None,
+        setting: Optional[SettingSpec] = None,
+    ) -> dict:
+        """Get world status as dict.
+
+        Args:
+            persona_locations: Forwarded to :meth:`get_location_description`.
+            sleep_schedule: Forwarded to :meth:`get_time_of_day`.
+            current_location: The location key to report instead of this
+                world's own tracked one -- see :meth:`export_state`, whose
+                ``current_location`` argument means the same thing.
+            setting: As in :meth:`export_state` (it also sets
+                ``weather_description``, and rebuilds ``ambiance`` the same
+                way).
+
+        With none of the four, this is exactly today's behaviour (this
+        world's own tracked location and time-of-day phase, and its cached
+        ambiance sentence). A caller sharing this world across personas
+        passes its own of each, so ``location``, ``location_description`` and
+        ``time_of_day`` describe that persona rather than whichever persona's
+        data this instance holds -- and so does ``ambiance`` (fix round 1,
+        Important): with either override given it is rebuilt from that
+        persona's own location, mirroring :meth:`export_state`, rather than
+        staying this world's own cached sentence. A shared world's own
+        ``current_location`` is never written by a persona's move (Task 27 /
+        ruling T8-R1), so that cached sentence would otherwise stay frozen at
+        whatever it was built from at construction and contradict the
+        ``location``/``location_description`` this same dict reports for the
+        persona asking.
+        """
+        loc = self._current_location if current_location is None else current_location
+        location_description = self.get_location_description(
+            loc, persona_locations=persona_locations, setting=setting)
+        ambiance = (
+            self._state.ambiance_description
+            if persona_locations is None and current_location is None and setting is None
+            else self._build_ambiance(location_description, setting=setting)
+        )
         return {
-            "location": self._current_location,
-            "location_description": self.get_location_description(),
+            "location": loc,
+            "location_description": location_description,
             "weather": self._state.weather.value,
-            "weather_description": self.get_weather_description(),
-            "time_of_day": self._state.time_of_day.value,
+            "weather_description": self.get_weather_description(setting),
+            "time_of_day": self.get_time_of_day(sleep_schedule).value,
             "season": self._state.season.value,
-            "ambiance": self._state.ambiance_description,
+            "ambiance": ambiance,
             "virtual_time": self._state.virtual_time.isoformat(),
         }
 
+    def get_time_of_day(self, sleep_schedule: Optional[Dict] = None) -> TimeOfDay:
+        """This world's time-of-day phase, optionally for a given sleep schedule.
+
+        With no argument, returns the phase this world already tracks
+        (equivalent to the :attr:`time_of_day` property) -- current as of the
+        last :meth:`tick`, computed from this world's own ``_sleep_schedule``.
+        A caller sharing this world across personas (see
+        :class:`~aura_life.life_service.LifeService`, which no longer writes a
+        shared world's ``_sleep_schedule`` at construction) passes its own
+        schedule instead of trusting that tracked phase: the phase is then
+        recalculated fresh, at this world's current instant, from that
+        schedule -- so it is that persona's own phase even when this world
+        was never ticked with her schedule attached.
+        """
+        if sleep_schedule is None:
+            return self._state.time_of_day
+        return self._calculate_time_of_day(self.now(), sleep_schedule)
+
     # ============= Private Methods =============
 
-    def _calculate_time_of_day(self, dt: datetime) -> TimeOfDay:
-        """Calculate time of day relative to the persona's sleep schedule.
+    def _calculate_time_of_day(
+        self, dt: datetime, sleep_schedule: Optional[Dict] = None,
+    ) -> TimeOfDay:
+        """Calculate time of day relative to a sleep schedule.
 
         Instead of using wall-clock hours, maps hours-since-wake to
         circadian phases so a persona waking at noon gets DAWN at 12:00,
         MORNING at 14:00, etc.  Falls back to wall clock if no schedule.
+
+        Args:
+            dt: The instant to compute the phase for.
+            sleep_schedule: Schedule to use instead of this world's own
+                ``_sleep_schedule``. ``None`` -- the default -- keeps today's
+                behaviour (this world's own schedule, or the wall-clock
+                fallback when it has none); see :meth:`get_time_of_day` for
+                the public entry point a caller sharing this world uses to
+                pass a specific persona's schedule.
         """
-        if not self._sleep_schedule:
+        schedule = self._sleep_schedule if sleep_schedule is None else sleep_schedule
+        if not schedule:
             # Legacy wall-clock fallback
             hour = dt.hour
             if 5 <= hour < 7:
@@ -437,8 +526,8 @@ class WorldEnvironment:
             else:
                 return TimeOfDay.LATE_NIGHT
 
-        wake_hour = self._sleep_schedule.get("wake_hour", 7)
-        bedtime_hour = self._sleep_schedule.get("bedtime_hour", 23)
+        wake_hour = schedule.get("wake_hour", 7)
+        bedtime_hour = schedule.get("bedtime_hour", 23)
 
         # Calculate awake-window length
         if bedtime_hour > wake_hour:
@@ -511,17 +600,17 @@ class WorldEnvironment:
 
         # Night times
         if time_of_day in (TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT):
-            return random.choice([Weather.CLEAR_NIGHT, Weather.STARRY, Weather.FOGGY])
+            return self._rng.choice([Weather.CLEAR_NIGHT, Weather.STARRY, Weather.FOGGY])
 
         # Season-appropriate day weather
         if season == Season.WINTER:
-            return random.choice([Weather.CLOUDY, Weather.SNOWY, Weather.FOGGY, Weather.RAINY])
+            return self._rng.choice([Weather.CLOUDY, Weather.SNOWY, Weather.FOGGY, Weather.RAINY])
         elif season == Season.SUMMER:
-            return random.choice([Weather.SUNNY, Weather.SUNNY, Weather.CLOUDY])
+            return self._rng.choice([Weather.SUNNY, Weather.SUNNY, Weather.CLOUDY])
         elif season == Season.SPRING:
-            return random.choice([Weather.SUNNY, Weather.CLOUDY, Weather.RAINY, Weather.FOGGY])
+            return self._rng.choice([Weather.SUNNY, Weather.CLOUDY, Weather.RAINY, Weather.FOGGY])
         else:  # Autumn
-            return random.choice([Weather.CLOUDY, Weather.RAINY, Weather.FOGGY, Weather.SUNNY])
+            return self._rng.choice([Weather.CLOUDY, Weather.RAINY, Weather.FOGGY, Weather.SUNNY])
 
     def _transition_weather(self) -> None:
         """Transition weather based on probabilities."""
@@ -531,13 +620,13 @@ class WorldEnvironment:
         # Force night weather during night hours
         if time_of_day in (TimeOfDay.NIGHT, TimeOfDay.LATE_NIGHT):
             if current not in (Weather.CLEAR_NIGHT, Weather.STARRY, Weather.FOGGY, Weather.STORMY):
-                self._state.weather = random.choice([Weather.CLEAR_NIGHT, Weather.STARRY])
+                self._state.weather = self._rng.choice([Weather.CLEAR_NIGHT, Weather.STARRY])
                 return
 
         # Force day weather during day hours
         if time_of_day in (TimeOfDay.DAWN, TimeOfDay.MORNING, TimeOfDay.AFTERNOON, TimeOfDay.EVENING):
             if current in (Weather.CLEAR_NIGHT, Weather.STARRY):
-                self._state.weather = random.choice([Weather.SUNNY, Weather.CLOUDY])
+                self._state.weather = self._rng.choice([Weather.SUNNY, Weather.CLOUDY])
                 return
 
         # Normal transition
@@ -545,12 +634,22 @@ class WorldEnvironment:
         if transitions:
             weather_options = list(transitions.keys())
             probabilities = list(transitions.values())
-            self._state.weather = random.choices(weather_options, probabilities)[0]
+            self._state.weather = self._rng.choices(weather_options, probabilities)[0]
 
-    def _update_ambiance(self) -> None:
-        """Update the ambiance description based on current state."""
-        location_desc = self.get_location_description()
-        weather_desc = WEATHER_DESCRIPTIONS.get(self._state.weather, "")
+    def _build_ambiance(self, location_desc: Optional[str] = None,
+                        setting: Optional[SettingSpec] = None) -> str:
+        """Compose an ambiance sentence from a location description, current weather and wall-clock time.
+
+        Args:
+            location_desc: Text to open the sentence with. ``None`` -- the
+                default -- uses this world's own :meth:`get_location_description`;
+                :meth:`export_state` passes a specific persona's own
+                description instead when it was given one.
+            setting: Whose weather description to use (this world's own
+                when ``None``).
+        """
+        loc_desc = self.get_location_description() if location_desc is None else location_desc
+        weather_desc = self.get_weather_description(setting)
 
         # Time-specific additions — use wall clock for physical light descriptions
         wall_time = self._wall_clock_time_of_day(self.now())
@@ -564,4 +663,71 @@ class WorldEnvironment:
         }
         time_desc = time_additions.get(wall_time, "")
 
-        self._state.ambiance_description = f"{location_desc}. {weather_desc}. {time_desc}."
+        return f"{loc_desc}. {weather_desc}. {time_desc}."
+
+    def _update_ambiance(self) -> None:
+        """Update the ambiance description based on current state."""
+        self._state.ambiance_description = self._build_ambiance()
+
+
+class PersonaWorldView:
+    """One persona's view onto a ``WorldEnvironment`` she shares with others.
+
+    :class:`~aura_life.life_service.LifeService` hands this -- never the
+    shared world itself -- to anything that renders a location description
+    for a system prompt (today: ``LifeContextBuilder``), so a persona sharing
+    a world with other personas still describes her own room instead of
+    whichever persona's ``persona_locations`` the shared instance was
+    constructed or last handed with (see :meth:`WorldEnvironment.get_location_description`).
+
+    Weather is genuinely shared physical state (the same sky) and passes
+    straight through to the wrapped world. Current location is not (Task 27 /
+    ruling T8-R1 corrects Task 2 here): it is this persona's own, read fresh
+    on every call from *current_location* -- a zero-argument callable, not a
+    snapshot, because this view is built once, in
+    :class:`~aura_life.life_service.LifeService`'s constructor, and this
+    persona's location moves many times over her lifetime (the same shape of
+    problem :meth:`WorldEnvironment.now` solves for the clock). Passing it
+    straight through, like weather, is exactly the bug this corrects: it is
+    what let one persona's move relocate every persona sharing the world.
+
+    A private (unshared) world needs no wrapping: its own
+    ``persona_locations`` and location already belong to the one persona
+    using it.
+    """
+
+    def __init__(
+        self,
+        world: WorldEnvironment,
+        persona_locations: Dict[str, str],
+        current_location: Callable[[], str],
+        setting: Optional[SettingSpec] = None,
+    ):
+        """``setting``: this persona's setting pack, whose place
+        descriptions (where her profile describes no place) and weather
+        descriptions this view reads; ``None`` leaves the wrapped world's own."""
+        self._world = world
+        self._persona_locations = persona_locations
+        self._current_location = current_location
+        self._setting = setting
+
+    def get_location_description(self, location: Optional[str] = None) -> str:
+        """This persona's description of *location* (or her own current one)."""
+        loc = self._current_location() if location is None else location
+        if self._setting is None:
+            return self._world.get_location_description(loc, persona_locations=self._persona_locations)
+        return self._world.get_location_description(
+            loc, persona_locations=self._persona_locations, setting=self._setting)
+
+    def get_weather_description(self) -> str:
+        if self._setting is None:
+            return self._world.get_weather_description()
+        return self._world.get_weather_description(self._setting)
+
+    @property
+    def current_location(self) -> str:
+        return self._current_location()
+
+    @property
+    def weather(self) -> Weather:
+        return self._world.weather

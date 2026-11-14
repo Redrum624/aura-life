@@ -262,7 +262,16 @@ class EmotionEngine:
         now = time.time()
         delta_sec = now - self._last_decay_time
         self._last_decay_time = now
+        self._decay(delta_sec)
 
+    def _decay(self, delta_sec: float):
+        """Decay every emotion by ``delta_sec`` seconds' worth.
+
+        ``decay_tick`` passes the wall-clock seconds since its own last call.
+        ``LifeService`` passes world-clock seconds instead
+        (``LifeService.decays_emotion_engine``), which is why the elapsed time
+        is an argument here rather than read inside.
+        """
         decay_amount = self.BASE_DECAY_RATE * (delta_sec / self.DECAY_INTERVAL_SEC)
 
         # Get baseline intensities

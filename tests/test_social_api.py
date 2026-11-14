@@ -13,10 +13,11 @@ keys that carry both.
 import importlib
 import json
 import random
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from aura_life import hooks
 from aura_life.life_service import LifeService
 from aura_life.models import SocialEvent, Weather
 from aura_life.personas.personality_config import PersonalityDefinition
@@ -74,7 +75,7 @@ def test_an_activity_tick_with_a_social_event_completes(tmp_path):
     svc = _service(tmp_path, "tick")
     svc._on_plan_tick()
     event = SocialEvent(npc_name="Maya", event_type="text_received", description="Maya texted her")
-    svc._social.tick = lambda: event
+    svc._social.tick = lambda *args, **kw: event
     seen = []
     svc._identity.get_npc_value_alignment = lambda npc: seen.append(npc.name) or 1.0
     before = svc._social.arcs["Maya"].closeness
@@ -361,3 +362,148 @@ def test_a_low_mood_or_low_energy_revision_keeps_a_promise_to_people(tmp_path):
     planner = svc._daily_planner
     planner.revise_upcoming(energy_level=0.1, mood="sad", mood_intensity=0.9, weather=Weather.RAINY)
     assert planner.current_plan.get_slot_for_hour(19).activity_name == "climbing"
+
+
+# ----------------------------------------------------------------------
+# 7. On the branch: the plan's day and hour are her local world ones (Task 31)
+# ----------------------------------------------------------------------
+
+#: The host frozen late in the evening, years from the world (tests/test_planner_clock.py's HOST_LATE).
+HOST_LATE = datetime(2026, 9, 16, 22, 45)
+
+
+def _freeze_host_late(monkeypatch):
+    """The host's wall clock at :data:`HOST_LATE` in the planner, the service and the social system (overrides the
+    autouse fixture, which keeps the host and the world together)."""
+    class HostLate(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return HOST_LATE if tz is None else HOST_LATE.replace(tzinfo=tz)
+
+    for name in ("aura_life.planner.daily_planner", "aura_life.life_service", "aura_life.social.social_system"):
+        monkeypatch.setattr(importlib.import_module(name), "datetime", HostLate)
+
+
+def test_a_plan_lands_on_her_world_day_and_hour_when_the_host_clock_disagrees(tmp_path, monkeypatch):
+    # 0.4.0 dated the daily plan on the host's day, so with the host at 22:45 on 2026-09-16 a plan for the world's
+    # 21:00 on 2031-03-10 landed nowhere; on the branch every plan is made on her local world time (_plan_instant).
+    _freeze_host_late(monkeypatch)
+    svc = _service(tmp_path, "hostlate")   # the world at 09:00 on 2031-03-10
+    svc._on_plan_tick()
+    assert svc._daily_planner.current_plan.date == "2031-03-10"
+
+    svc.add_social_plan(["Maya"], "having dinner", WORLD_NOW.replace(hour=21), 60)
+
+    slot = svc._daily_planner.current_plan.get_slot_for_hour(21)
+    assert (slot.activity_name, slot.reason) == ("having dinner", "plan with Maya")
+    assert [p["at"] for p in svc.get_upcoming_social_plans(24)] == [WORLD_NOW.replace(hour=21)]
+
+
+#: tests/test_planner_clock.py's ``abroad`` convention (its WORLD_NOON, LOCAL_EVENING, ``abroad`` and ``_abroad`` lines,
+#: copied): the world's clock at 12:30, her local time 19:30, seven hours ahead. Her local instant is held in a dict
+#: here so a test can move it with the world's clock. Her zone is +03:00, not +07:00 (fix round 1): the world's clock
+#: here is a host's own wall clock at UTC-4, not UTC, so her lead on it (7 h) is not her zone's UTC offset (3 h), and
+#: only a shift by the lead passes.
+WORLD_NOON = datetime(2031, 3, 10, 12, 30)
+HER_ZONE = timezone(timedelta(hours=3))
+LOCAL_EVENING = datetime(2031, 3, 10, 19, 30, tzinfo=HER_ZONE)
+_LOCAL = {"now": LOCAL_EVENING}
+
+
+@pytest.fixture
+def abroad():
+    """The host's persona clock (``persona_now``) seven hours ahead of the world's in the zone asked for (her local
+    time, a persona given a timezone) while the world's clock reads 12:30. The previous provider is put back."""
+    _LOCAL["now"] = LOCAL_EVENING
+    saved = hooks.provider_for("persona_now")
+    hooks.configure(persona_now=lambda timezone=None: _LOCAL["now"] if timezone else WORLD_NOON)
+    yield
+    hooks.configure(persona_now=saved)
+
+
+def _abroad(svc: LifeService) -> LifeService:
+    """``svc`` living where it is :data:`LOCAL_EVENING` (with ``abroad``)."""
+    svc._place_location.current_timezone = "Europe/Moscow"   # +03:00 all year
+    assert svc._local_world_now() == LOCAL_EVENING
+    return svc
+
+
+def test_a_plan_for_a_persona_with_a_timezone_lands_on_her_own_hour(tmp_path, abroad):
+    # ``at`` is a naive instant on the world clock (add_social_plan; aura converts her clock to the world's before
+    # the call): her plan carries it at HER local hour of that instant (ruling T31-R3).
+    svc = _abroad(_service(tmp_path, "abroad", now=WORLD_NOON))
+    svc._on_plan_tick()
+    assert svc._daily_planner.current_plan.date == "2031-03-10"
+
+    svc.add_social_plan(["Maya"], "having dinner", datetime(2031, 3, 10, 15, 0), 60)     # her 22:00 today
+    svc.add_social_plan(["Leo"], "watching a film", datetime(2031, 3, 10, 21, 0), 60)    # her 04:00 tomorrow
+
+    def hours(plan, what, who):
+        return [s.hour for s in plan.slots if s.activity_name == what and s.reason == "plan with " + who]
+
+    plan = svc._daily_planner.current_plan
+    assert hours(plan, "having dinner", "Maya") == [22]      # not her hour 15, already past for her
+    assert hours(plan, "watching a film", "Leo") == []       # not her hour 21 today: it is her tomorrow
+    # The stored instants and the contract are the world's.
+    assert [(p["what"], p["at"]) for p in svc.get_upcoming_social_plans(24)] == [
+        ("having dinner", datetime(2031, 3, 10, 15, 0)), ("watching a film", datetime(2031, 3, 10, 21, 0))]
+
+    # Her next local day (her 01:00 on 2031-03-11, the world's 18:00): its plan carries the film on her hour 4.
+    svc._test_clock["now"] = datetime(2031, 3, 10, 18, 0)
+    _LOCAL["now"] = datetime(2031, 3, 11, 1, 0, tzinfo=HER_ZONE)
+    svc._on_plan_tick()
+    plan = svc._daily_planner.current_plan
+    assert plan.date == "2031-03-11"
+    assert hours(plan, "watching a film", "Leo") == [4]
+    assert hours(plan, "having dinner", "Maya") == []
+
+
+# ----------------------------------------------------------------------
+# 8. On the branch: no whim, pressing need or housemate takes a promise to people (Task 31, fix round 1)
+# ----------------------------------------------------------------------
+# 0.4.0 keeps a social plan "whatever her mood or the weather" and 0.5.0 follows its slot unless she is too tired;
+# the branch's free-time predicate (DailyPlanner.is_free_time) let her whim, her hunger and a housemate's joint
+# activity take it. Each test has its control: the same slot as an ordinary free-time one IS taken.
+
+def test_a_whim_never_drops_a_plan_with_people():
+    from aura_life.personas.parameters import PersonaParameters
+    from aura_life.planner.daily_planner import DailyPlanner, PlannedSlot
+
+    planner = DailyPlanner(rng=random.Random(11), params=PersonaParameters(impulsivity=1.0))
+    promise = PlannedSlot(hour=19, activity_name="climbing", reason="plan with Maya")
+    whim = PlannedSlot(hour=19, activity_name="climbing", reason="routine")
+    assert planner.is_free_time(whim) and sum(planner.abandons_slot(whim) for _ in range(1000)) > 0   # control
+    assert not planner.is_free_time(promise)
+    assert not any(planner.abandons_slot(promise) for _ in range(1000))
+
+
+def _seven_pm(tmp_path, pid, what, reason=None) -> LifeService:
+    """A service with a plan with Maya for ``what`` at the world's 19:00 (its slot's reason replaced by ``reason``
+    when given, for a control), the world's clock at 19:05."""
+    svc = _service(tmp_path, pid)
+    svc._on_plan_tick()
+    svc.add_social_plan(["Maya"], what, WORLD_NOW.replace(hour=19), 60)
+    slot = svc._daily_planner.current_plan.get_slot_for_hour(19)
+    assert (slot.activity_name, slot.reason) == (what, "plan with Maya")
+    if reason is not None:
+        slot.reason = reason
+    svc._test_clock["now"] = WORLD_NOW.replace(hour=19, minute=5)
+    return svc
+
+
+@pytest.mark.parametrize("reason, kept", [(None, True), ("routine", False)])
+def test_a_pressing_need_never_takes_a_plan_with_people(tmp_path, reason, kept):
+    # Hungry (0.85, past HUNGRY_THRESHOLD) in the hour of a plan with Maya for reading, which feeds no one: she reads.
+    svc = _seven_pm(tmp_path, f"hungry-{reason}", "reading", reason)
+    svc._desire_system.should_do_intimate_activity = lambda *args, **kwargs: False
+    svc._sustenance.state.hunger = 0.85
+    svc._on_activity_tick()
+    assert (svc._recent_activities[0].activity_name == "reading") is kept
+
+
+@pytest.mark.parametrize("reason, kept", [(None, True), ("routine", False)])
+def test_a_housemates_joint_activity_never_takes_a_plan_with_people(tmp_path, reason, kept):
+    # A housemate reading where she is, in the hour of her plan with Maya to go climbing: she is not free to join.
+    svc = _seven_pm(tmp_path, f"housemate-{reason}", "climbing", reason)
+    free = svc._free_to_join("reading", svc._current_location, WORLD_NOW.replace(hour=19, minute=5))
+    assert (free is None) is kept

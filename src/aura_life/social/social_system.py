@@ -8,62 +8,24 @@ Follows the DesireSystem pattern: state that ticks, templates, dice rolls.
 import json
 import random
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional
+from typing import Dict, Iterable, List, Optional
 
 from ..models import (
     NPC, SocialEvent,
     RelationshipArc, SocialObligation, SocialConflict,
     FriendGroup, SocialBatteryState,
 )
+from ..personas.parameters import PersonaParameters
+from ..personas.pronoun_render import format_lenient
+from ..settings import DEFAULT_SETTING, SettingSpec, get_setting
+from ..settings.spec import DEFAULT_NPC_KIND, UNWELCOME_NPC_KINDS
+# Legacy names: the NPC event templates (today's are the "friend" kind's), the
+# text topics and the invitation activities moved, unchanged, into the
+# contemporary setting pack (aura_life.settings.contemporary) in Task 9 -- the
+# system reads its persona's setting now; re-exported so an import from here
+# keeps working.
+from ..settings.contemporary import EVENT_TEMPLATES, INVITE_ACTIVITIES, TEXT_TOPICS  # noqa: F401
 
-
-# ============= Event Templates =============
-
-EVENT_TEMPLATES = {
-    "text_received": [
-        "Got a text from {name} — {topic}",
-        "{name} sent a funny meme",
-        "{name} texted to check in",
-        "{name} shared a link she thought was interesting",
-        "{name} sent a voice note rambling about {topic}",
-    ],
-    "hangout": [
-        "Had coffee with {name}",
-        "Went for a walk with {name}",
-        "Grabbed lunch with {name}",
-        "Hung out with {name} for a bit",
-    ],
-    "invitation": [
-        "{name} invited her to {activity} this weekend",
-        "{name} wants to grab dinner sometime this week",
-        "{name} suggested they try that new place together",
-    ],
-    "call": [
-        "{name} called to catch up",
-        "Had a quick phone call with {name}",
-        "{name} called with some news",
-    ],
-    "mentioned": [
-        "She was thinking about what {name} said the other day",
-        "Something reminded her of {name}",
-        "She remembered a funny thing {name} once said",
-    ],
-}
-
-# Topics for text message templates
-TEXT_TOPICS = [
-    "her day", "something funny that happened", "weekend plans",
-    "a new show", "work drama", "a recipe she tried",
-    "a song she discovered", "something she read",
-    "a photo she took", "an inside joke",
-]
-
-# Activities for invitation templates
-INVITE_ACTIVITIES = [
-    "brunch", "a movie", "a concert", "hiking",
-    "shopping", "a gallery opening", "karaoke",
-    "a yoga class", "a farmers market",
-]
 
 # Frequency weights: how likely each contact_frequency type triggers
 FREQUENCY_WEIGHTS = {
@@ -71,6 +33,47 @@ FREQUENCY_WEIGHTS = {
     "regular": 0.25,
     "occasional": 0.12,
 }
+
+#: The chance, per activity tick, that one of her people does something
+#: (SocialSystem.tick). Per persona, times PersonaParameters.npc_event_scale
+#: (sociability).
+NPC_EVENT_CHANCE = 0.25
+
+# ============= What her people's events are to her (Task 11) =============
+# SocialSystem marks each event with its NPC's kind and a valence
+# (SocialEvent.valence); LifeService turns them into what she feels.
+
+#: The event types that are contact -- someone reaching her, or with her. A
+#: "mentioned" event is her thinking of them: no contact.
+CONTACT_EVENT_TYPES = frozenset({"text_received", "call", "invitation", "hangout"})
+#: Of that contact, what is a meaningful interaction for her loneliness --
+#: in person, or by voice (AffectSystem.on_social_interaction's larger
+#: relief); a text or an invitation is a small one.
+MEANINGFUL_CONTACT_TYPES = frozenset({"call", "hangout"})
+#: What an event from an unwelcome kind (UNWELCOME_NPC_KINDS) makes her feel.
+#: Each weighs what her default setting's "uneasy feeling" chaos line does
+#: (aura_life.settings.contemporary.CHAOS_EMOTIONS: two emotions at 0.1) --
+#: a threat, those two; someone she is estranged from, guilt and sadness.
+#: Chosen (Task 11).
+UNWELCOME_KIND_EMOTIONS = {
+    "threat": {"anxious": 0.1, "unsettled": 0.1},
+    "estranged": {"guilty": 0.1, "sad": 0.1},
+}
+#: The stressor anything from an unwelcome kind adds -- getting in touch, or
+#: her thinking of them (ruling T11-R1): what she is stressed about, named for
+#: them (her stress then reads "Stressed about <this>"). One per person, an
+#: episode that lapses by itself (Task 15: AffectSystem's STRESSOR_KINDS
+#: "unwelcome" kind, which these words are).
+UNWELCOME_STRESSOR = "{name}"
+
+
+def event_valence(kind: str, event_type: str) -> float:
+    """What an event is to her: -1.0 anything from an unwelcome kind, 1.0
+    contact from anyone else (CONTACT_EVENT_TYPES), 0.0 her thinking of
+    them."""
+    if kind in UNWELCOME_NPC_KINDS:
+        return -1.0
+    return 1.0 if event_type in CONTACT_EVENT_TYPES else 0.0
 
 
 class SocialSystem:
@@ -84,7 +87,38 @@ class SocialSystem:
     """
 
     def __init__(self, npcs: Optional[List[NPC]] = None,
-                 introversion: float = 0.5):
+                 introversion: float = 0.5, rng=None,
+                 params: Optional[PersonaParameters] = None,
+                 setting: Optional[SettingSpec] = None):
+        """``rng``: optional ``random.Random``. ``None`` -- the default --
+        is a fresh, unseeded ``random.Random()`` (never the module), so a
+        bare ``SocialSystem()`` still works and shares no draw sequence with
+        any other instance or the module.
+
+        ``params``: her traits' engine parameters
+        (:class:`~aura_life.personas.parameters.PersonaParameters`). Given,
+        her sociability sets ``introversion`` (``params.introversion``, which
+        sizes the social battery) and the chance her people get in touch
+        (NPC_EVENT_CHANCE times ``params.npc_event_scale``); ``introversion``
+        is then not read. Without them, ``introversion`` as passed and
+        NPC_EVENT_CHANCE as it is.
+
+        ``setting``: her setting pack (:class:`~aura_life.settings.SettingSpec`),
+        whose ``npc_event_templates`` (for the NPC's kind, falling back to
+        the default kind's), ``text_topics`` and ``invite_activities`` what
+        her people do is drawn from. ``None`` -- the default -- is
+        :data:`~aura_life.settings.DEFAULT_SETTING`'s. With no template for
+        the event drawn, nothing happens."""
+        self._rng = rng if rng is not None else random.Random()
+        self._setting = setting if setting is not None else get_setting(DEFAULT_SETTING)
+        # Whether the battery's size is her sociability's (load_expansion then
+        # keeps it) or the caller's own introversion.
+        self._battery_from_traits = params is not None
+        if params is not None:
+            introversion = params.introversion
+            self._npc_event_chance = NPC_EVENT_CHANCE * params.npc_event_scale
+        else:
+            self._npc_event_chance = NPC_EVENT_CHANCE
         self._npcs: Dict[str, NPC] = {n.name: n for n in (npcs or [])}
         self._recent_events: List[SocialEvent] = []
         self._last_contact: Dict[str, datetime] = {}
@@ -108,13 +142,24 @@ class SocialSystem:
                 closeness=closeness,
             )
 
-    def tick(self) -> Optional[SocialEvent]:
-        """Called on activity tick. ~25% chance an NPC does something."""
-        if not self._npcs or random.random() > 0.25:
+    def tick(self, skip: Iterable[str] = (), *, now: Optional[datetime] = None) -> Optional[SocialEvent]:
+        """Called on activity tick. NPC_EVENT_CHANCE (~25%, scaled by her
+        sociability) that an NPC does something.
+
+        ``skip``: the names of her people who draw no event here -- someone
+        she lives with, whose own life runs beside hers (``LifeService``'s
+        household, Task 11). Nothing skipped, the draws are exactly as
+        before.
+
+        ``now``: the world instant (``LifeService`` passes it, humanness Task
+        19): an NPC's contact cooldown, its stamp and the event's; the host's
+        clock when omitted."""
+        now = now if now is not None else datetime.now()
+        if not self._npcs or self._rng.random() > self._npc_event_chance:
             return None
 
         # Pick an NPC weighted by contact frequency
-        npc = self._pick_npc()
+        npc = self._pick_npc(skip)
         if not npc:
             return None
 
@@ -122,13 +167,15 @@ class SocialSystem:
         last = self._last_contact.get(npc.name)
         if last:
             cooldown = self._cooldown_hours(npc.contact_frequency)
-            if (datetime.now() - last).total_seconds() < cooldown * 3600:
+            if (now - last).total_seconds() < cooldown * 3600:
                 return None
 
-        event = self._generate_event(npc)
+        event = self._generate_event(npc, now=now)
+        if event is None:
+            return None  # her setting has no template for what was drawn
         self._recent_events.append(event)
         self._recent_events = self._recent_events[-10:]
-        self._last_contact[npc.name] = datetime.now()
+        self._last_contact[npc.name] = now
         return event
 
     def get_npc_for_activity(self, activity_name: str) -> Optional[NPC]:
@@ -157,20 +204,22 @@ class SocialSystem:
             # Fall back to any NPC
             candidates = list(self._npcs.values())
 
-        return random.choice(candidates) if candidates else None
+        return self._rng.choice(candidates) if candidates else None
 
     def get_recent_events(self, limit: int = 3) -> List[SocialEvent]:
         return self._recent_events[-limit:]
 
     # ============= Relationship Arcs =============
 
-    def update_arc(self, npc_name: str, event_type: str = "interaction"):
-        """Update relationship arc from interaction."""
+    def update_arc(self, npc_name: str, event_type: str = "interaction", *, now: Optional[datetime] = None):
+        """Update relationship arc from interaction, stamped ``now`` (the world
+        instant ``LifeService`` passes, humanness Task 19: :meth:`tick_arcs`
+        compares it; the host's clock when omitted)."""
         if npc_name not in self._arcs:
             self._arcs[npc_name] = RelationshipArc(npc_name=npc_name)
         arc = self._arcs[npc_name]
         arc.shared_history_depth += 1
-        arc.last_meaningful_interaction = datetime.now()
+        arc.last_meaningful_interaction = now if now is not None else datetime.now()
         if event_type == "interaction":
             arc.closeness = min(1.0, arc.closeness + 0.01)
             if arc.trend == "cooling":
@@ -183,9 +232,11 @@ class SocialSystem:
             arc.closeness = min(1.0, arc.closeness + 0.02)
             arc.unresolved_tension = None
 
-    def tick_arcs(self):
-        """Decay arcs from neglect."""
-        now = datetime.now()
+    def tick_arcs(self, *, now: Optional[datetime] = None):
+        """Decay arcs from neglect: an arc cools after 7 days without contact,
+        counted to ``now`` (the world instant ``LifeService`` passes, humanness
+        Task 19; the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
         for arc in self._arcs.values():
             if arc.last_meaningful_interaction:
                 days = (now - arc.last_meaningful_interaction).days
@@ -204,15 +255,17 @@ class SocialSystem:
     # ============= Social Obligations =============
 
     def add_obligation(self, description: str, person: str,
-                       urgency: float = 0.3, deadline: Optional[datetime] = None):
-        """Add a social obligation."""
+                       urgency: float = 0.3, deadline: Optional[datetime] = None, *,
+                       now: Optional[datetime] = None):
+        """Add a social obligation, created ``now`` (the world instant; the
+        host's clock when omitted -- no caller inside aura-life)."""
         for o in self._obligations:
             if o.description == description and not o.duration_min:  # a plan is not a debt
                 return
         self._obligations.append(SocialObligation(
             description=description, person=person,
             urgency=urgency, deadline=deadline,
-            created_at=datetime.now(),
+            created_at=now if now is not None else datetime.now(),
         ))
         debts = [o for o in self._obligations if not o.duration_min]
         if len(debts) > 5:
@@ -220,14 +273,17 @@ class SocialSystem:
             # Plans with people are commitments, not debts: the cap never drops one.
             self._obligations = [o for o in self._obligations if o.duration_min or o in keep]
 
-    def add_plan(self, people: List[str], what: str, at: datetime, duration_min: int):
-        """Record a plan with people (names already validated by the caller)."""
+    def add_plan(self, people: List[str], what: str, at: datetime, duration_min: int, *,
+                 now: Optional[datetime] = None):
+        """Record a plan with people (names already validated by the caller),
+        created ``now`` (the world instant ``LifeService`` passes, humanness
+        Task 19, as ``at`` is one; the host's clock when omitted)."""
         for o in self._obligations:
             if o.duration_min and o.description == what and o.deadline == at and o.people == people:
                 return o
         plan = SocialObligation(
             description=what, person=", ".join(people), urgency=0.3, deadline=at,
-            created_at=datetime.now(), people=list(people), duration_min=duration_min,
+            created_at=now if now is not None else datetime.now(), people=list(people), duration_min=duration_min,
         )
         self._obligations.append(plan)
         return plan
@@ -258,9 +314,11 @@ class SocialSystem:
         """Fulfill a social obligation."""
         self._obligations = [o for o in self._obligations if o.description != description or o.duration_min]
 
-    def tick_obligations(self):
-        """Check for overdue obligations."""
-        now = datetime.now()
+    def tick_obligations(self, *, now: Optional[datetime] = None):
+        """Check for overdue obligations: a deadline before ``now`` (the world
+        instant ``LifeService`` passes, humanness Task 19; the host's clock
+        when omitted)."""
+        now = now if now is not None else datetime.now()
         for o in self._obligations:
             if o.duration_min:
                 continue  # a plan is a commitment, not a debt: it never goes overdue
@@ -274,38 +332,47 @@ class SocialSystem:
 
     # ============= Conflicts =============
 
-    def trigger_conflict(self, parties: List[str], cause: str, severity: float = 0.3):
-        """Create a social conflict."""
+    def trigger_conflict(self, parties: List[str], cause: str, severity: float = 0.3, *,
+                         now: Optional[datetime] = None):
+        """Create a social conflict, ``now`` (the world instant; the host's
+        clock when omitted -- no caller inside aura-life)."""
+        now = now if now is not None else datetime.now()
         self._conflicts.append(SocialConflict(
             parties=parties, cause=cause, severity=severity,
-            created_at=datetime.now(),
+            created_at=now,
         ))
         for party in parties:
-            self.update_arc(party, "conflict")
+            self.update_arc(party, "conflict", now=now)
         if len(self._conflicts) > 3:
             self._conflicts = sorted(
                 self._conflicts, key=lambda c: c.severity, reverse=True
             )[:3]
 
-    def resolve_conflict(self, cause: str):
-        """Resolve a conflict."""
+    def resolve_conflict(self, cause: str, *, now: Optional[datetime] = None):
+        """Resolve a conflict, ``now`` (the world instant; :meth:`tick_conflicts`
+        compares it; the host's clock when omitted -- no caller inside
+        aura-life)."""
+        now = now if now is not None else datetime.now()
         for c in self._conflicts:
             if c.cause == cause and c.status != "resolved":
                 c.status = "resolved"
-                c.resolved_at = datetime.now()
+                c.resolved_at = now
                 for party in c.parties:
-                    self.update_arc(party, "resolution")
+                    self.update_arc(party, "resolution", now=now)
                 return
 
-    def tick_conflicts(self):
-        """Conflicts cool over time."""
+    def tick_conflicts(self, *, now: Optional[datetime] = None):
+        """Conflicts cool over time; a resolved one is kept 3 days, counted to
+        ``now`` (the world instant ``LifeService`` passes, humanness Task 19;
+        the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
         for c in self._conflicts:
             if c.status == "unresolved":
                 c.severity = max(0.05, c.severity - 0.002)
                 if c.severity < 0.1:
                     c.status = "cooling"
         self._conflicts = [c for c in self._conflicts if c.status != "resolved"
-                          or (c.resolved_at and (datetime.now() - c.resolved_at).days < 3)]
+                          or (c.resolved_at and (now - c.resolved_at).days < 3)]
 
     # ============= Social Battery =============
 
@@ -519,47 +586,80 @@ class SocialSystem:
                 last_group_event=datetime.fromisoformat(g["last_group_event"]) if g.get("last_group_event") else None,
             ) for g in items
         ]
-        # Battery
-        if "battery_charge" in data:
-            self._social_battery.charge = data["battery_charge"]
-        if "battery_capacity" in data:
+        # Battery. Its capacity is her sociability's when this system was
+        # built from her parameters -- who she is, not state -- so a row saved
+        # before her traits changed does not shrink or grow it; the charge is
+        # state and comes back, never above the capacity.
+        if "battery_capacity" in data and not self._battery_from_traits:
             self._social_battery.capacity = data["battery_capacity"]
+        if "battery_charge" in data:
+            charge = data["battery_charge"]
+            if self._battery_from_traits:
+                charge = min(charge, self._social_battery.capacity)
+            self._social_battery.charge = charge
 
     # ============= Private Methods =============
 
-    def _pick_npc(self) -> Optional[NPC]:
-        """Pick an NPC weighted by contact frequency."""
-        if not self._npcs:
+    def _pick_npc(self, skip: Iterable[str] = ()) -> Optional[NPC]:
+        """Pick an NPC weighted by contact frequency, none of ``skip``."""
+        skipped = set(skip)
+        npcs = [n for n in self._npcs.values() if n.name not in skipped]
+        if not npcs:
             return None
 
-        npcs = list(self._npcs.values())
         weights = [FREQUENCY_WEIGHTS.get(n.contact_frequency, 0.20) for n in npcs]
-        return random.choices(npcs, weights=weights)[0]
+        return self._rng.choices(npcs, weights=weights)[0]
 
-    def _generate_event(self, npc: NPC) -> SocialEvent:
-        """Generate a random social event for an NPC."""
-        event_type = random.choices(
+    def _generate_event(self, npc: NPC, *, now: Optional[datetime] = None) -> Optional[SocialEvent]:
+        """Generate a random social event for an NPC, from her setting's
+        templates for the NPC's kind (an NPC with none on record is the
+        default kind, spec section 4.1). An event type drawn that the
+        setting has no template for is told by a "mentioned" one, and so is a
+        mention; None when it has neither. The event carries the kind and
+        what it is to her (:func:`event_valence`)."""
+        event_type = self._rng.choices(
             ["text_received", "mentioned", "call", "invitation", "hangout"],
             weights=[0.35, 0.25, 0.15, 0.15, 0.10],
         )[0]
 
-        templates = EVENT_TEMPLATES.get(event_type, EVENT_TEMPLATES["mentioned"])
-        template = random.choice(templates)
+        kind = getattr(npc, "kind", None) or DEFAULT_NPC_KIND
+        by_type = self._setting.npc_event_templates_for(kind)
+        templates = by_type.get(event_type)
+        if not templates:
+            event_type = "mentioned"
+            templates = by_type.get(event_type)
+        if not templates:
+            return None
+        template = self._rng.choice(templates)
 
         # Fill in template variables
-        topic = random.choice(npc.shared_interests) if npc.shared_interests else random.choice(TEXT_TOPICS)
-        activity = random.choice(INVITE_ACTIVITIES)
+        topics = self._setting.text_topics
+        invites = self._setting.invite_activities
+        if npc.shared_interests:
+            topic = self._rng.choice(npc.shared_interests)
+        else:
+            topic = self._rng.choice(topics) if topics else ""
+        activity = self._rng.choice(invites) if invites else ""
 
-        description = template.format(name=npc.name, topic=topic, activity=activity)
+        # format_lenient, not str.format: a template's pronoun tokens
+        # ({obj}, {Subj}, ...) are filled downstream by LifeService, once it
+        # knows the persona's gender and user_info -- this call only owns
+        # name/topic/activity.
+        description = format_lenient(template, name=npc.name, topic=topic, activity=activity)
 
-        share_worthy = event_type in ("invitation", "hangout") or random.random() < 0.2
+        # Unwelcome news is never something to share (ruling T11-R1): it is
+        # not share-worthy, and no roll is drawn for it.
+        valence = event_valence(kind, event_type)
+        share_worthy = valence >= 0 and (event_type in ("invitation", "hangout") or self._rng.random() < 0.2)
 
         return SocialEvent(
             npc_name=npc.name,
             event_type=event_type,
             description=description,
-            timestamp=datetime.now(),
+            timestamp=now if now is not None else datetime.now(),
             share_worthy=share_worthy,
+            kind=kind,
+            valence=valence,
         )
 
     def _cooldown_hours(self, frequency: str) -> float:

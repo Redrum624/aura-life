@@ -105,13 +105,18 @@ class BehaviorSystem:
     # Four weeks of her 20-minute activity tick (72 a day): the dated history never holds more, whatever the tick rate.
     MAX_ACTIVITY_LOG = HABIT_HISTORY_DAYS * 72
 
-    def __init__(self):
+    def __init__(self, rng=None):
+        """``rng``: optional ``random.Random``. ``None`` -- the default --
+        is a fresh, unseeded ``random.Random()`` (never the module), so a
+        bare ``BehaviorSystem()`` still works and shares no draw sequence
+        with any other instance or the module."""
         self._routines: Dict[str, RoutinePattern] = {}
         self._creative_portfolio: List[CreativeArtifact] = []
         self._ambient: AmbientSenseSnapshot = AmbientSenseSnapshot()
         self._possessions: List[Possession] = []
         self._neighborhood: Dict[str, NeighborhoodPlace] = {}
         self._activity_history: List[str] = []  # last N activities for routine detection
+        self._rng = rng if rng is not None else random.Random()
         # The dated history habits are learned from: (activity, world-clock instant, her local hour), oldest first.
         self._activity_log: List[Tuple[str, datetime, int]] = []
 
@@ -240,9 +245,9 @@ class BehaviorSystem:
     def on_creative_activity(self, activity_name: str, mood: str = "", focus: float = 0.5):
         """Maybe produce a creative artifact (30% chance)."""
         artifact_type = CREATIVE_ACTIVITIES.get(activity_name)
-        if not artifact_type or random.random() > 0.30:
+        if not artifact_type or self._rng.random() > 0.30:
             return None
-        quality = 0.3 + focus * 0.4 + random.uniform(0.0, 0.2)
+        quality = 0.3 + focus * 0.4 + self._rng.uniform(0.0, 0.2)
         artifact = CreativeArtifact(
             artifact_type=artifact_type,
             title=self._generate_title(artifact_type),
@@ -271,7 +276,7 @@ class BehaviorSystem:
             "recipe": ["experiment #1", "comfort food attempt", "that thing I tried",
                       "improvised", "keeper"],
         }
-        return random.choice(titles.get(artifact_type, ["untitled"]))
+        return self._rng.choice(titles.get(artifact_type, ["untitled"]))
 
     def get_recent_artifacts(self, limit: int = 3) -> List[CreativeArtifact]:
         """Get most recent creative artifacts."""
@@ -427,9 +432,9 @@ class BehaviorSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "BehaviorSystem":
+    def from_dict(cls, data: dict, rng=None) -> "BehaviorSystem":
         """Deserialize from DB."""
-        system = cls()
+        system = cls(rng=rng)
         if not data:
             return system
         # Routines

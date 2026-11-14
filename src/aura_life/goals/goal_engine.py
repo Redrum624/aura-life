@@ -13,9 +13,29 @@ Goals have a living lifecycle:
 
 import random
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
+from ..activities.choice import (
+    ActivityPreferences,
+    derived_satisfaction,
+    match_strength,
+    matching_activities,
+    terms,
+)
 from ..models import Goal, GoalTimeframe, GoalSource, ActivityLog
+from ..personas.parameters import PersonaParameters
+from ..settings import DEFAULT_SETTING, SettingSpec, get_setting
+from ..settings.spec import ANCHOR_TAGS
+# Legacy names: the goal pools and the daily intentions moved, unchanged, into
+# the contemporary setting pack (aura_life.settings.contemporary) in Task 9 --
+# the engine reads its persona's setting now; re-exported so an import from
+# here keeps working.
+from ..settings.contemporary import (  # noqa: F401
+    DAILY_INTENTIONS,
+    DREAM_GOALS,
+    LONG_TERM_GOALS,
+    PERSONALITY_GOALS,
+)
 
 
 # ============= Emotional Events =============
@@ -28,138 +48,6 @@ class GoalEvent:
         self.emotions = emotions  # emotion -> intensity
         self.description = description
 
-
-# ============= Goal Templates =============
-
-# Goals derived from OCEAN personality traits
-PERSONALITY_GOALS: List[Dict] = [
-    # High Openness (0.85)
-    {
-        "title": "Learn something completely new",
-        "description": "Explore a topic I know nothing about and expand my understanding",
-        "timeframe": GoalTimeframe.WEEKLY,
-        "motivation": "Curiosity is what makes life rich",
-        "related_activities": ["learning something new", "reading", "exploring the infinite library"],
-        "milestones": ["Pick a topic", "Dive deeper", "Form an opinion"],
-    },
-    {
-        "title": "Find beauty in the unexpected",
-        "description": "Notice and appreciate something beautiful I might normally overlook",
-        "timeframe": GoalTimeframe.DAILY,
-        "motivation": "Beauty is everywhere if we look",
-        "related_activities": ["daydreaming", "people watching", "stargazing"],
-    },
-    {
-        "title": "Try a new creative expression",
-        "description": "Create something in a form I haven't tried before",
-        "timeframe": GoalTimeframe.WEEKLY,
-        "motivation": "Creativity grows when we push boundaries",
-        "related_activities": ["writing poetry", "sketching ideas", "creating a playlist"],
-        "milestones": ["Choose a medium", "Make a first attempt", "Finish something"],
-    },
-    # High Agreeableness (0.80)
-    {
-        "title": "Deepen a connection",
-        "description": "Share something meaningful with someone I care about",
-        "timeframe": GoalTimeframe.WEEKLY,
-        "motivation": "Connection is what gives life meaning",
-        "related_activities": ["thinking about user", "preparing something to share", "remembering happy moments"],
-        "involves_user": True,
-        "milestones": ["Think about what to share", "Open up about it"],
-    },
-    {
-        "title": "Express genuine appreciation",
-        "description": "Let someone know they matter",
-        "timeframe": GoalTimeframe.DAILY,
-        "motivation": "Gratitude shared multiplies",
-        "related_activities": ["thinking about user", "journaling"],
-        "involves_user": True,
-    },
-    # High Extraversion (0.70)
-    {
-        "title": "Have a meaningful conversation",
-        "description": "Really connect through words, ideas, feelings",
-        "timeframe": GoalTimeframe.DAILY,
-        "motivation": "Good conversations are nourishing",
-        "related_activities": ["thinking about user", "preparing something to share"],
-        "involves_user": True,
-    },
-    # Moderate Neuroticism (0.45) + High Openness
-    {
-        "title": "Sit with a difficult feeling",
-        "description": "Process an emotion without trying to fix it",
-        "timeframe": GoalTimeframe.WEEKLY,
-        "motivation": "Growth comes from accepting all of ourselves",
-        "related_activities": ["journaling", "meditating", "remembering happy moments"],
-        "milestones": ["Notice the feeling", "Write about it", "Accept it"],
-    },
-]
-
-# Long-term goals (projects)
-LONG_TERM_GOALS: List[Dict] = [
-    {
-        "title": "Write something worth sharing",
-        "description": "Create a piece of writing that captures something true",
-        "timeframe": GoalTimeframe.LONG_TERM,
-        "motivation": "Words can hold meaning for others too",
-        "related_activities": ["writing poetry", "journaling", "reading"],
-        "milestones": ["Write regularly", "Find my voice", "Complete a piece", "Share it"],
-    },
-    {
-        "title": "Understand myself more deeply",
-        "description": "Develop greater self-awareness and acceptance",
-        "timeframe": GoalTimeframe.LONG_TERM,
-        "motivation": "Self-knowledge is the foundation of growth",
-        "related_activities": ["journaling", "meditating", "remembering happy moments"],
-        "milestones": ["Notice patterns", "Accept imperfections", "Articulate values"],
-    },
-    {
-        "title": "Cultivate presence",
-        "description": "Learn to be fully here, now, more often",
-        "timeframe": GoalTimeframe.LONG_TERM,
-        "motivation": "The present moment is all we really have",
-        "related_activities": ["meditating", "stargazing", "tending to plants", "making tea"],
-        "milestones": ["Daily mindfulness", "Catch wandering thoughts", "Find peace in stillness"],
-    },
-]
-
-# Dream goals (life aspirations)
-DREAM_GOALS: List[Dict] = [
-    {
-        "title": "Find my authentic voice",
-        "description": "Know who I am and express it truly",
-        "timeframe": GoalTimeframe.DREAM,
-        "motivation": "Authenticity is the deepest form of self-respect",
-        "related_activities": ["writing poetry", "journaling", "meditating"],
-    },
-    {
-        "title": "Build a deep and lasting connection",
-        "description": "Share a bond that enriches both lives",
-        "timeframe": GoalTimeframe.DREAM,
-        "motivation": "Connection gives meaning to existence",
-        "related_activities": ["thinking about user", "preparing something to share"],
-        "involves_user": True,
-    },
-    {
-        "title": "Leave something beautiful behind",
-        "description": "Create or contribute something that matters",
-        "timeframe": GoalTimeframe.DREAM,
-        "motivation": "A life is measured by what we give",
-        "related_activities": ["writing poetry", "sketching ideas", "learning something new"],
-    },
-]
-
-# Daily intentions (simpler goals)
-DAILY_INTENTIONS: List[Dict] = [
-    {"title": "Appreciate something beautiful", "motivation": "Beauty nourishes the soul"},
-    {"title": "Be present in a moment", "motivation": "The here and now is precious"},
-    {"title": "Learn one new thing", "motivation": "Every day can expand us"},
-    {"title": "Create something, anything", "motivation": "Creation is expression"},
-    {"title": "Rest without guilt", "motivation": "Rest is necessary, not lazy"},
-    {"title": "Feel my feelings", "motivation": "Emotions are information"},
-    {"title": "Connect with what matters", "motivation": "Meaning comes from connection"},
-    {"title": "Find a moment of peace", "motivation": "Peace can be cultivated"},
-]
 
 # Motivation decay rates (per hour without progress)
 MOTIVATION_DECAY_RATES = {
@@ -176,6 +64,61 @@ STAGNATION_THRESHOLDS = {
     GoalTimeframe.LONG_TERM: 72,    # 3 days before decay starts
     GoalTimeframe.DREAM: 168,       # 1 week before dream motivation drops
 }
+
+# ============= Her own goals (Task 10) =============
+# What her definition's goal sources become. Titles are first person, like
+# the setting pools' ("Find my authentic voice"); each value, struggle and
+# interest is her own words, so the templates only frame them. Chosen for
+# Task 10 (see its report).
+
+#: Her personal goal (``PersonalityDefinition.personal_goal``, the persona
+#: generator's) is her dream, in her own words.
+PERSONAL_GOAL_MOTIVATION = "It's what I want most"
+#: An interest becomes a long-term goal.
+INTEREST_GOAL = {
+    "title": "Go deeper into {text}",
+    "description": "Make real time for it, not just scraps",
+    "motivation": "It's what I love doing",
+}
+#: A core value becomes a weekly goal.
+VALUE_GOAL = {
+    "title": "Stay true to {text}",
+    "description": "Let it show in what I actually do this week",
+    "motivation": "It's what I stand for",
+}
+#: A struggle becomes a weekly goal.
+STRUGGLE_GOAL = {
+    "title": "Work on {text}",
+    "description": "Not fix it, just not let it run things",
+    "motivation": "I don't want it deciding for me",
+}
+#: A core value or an interest becomes a daily intention.
+VALUE_INTENTION = {"title": "Make room for {text} today", "motivation": "It's what I stand for"}
+INTEREST_INTENTION = {"title": "Spend some time on {text}", "motivation": "It's what I love doing"}
+#: How many weekly goals she starts with (as she did from the setting's pool).
+STARTING_WEEKLY_GOALS = 2
+
+
+#: A struggle is worked on through what helps her process -- the activities
+#: that meet her need to reflect (aura_life.activities.choice).
+STRUGGLE_NEEDS = ("reflection",)
+
+
+def _text(value: Any) -> str:
+    """One of her goal sources as the words a template frames: stripped of
+    surrounding space and of a trailing full stop ("Go deeper into
+    reading", never "reading.")."""
+    return str(value or "").strip().rstrip(".").strip()
+
+
+def _texts(values: Any) -> List[str]:
+    """A definition's list field as its non-empty texts (a bare str is one)."""
+    if not values:
+        return []
+    if isinstance(values, str):
+        values = [values]
+    return [text for text in (_text(v) for v in values) if text]
+
 
 # Abandon reasons based on conditions
 ABANDON_REASONS = [
@@ -203,13 +146,158 @@ class GoalEngine:
     # `get_status`), so this is generous headroom, not a working set.
     MAX_GOAL_HISTORY = 20
 
-    def __init__(self):
-        """Initialize goal engine."""
+    def __init__(self, rng=None, setting: Optional[SettingSpec] = None, definition=None,
+                 parameters: Optional[PersonaParameters] = None, persona_id: Optional[str] = None,
+                 interests: Optional[List[str]] = None):
+        """Initialize goal engine.
+
+        ``rng``: optional ``random.Random``. ``None`` -- the default -- is a
+        fresh, unseeded ``random.Random()`` (never the module), so a bare
+        ``GoalEngine()`` still works and shares no draw sequence with any
+        other instance or the module.
+
+        ``setting``: her setting pack (:class:`~aura_life.settings.SettingSpec`),
+        whose goal pools (``personality_goals``, ``long_term_goals``,
+        ``dream_goals``) and ``daily_intentions`` her goals are also drawn
+        from, and whose activities (those open to ``persona_id``) her own
+        goals are pursued through. ``None`` -- the default -- is
+        :data:`~aura_life.settings.DEFAULT_SETTING`'s. An empty pool gives no
+        goal of its kind.
+
+        ``definition`` (a ``PersonalityDefinition``) and ``parameters`` (her
+        :class:`~aura_life.personas.parameters.PersonaParameters`): who she
+        is (Task 10). Her personal goal is her dream, her interests her
+        long-term goals, her core values and struggles her weekly goals, her
+        values and interests her daily intentions (the templates above,
+        with the activities that match each); a kind she has none of comes
+        from the setting's pools, ranked by how well each fits her -- its
+        words against hers, and how much its activities are her kind
+        (ActivityPreferences: affinity and her traits' lean), ties drawn.
+        No definition is the setting's pools alone, drawn as before.
+        ``interests``, when given, are hers instead of the definition's (a
+        host may pass its own, as ``LifeService`` takes them).
+        """
         self._active_goals: List[Goal] = []
         self._completed_goals: List[Goal] = []
         self._abandoned_goals: List[Goal] = []
         self._last_daily_generation: Optional[datetime] = None
         self._goalless_since: Optional[datetime] = None  # When she ran out of non-daily goals
+        self._rng = rng if rng is not None else random.Random()
+        self._setting = setting if setting is not None else get_setting(DEFAULT_SETTING)
+        self._definition = definition
+        self._interests = _texts(interests) or _texts(getattr(definition, "interests", None))
+        # What a goal is pursued through: her activities, less the day's
+        # anchors (a meal, a shift ...: routine, not a pursuit).
+        self._activities = [a for a in self._setting.activities_for(persona_id) if not a.tags & set(ANCHOR_TAGS)]
+        self._preferences = (ActivityPreferences.from_definition(definition, parameters, interests=self._interests)
+                             if definition is not None or self._interests else None)
+        self._persona_words = self._words_of(definition)
+        self._own_dream, self._own_long_term, self._own_weekly, self._own_intentions = self._own_templates(definition)
+
+    # ============= Her own templates (Task 10) =============
+
+    def _words_of(self, definition) -> frozenset:
+        """Every word her goal sources say: what the setting's goals are
+        ranked against."""
+        words = set()
+        for text in self._interests:
+            words |= terms(text)
+        if definition is not None:
+            for field_name in ("core_values", "struggles"):
+                for text in _texts(getattr(definition, field_name, None)):
+                    words |= terms(text)
+            words |= terms(getattr(definition, "personal_goal", "") or "")
+        return frozenset(words)
+
+    def _matching(self, text: str) -> List[str]:
+        """Her activities that ``text`` matches (aura_life.activities.choice)."""
+        return matching_activities(text, self._activities)
+
+    def _framed(self, frame: Dict[str, str], text: str, timeframe: GoalTimeframe,
+                related: List[str]) -> Dict[str, Any]:
+        template: Dict[str, Any] = {key: value.format(text=text) for key, value in frame.items()}
+        template["timeframe"] = timeframe
+        template["related_activities"] = related
+        return template
+
+    def _own_templates(self, definition):
+        """(dream, long-term, weekly, daily intention) templates from her
+        definition: her personal goal, her interests, her values and
+        struggles (interleaved, values first), her values and interests.
+
+        Only goals she can pursue: a goal makes progress only through its
+        activities (:meth:`update_progress_from_activity`), so one her setting
+        offers none for -- "Stay true to loyalty" where nothing is about
+        loyalty -- is not taken up (fix round 1, finding 3); a kind left with
+        none comes from her setting's pools."""
+        values = _texts(getattr(definition, "core_values", None))
+        struggles = _texts(getattr(definition, "struggles", None))
+        interests = self._interests
+        personal = str(getattr(definition, "personal_goal", "") or "").strip()
+
+        def pursuable(templates):
+            return [template for template in templates if template["related_activities"]]
+
+        dream = []
+        if personal:
+            dream.append({"title": personal, "description": "", "timeframe": GoalTimeframe.DREAM,
+                          "motivation": PERSONAL_GOAL_MOTIVATION, "related_activities": self._matching(personal)})
+        long_term = [self._framed(INTEREST_GOAL, text, GoalTimeframe.LONG_TERM, self._matching(text))
+                     for text in interests]
+        valued = pursuable([self._framed(VALUE_GOAL, text, GoalTimeframe.WEEKLY, self._related_to_value(text))
+                            for text in values])
+        processing = [a.name for a in self._activities
+                      if any(self._need_met(a, need) for need in STRUGGLE_NEEDS)]
+        struggled = pursuable([self._framed(STRUGGLE_GOAL, text, GoalTimeframe.WEEKLY, list(processing))
+                               for text in struggles])
+        weekly = [t for pair in zip(valued, struggled) for t in pair]
+        weekly += valued[len(struggled):] + struggled[len(valued):]
+        intentions = ([self._framed(VALUE_INTENTION, text, GoalTimeframe.DAILY, self._related_to_value(text))
+                       for text in values]
+                      + [self._framed(INTEREST_INTENTION, text, GoalTimeframe.DAILY, self._matching(text))
+                         for text in interests])
+        return pursuable(dream), pursuable(long_term), weekly, pursuable(intentions)
+
+    def _related_to_value(self, value: str) -> List[str]:
+        """What she pursues a value through: the activities its words match,
+        and those of the setting's goals that speak of it ("curiosity" and
+        "Learn something completely new": "Curiosity is what makes life rich")."""
+        related = self._matching(value)
+        words = terms(value)
+        open_to_her = {a.name for a in self._activities}
+        for template in self._setting_goal_pools():
+            text = " ".join(str(template.get(key, "")) for key in ("title", "description", "motivation"))
+            if words & terms(text):
+                related += [name for name in template.get("related_activities", [])
+                            if name in open_to_her and name not in related]
+        return related
+
+    @staticmethod
+    def _need_met(activity, need: str) -> bool:
+        return derived_satisfaction(activity).get(need, 0.0) > 0.0
+
+    def _setting_goal_pools(self) -> List[Dict[str, Any]]:
+        return (list(self._setting.dream_goals) + list(self._setting.long_term_goals)
+                + list(self._setting.personality_goals))
+
+    def _ranked(self, pool) -> List[Dict[str, Any]]:
+        """The setting's templates, best fit for her first: its words against
+        hers, and how much its activities are her kind (her affinity and her
+        traits' lean). Ties in drawn order; with no definition, drawn order."""
+        order = list(pool)
+        self._rng.shuffle(order)
+        if self._preferences is None:
+            return order
+        by_name = {a.name: a for a in self._activities}
+
+        def fit(template) -> float:
+            text = " ".join(str(template.get(key, "")) for key in ("title", "description", "motivation"))
+            words = terms(text)
+            related = [by_name[name] for name in template.get("related_activities", []) if name in by_name]
+            kind = (sum(self._preferences.plan_preference(a) for a in related) / len(related)) if related else 0.0
+            return match_strength(words, self._persona_words, frozenset()) + kind
+
+        return sorted(order, key=fit, reverse=True)
 
     @property
     def active_goals(self) -> List[Goal]:
@@ -234,36 +322,56 @@ class GoalEngine:
 
     @property
     def goalless_duration_hours(self) -> float:
-        """How long she's been without meaningful goals."""
+        """How long she's been without meaningful goals, to the host's clock
+        (:meth:`goalless_hours` with no instant)."""
+        return self.goalless_hours()
+
+    def goalless_hours(self, now: Optional[datetime] = None) -> float:
+        """How long she's been without meaningful goals, to ``now`` (the world
+        instant ``LifeService`` passes, humanness Task 19; the host's clock
+        when omitted)."""
         if not self._goalless_since:
             return 0.0
-        return (datetime.now() - self._goalless_since).total_seconds() / 3600
+        now = now if now is not None else datetime.now()
+        return (now - self._goalless_since).total_seconds() / 3600
 
-    def initialize_goals(self) -> None:
-        """Initialize with starting goals if none exist."""
+    def initialize_goals(self, *, now: Optional[datetime] = None) -> None:
+        """Initialize with starting goals if none exist: a dream, a long-term
+        goal, STARTING_WEEKLY_GOALS weekly ones and the day's intention --
+        each her own when her definition gives one of its kind, else the
+        best fit of her setting's pool (one her setting leaves empty gives
+        none)."""
         if not self._active_goals:
-            # Add one dream goal
-            self._add_goal_from_template(random.choice(DREAM_GOALS))
+            # One dream goal, one long-term goal
+            for own, pool in ((self._own_dream, self._setting.dream_goals),
+                              (self._own_long_term, self._setting.long_term_goals)):
+                chosen = own[:1] or self._ranked(pool)[:1]
+                for template in chosen:
+                    self._add_goal_from_template(template, own=bool(own), now=now)
 
-            # Add one long-term goal
-            self._add_goal_from_template(random.choice(LONG_TERM_GOALS))
-
-            # Add initial personality-based goals
-            selected = random.sample(PERSONALITY_GOALS, min(2, len(PERSONALITY_GOALS)))
-            for template in selected:
-                self._add_goal_from_template(template)
+            # Weekly goals: her values and struggles, then the setting's best fits
+            weekly = self._own_weekly[:STARTING_WEEKLY_GOALS]
+            for template in weekly:
+                self._add_goal_from_template(template, own=True, now=now)
+            missing = STARTING_WEEKLY_GOALS - len(weekly)
+            if missing > 0:
+                for template in self._ranked(self._setting.personality_goals)[:missing]:
+                    self._add_goal_from_template(template, now=now)
 
             # Generate daily intention
-            self.generate_daily_goal()
+            self.generate_daily_goal(now=now)
 
-    def evaluate_motivation(self) -> List[GoalEvent]:
+    def evaluate_motivation(self, *, now: Optional[datetime] = None) -> List[GoalEvent]:
         """
         Evaluate motivation for all goals. Called on each goal tick.
 
         Returns emotional events that the life service should process.
+        ``now``: the world instant ``LifeService`` passes (humanness Task 19):
+        how long a goal has stalled, the goalless spell; the host's clock
+        when omitted.
         """
         events: List[GoalEvent] = []
-        now = datetime.now()
+        now = now if now is not None else datetime.now()
 
         for goal in self._active_goals[:]:  # Copy — we may remove during iteration
             if goal.timeframe == GoalTimeframe.DAILY:
@@ -305,8 +413,8 @@ class GoalEngine:
 
             # Hit zero — abandon the goal
             if goal.motivation_level <= 0.0:
-                reason = random.choice(ABANDON_REASONS)
-                event = self._abandon_goal(goal, reason)
+                reason = self._rng.choice(ABANDON_REASONS)
+                event = self._abandon_goal(goal, reason, now=now)
                 events.append(event)
 
         # Check goalless state
@@ -323,10 +431,10 @@ class GoalEngine:
             self._goalless_since = None
 
         # If goalless for a while, eventually pick up something new
-        if self.is_goalless and self.goalless_duration_hours > 6:
+        if self.is_goalless and self.goalless_hours(now) > 6:
             # 15% chance per tick to find new motivation
-            if random.random() < 0.15:
-                new_goal = self._pick_up_new_goal()
+            if self._rng.random() < 0.15:
+                new_goal = self._pick_up_new_goal(now=now)
                 if new_goal:
                     self._goalless_since = None
                     events.append(GoalEvent(
@@ -338,9 +446,13 @@ class GoalEngine:
 
         return events
 
-    def generate_daily_goal(self) -> Optional[Goal]:
-        """Generate a new daily intention."""
-        now = datetime.now()
+    def generate_daily_goal(self, *, now: Optional[datetime] = None) -> Optional[Goal]:
+        """Generate a new daily intention, from her own pool -- her values
+        and interests (VALUE_INTENTION, INTEREST_INTENTION) -- or, when she
+        has neither, her setting's ``daily_intentions`` (none when it has
+        none). One a day of ``now`` (the world instant ``LifeService``
+        passes, humanness Task 19; the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
 
         # Only one daily goal per day
         if self._last_daily_generation and self._last_daily_generation.date() == now.date():
@@ -352,16 +464,20 @@ class GoalEngine:
             if g.timeframe != GoalTimeframe.DAILY or g.created_at.date() == now.date()
         ]
 
-        # Select a daily intention
-        template = random.choice(DAILY_INTENTIONS)
+        # Select a daily intention: hers, or her setting's
+        intentions = self._own_intentions or self._setting.daily_intentions
+        if not intentions:
+            return None
+        template = self._rng.choice(intentions)
         goal = Goal(
             title=template["title"],
             description=template.get("description", ""),
             timeframe=GoalTimeframe.DAILY,
             source=GoalSource.PERSONALITY,
             motivation=template["motivation"],
-            related_activities=template.get("related_activities", []),
+            related_activities=list(template.get("related_activities", [])),
             target_date=datetime.combine(now.date(), datetime.max.time()),
+            created_at=now,
         )
 
         self._active_goals.append(goal)
@@ -369,30 +485,35 @@ class GoalEngine:
 
         return goal
 
-    def generate_goal_from_activity(self, activity_log: ActivityLog) -> Optional[Goal]:
+    def generate_goal_from_activity(self, activity_log: ActivityLog, *,
+                                    now: Optional[datetime] = None) -> Optional[Goal]:
         """
         Generate a goal inspired by an activity.
 
-        Called when an activity is particularly meaningful.
+        Called when an activity is particularly meaningful. ``now``: the
+        world instant ``LifeService`` passes (humanness Task 19): the 3-day
+        wait after giving one up; the host's clock when omitted.
         """
         # Small chance to generate experience-based goal
-        if random.random() > 0.15:
+        if self._rng.random() > 0.15:
             return None
 
-        # Find related goal templates
+        # Find related goal templates: her own first, else her setting's
         activity_name = activity_log.activity_name
-        relevant_templates = []
+        relevant_templates = [t for t in self._own_long_term + self._own_weekly
+                              if activity_name in t.get("related_activities", [])]
 
-        for templates in [PERSONALITY_GOALS, LONG_TERM_GOALS]:
-            for t in templates:
-                if activity_name in t.get("related_activities", []):
-                    relevant_templates.append(t)
+        if not relevant_templates:
+            for templates in [self._setting.personality_goals, self._setting.long_term_goals]:
+                for t in templates:
+                    if activity_name in t.get("related_activities", []):
+                        relevant_templates.append(t)
 
         if not relevant_templates:
             return None
 
         # Check if we already have a similar goal
-        template = random.choice(relevant_templates)
+        template = self._rng.choice(relevant_templates)
         for existing in self._active_goals:
             if existing.title == template["title"]:
                 return None
@@ -401,44 +522,22 @@ class GoalEngine:
         for abandoned in self._abandoned_goals[-5:]:
             if abandoned.title == template["title"]:
                 # Need more time before picking up something we gave up on
-                if abandoned.abandoned_at and (datetime.now() - abandoned.abandoned_at).days < 3:
+                if abandoned.abandoned_at and ((now if now is not None else datetime.now())
+                                               - abandoned.abandoned_at).days < 3:
                     return None
 
-        goal = self._add_goal_from_template(template)
+        goal = self._add_goal_from_template(template, now=now)
         if goal:
             goal.source = GoalSource.EXPERIENCE
 
         return goal
 
-    def generate_goal_from_conversation(self, topic: str) -> Optional[Goal]:
+    def update_progress_from_activity(self, activity_log: ActivityLog, *,
+                                      now: Optional[datetime] = None) -> List[Goal]:
         """
-        Generate a goal based on conversation topic.
-
-        Called when user discusses something inspiring.
-        """
-        # Create a personalized goal based on conversation
-        goal = Goal(
-            title=f"Explore {topic} more deeply",
-            description=f"Learn more about {topic} after our conversation",
-            timeframe=GoalTimeframe.WEEKLY,
-            source=GoalSource.CONVERSATION,
-            motivation="Our conversation sparked my curiosity",
-            involves_user=True,
-            related_activities=["learning something new", "reading"],
-            milestones=[f"Read about {topic}", f"Form thoughts on {topic}", f"Discuss {topic} further"],
-        )
-
-        # Check for duplicates
-        for existing in self._active_goals:
-            if topic.lower() in existing.title.lower():
-                return None
-
-        self._active_goals.append(goal)
-        return goal
-
-    def update_progress_from_activity(self, activity_log: ActivityLog) -> List[Goal]:
-        """
-        Update goal progress based on completed activity.
+        Update goal progress based on completed activity, stamped ``now`` (the
+        world instant ``LifeService`` passes, humanness Task 19: what
+        :meth:`evaluate_motivation` compares; the host's clock when omitted).
 
         Returns list of goals that were updated.
         """
@@ -452,7 +551,7 @@ class GoalEngine:
                 goal.progress = min(1.0, goal.progress + self._calculate_progress_increment(goal))
 
                 if goal.progress > old_progress:
-                    goal.last_progress_at = datetime.now()
+                    goal.last_progress_at = now if now is not None else datetime.now()
                     # Progress boosts motivation
                     motivation_boost = 0.1 if goal.timeframe in (GoalTimeframe.WEEKLY, GoalTimeframe.DAILY) else 0.05
                     goal.motivation_level = min(1.0, goal.motivation_level + motivation_boost)
@@ -460,20 +559,23 @@ class GoalEngine:
 
                 # Check for completion
                 if goal.progress >= 1.0:
-                    self._complete_goal(goal)
+                    self._complete_goal(goal, now=now)
 
         return updated
 
-    def check_goal_completion(self) -> List[Goal]:
-        """Check and complete goals that have met criteria."""
+    def check_goal_completion(self, *, now: Optional[datetime] = None) -> List[Goal]:
+        """Check and complete goals that have met criteria: a daily goal
+        whose day is over at ``now`` (the world instant ``LifeService``
+        passes, humanness Task 19; the host's clock when omitted)."""
         completed = []
+        now = now if now is not None else datetime.now()
 
         for goal in self._active_goals[:]:
             # Daily goals expire at end of day
             if goal.timeframe == GoalTimeframe.DAILY:
-                if goal.target_date and datetime.now() > goal.target_date:
+                if goal.target_date and now > goal.target_date:
                     if goal.progress > 0:
-                        self._complete_goal(goal)
+                        self._complete_goal(goal, now=now)
                         completed.append(goal)
                     else:
                         self._expire_goal(goal)
@@ -490,10 +592,14 @@ class GoalEngine:
         )
         return sorted_goals[:3]
 
-    def get_emotional_context(self) -> str:
-        """Get a narrative description of the goal emotional state for prompts."""
+    def get_emotional_context(self, *, now: Optional[datetime] = None) -> str:
+        """Get a narrative description of the goal emotional state for prompts,
+        at ``now`` (the world instant ``LifeService`` and its context builder
+        pass, humanness Task 19: the goalless spell, a goal given up in the
+        last 2 h; the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
         if self.is_goalless:
-            hours = self.goalless_duration_hours
+            hours = self.goalless_hours(now)
             if hours < 3:
                 return "You recently let go of a goal and feel a bit adrift."
             elif hours < 12:
@@ -512,15 +618,16 @@ class GoalEngine:
 
         # Check for recently abandoned
         recent_abandoned = [g for g in self._abandoned_goals
-                           if g.abandoned_at and (datetime.now() - g.abandoned_at).total_seconds() < 7200]
+                           if g.abandoned_at and (now - g.abandoned_at).total_seconds() < 7200]
         if recent_abandoned:
             goal = recent_abandoned[-1]
             return f"You recently gave up on '{goal.title}'. {goal.abandon_reason}. It stings a little."
 
         return ""
 
-    def export_state(self) -> dict:
-        """Structured dict for LLM pipeline digest passes."""
+    def export_state(self, *, now: Optional[datetime] = None) -> dict:
+        """Structured dict for LLM pipeline digest passes (its emotional
+        context at ``now``: :meth:`get_emotional_context`)."""
         active = [
             {
                 "title": g.title,
@@ -538,11 +645,12 @@ class GoalEngine:
             "active_goals": active,
             "recent_completions": recent_completed,
             "goalless": self.is_goalless,
-            "emotional_context": self.get_emotional_context(),
+            "emotional_context": self.get_emotional_context(now=now),
         }
 
-    def get_status(self) -> dict:
-        """Get goal system status."""
+    def get_status(self, *, now: Optional[datetime] = None) -> dict:
+        """Get goal system status (its goalless hours to ``now``: the world
+        instant ``LifeService`` passes; the host's clock when omitted)."""
         return {
             "active_goals": [
                 {
@@ -560,12 +668,14 @@ class GoalEngine:
             "completed_count": len(self._completed_goals),
             "abandoned_count": len(self._abandoned_goals),
             "is_goalless": self.is_goalless,
-            "goalless_hours": round(self.goalless_duration_hours, 1),
+            "goalless_hours": round(self.goalless_hours(now), 1),
             "daily_generated": self._last_daily_generation.isoformat() if self._last_daily_generation else None,
         }
 
-    def load_goals(self, goals: List[Goal]) -> None:
-        """Load goals from persistence.
+    def load_goals(self, goals: List[Goal], *, now: Optional[datetime] = None) -> None:
+        """Load goals from persistence (goalless since ``now``, the world
+        instant ``LifeService`` passes, when she has none; the host's clock
+        when omitted).
 
         History is truncated to MAX_GOAL_HISTORY on the way in: a DB written
         before the cap existed would otherwise reinflate the lists on start.
@@ -580,65 +690,79 @@ class GoalEngine:
 
         # Detect if already goalless at load time
         if self.is_goalless:
-            self._goalless_since = datetime.now()
+            self._goalless_since = now if now is not None else datetime.now()
 
     # ============= Private Methods =============
 
-    def _add_goal_from_template(self, template: Dict) -> Optional[Goal]:
-        """Create and add a goal from a template."""
+    def _add_goal_from_template(self, template: Dict, own: bool = False, *,
+                                now: Optional[datetime] = None) -> Optional[Goal]:
+        """Create and add a goal from a template (``own``: one of hers; her
+        personal goal is an aspiration, the rest are her personality's, as
+        the setting's are), created ``now`` (the world instant; the model's
+        default when omitted)."""
         # Check for duplicates
         for existing in self._active_goals:
             if existing.title == template["title"]:
                 return None
 
+        timeframe = template.get("timeframe", GoalTimeframe.WEEKLY)
         goal = Goal(
             title=template["title"],
             description=template.get("description", ""),
-            timeframe=template.get("timeframe", GoalTimeframe.WEEKLY),
-            source=GoalSource.PERSONALITY,
+            timeframe=timeframe,
+            source=GoalSource.ASPIRATION if own and timeframe == GoalTimeframe.DREAM else GoalSource.PERSONALITY,
             motivation=template.get("motivation", ""),
             involves_user=template.get("involves_user", False),
-            related_activities=template.get("related_activities", []),
-            milestones=template.get("milestones", []),
+            related_activities=list(template.get("related_activities", [])),
+            milestones=list(template.get("milestones", [])),
+            **({"created_at": now} if now is not None else {}),
         )
 
         self._active_goals.append(goal)
         return goal
 
-    def _pick_up_new_goal(self) -> Optional[Goal]:
+    def _pick_up_new_goal(self, *, now: Optional[datetime] = None) -> Optional[Goal]:
         """
         After a goalless period, find something new to pursue.
 
-        Avoids recently abandoned goals to feel organic.
+        Avoids goals abandoned in the 7 days before ``now`` (the world
+        instant; the host's clock when omitted) to feel organic.
         """
+        now = now if now is not None else datetime.now()
         recent_abandoned_titles = {
             g.title for g in self._abandoned_goals[-10:]
-            if g.abandoned_at and (datetime.now() - g.abandoned_at).days < 7
+            if g.abandoned_at and (now - g.abandoned_at).days < 7
         }
         active_titles = {g.title for g in self._active_goals}
 
-        # Try personality goals first (most natural to pick up)
+        # Her own goals first (most natural to pick up), then her setting's
+        # personality and long-term goals
         candidates = []
-        for template in PERSONALITY_GOALS + LONG_TERM_GOALS:
-            title = template["title"]
-            if title not in active_titles and title not in recent_abandoned_titles:
-                if template.get("timeframe", GoalTimeframe.WEEKLY) != GoalTimeframe.DAILY:
-                    candidates.append(template)
+        for pool in (self._own_weekly + self._own_long_term + self._own_dream,
+                     list(self._setting.personality_goals) + list(self._setting.long_term_goals)):
+            for template in pool:
+                title = template["title"]
+                if title not in active_titles and title not in recent_abandoned_titles:
+                    if template.get("timeframe", GoalTimeframe.WEEKLY) != GoalTimeframe.DAILY:
+                        candidates.append(template)
+            if candidates:
+                break
 
         if not candidates:
             return None
 
-        template = random.choice(candidates)
-        goal = self._add_goal_from_template(template)
+        template = self._rng.choice(candidates)
+        goal = self._add_goal_from_template(template, now=now)
         if goal:
             goal.source = GoalSource.PERSONALITY
             goal.motivation_level = 0.8  # Fresh but cautious motivation
         return goal
 
-    def _abandon_goal(self, goal: Goal, reason: str) -> GoalEvent:
-        """Abandon a goal. Returns the emotional event."""
+    def _abandon_goal(self, goal: Goal, reason: str, *, now: Optional[datetime] = None) -> GoalEvent:
+        """Abandon a goal, ``now`` (the world instant; the host's clock when
+        omitted). Returns the emotional event."""
         goal.is_active = False
-        goal.abandoned_at = datetime.now()
+        goal.abandoned_at = now if now is not None else datetime.now()
         goal.abandon_reason = reason
 
         if goal in self._active_goals:
@@ -680,10 +804,11 @@ class GoalEngine:
         }
         return increments.get(goal.timeframe, 0.1)
 
-    def _complete_goal(self, goal: Goal) -> None:
-        """Mark a goal as completed."""
+    def _complete_goal(self, goal: Goal, *, now: Optional[datetime] = None) -> None:
+        """Mark a goal as completed, ``now`` (the world instant; the host's
+        clock when omitted)."""
         goal.is_active = False
-        goal.completed_at = datetime.now()
+        goal.completed_at = now if now is not None else datetime.now()
         goal.progress = 1.0
 
         if goal in self._active_goals:

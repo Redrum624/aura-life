@@ -40,9 +40,14 @@ MODE_BY_DISTANCE = {"near": "walk", "moderate": "transit", "far": "car"}
 class TransportSystem:
     """Travel-time estimation + get-around mode."""
 
-    def __init__(self, default_mode: str = "transit"):
+    def __init__(self, default_mode: str = "transit", rng=None):
+        """``rng``: optional ``random.Random``. ``None`` -- the default --
+        is a fresh, unseeded ``random.Random()`` (never the module), so a
+        bare ``TransportSystem()`` still works and shares no draw sequence
+        with any other instance or the module."""
         self._mode = default_mode
         self._last_trip_minutes: int = 0
+        self._rng = rng if rng is not None else random.Random()
 
     @property
     def mode(self) -> str:
@@ -67,7 +72,7 @@ class TransportSystem:
         else:
             band = PLACE_TYPE_DISTANCES.get(destination, "moderate")
             lo, hi = TRAVEL_TIME_RANGES[band]
-            tot = PREP_TIME_MINUTES + random.randint(lo, hi)
+            tot = PREP_TIME_MINUTES + self._rng.randint(lo, hi)
         self._last_trip_minutes = tot
         return {
             "total_minutes": tot,

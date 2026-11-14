@@ -17,6 +17,7 @@ from ..models import (
     ValueBelief, SelfEsteemState, IdealSelfTrait,
     TasteProfile, InsideJoke, HumorProfileState,
 )
+from ..personas.parameters import PersonaParameters
 
 
 # ============= Activity -> Facet Mapping =============
@@ -178,12 +179,23 @@ IDENTITY_CONVERSATION_TRIGGERS = {
     "standing_ground":   {"esteem_boost": 0.03},
 }
 
-# ============= Personality Growth Multiplier =============
+# ============= Trust in the user, per turn (humanness Task 16a) =============
+# Ruling T16-R3: the spec gives no number; each is an existing one. Every
+# change is times her trust multiplier (PersonaParameters.trust_multiplier),
+# as the triggers above are, and trust stays in 0..1.
 
-IDENTITY_GROWTH_TRAITS = {
-    "open": 0.2, "trusting": 0.25, "warm": 0.15, "vulnerable": 0.2,
-    "guarded": -0.25, "independent": -0.15, "aloof": -0.2,
-}
+#: What any message adds to her trust (update_from_user_message, unchanged).
+USER_MESSAGE_TRUST_GAIN = 0.003
+#: A turn warm toward her, at full intensity, adds one more message's worth.
+WARM_TURN_TRUST_GAIN = USER_MESSAGE_TRUST_GAIN
+#: A turn of full disclosure adds what a personal question does.
+DISCLOSURE_TRUST_GAIN = IDENTITY_CONVERSATION_TRIGGERS["personal_question"]["trust_boost"]
+#: A turn of full hostility at her takes what a rejection does.
+HOSTILE_TURN_TRUST_DRAIN = IDENTITY_CONVERSATION_TRIGGERS["rejection"]["trust_drain"]
+
+# ============= Personality Growth Multiplier =============
+# Read from her trait text by aura_life.personas.parameters
+# (IDENTITY_GROWTH_TRAITS, PersonaParameters.trust_multiplier).
 
 # ============= Struggle & Defect Constants =============
 
@@ -203,7 +215,7 @@ TENDENCY_SURFACE_THRESHOLD = 0.3
 TENDENCY_SURFACE_CHANCE = 0.03  # 3% per tick when current >= threshold
 
 TENDENCY_THOUGHTS = {
-    "gossip": ["I wonder what she told people about me...", "Did you hear what happened with {npc}?"],
+    "gossip": ["I wonder what they told people about me...", "Did you hear what happened with {npc}?", "Did you hear what happened with them?"],
     "pride": ["I knew I was right about that", "They just don't get it like I do"],
     "dishonesty": ["It's not really lying if...", "They don't need to know everything"],
     "resentment": ["I still can't believe they said that", "I'm not over it and I know it"],
@@ -283,10 +295,18 @@ class IdentitySystem:
                  struggles: Optional[List[str]] = None,
                  character_defects: Optional[List[str]] = None,
                  behavioral_tendencies: Optional[Dict[str, float]] = None,
-                 rng=None):
+                 rng=None,
+                 params: Optional[PersonaParameters] = None):
+        """``params``: her traits' engine parameters
+        (:class:`~aura_life.personas.parameters.PersonaParameters`), whose
+        ``trust_multiplier`` scales trust and warmth growth toward the user;
+        without them ``core_traits`` is read for them."""
         self._facets: Dict[str, IdentityFacet] = {}
         self._perceptions: Dict[str, PersonPerception] = {}
-        self._trust_multiplier = self._calc_trust_multiplier(core_traits or [])
+        if params is None:
+            params = PersonaParameters.from_core_traits(core_traits)
+        self._trust_multiplier = params.trust_multiplier
+        self._last_user_turn_at: Optional[datetime] = None
 
         # Values, self-esteem, ideal self and taste
         self._values: Dict[str, ValueBelief] = {}
@@ -326,12 +346,15 @@ class IdentitySystem:
                 perceived_traits=self._initial_traits(npc.personality_brief),
             )
 
-        # User perception (always exists) — include demographics if available
-        user_name = "the user"
+        # User perception (always exists) — include demographics if available.
+        # Never "the user": the name from user_info, else "them" (rendered
+        # text may read this field directly -- see context_builder's
+        # perceptions/goal sections).
+        user_name = "them"
         user_gender = ""
         user_age = 0
         if user_info:
-            user_name = user_info.get("name") or "the user"
+            user_name = user_info.get("name") or "them"
             user_gender = user_info.get("gender") or ""
             user_age = user_info.get("age") or 0
         self._perceptions["__user__"] = PersonPerception(
@@ -358,15 +381,20 @@ class IdentitySystem:
             facet.evidence = (facet.evidence + [activity_name])[-3:]
 
     def update_from_social_event(self, event: SocialEvent) -> None:
-        """Update NPC perception from social event."""
+        """Update NPC perception from social event: each warms how she sees
+        them a little -- and an unwelcome one (``event.valence`` below 0: a
+        threat, someone she is estranged from; Task 11) cools it as much."""
         name = event.npc_name
         if name not in self._perceptions:
             return
         p = self._perceptions[name]
         p.interaction_count += 1
         p.last_interaction = datetime.now()
-        # Warm up emotional valence slightly with each interaction
-        p.emotional_valence = min(1.0, p.emotional_valence + 0.02)
+        if getattr(event, "valence", 0.0) < 0:
+            p.emotional_valence = max(0.0, p.emotional_valence - 0.02)
+        else:
+            # Warm up emotional valence slightly with each interaction
+            p.emotional_valence = min(1.0, p.emotional_valence + 0.02)
         # Add to shared memories (keep last 5)
         p.shared_memories = (p.shared_memories + [event.description])[-5:]
 
@@ -379,8 +407,37 @@ class IdentitySystem:
         p.last_interaction = datetime.now()
         # Trust and warmth grow slowly with interaction, scaled by personality
         m = self._trust_multiplier
-        p.trust_level = min(1.0, p.trust_level + 0.003 * m)
+        p.trust_level = min(1.0, p.trust_level + USER_MESSAGE_TRUST_GAIN * m)
         p.emotional_valence = min(1.0, p.emotional_valence + 0.002 * m)
+
+    def apply_user_turn(self, *, hostility: float = 0.0, warmth: float = 0.0,
+                        disclosure: float = 0.0) -> float:
+        """Her trust in the user after a turn's appraisal (Task 16a): it
+        falls on hostility at her (:data:`HOSTILE_TURN_TRUST_DRAIN` x
+        ``hostility``) and rises on warmth (:data:`WARM_TURN_TRUST_GAIN` x
+        ``warmth``) and disclosure (:data:`DISCLOSURE_TRUST_GAIN` x
+        ``disclosure``), each 0..1, all times her trust multiplier; trust
+        stays in 0..1. Returns the change made."""
+        p = self._perceptions.get("__user__")
+        if not p:
+            return 0.0
+        clamp = lambda value: max(0.0, min(1.0, float(value or 0.0)))  # noqa: E731
+        delta = (WARM_TURN_TRUST_GAIN * clamp(warmth) + DISCLOSURE_TRUST_GAIN * clamp(disclosure)
+                 - HOSTILE_TURN_TRUST_DRAIN * clamp(hostility)) * self._trust_multiplier
+        before = p.trust_level
+        p.trust_level = max(0.0, min(1.0, before + delta))
+        return p.trust_level - before
+
+    def note_user_turn(self, at: datetime) -> None:
+        """The world instant of the user's last turn (ruling T16-R2), saved
+        with her identity (``to_dict``'s "last_user_turn_at")."""
+        self._last_user_turn_at = at
+
+    @property
+    def last_user_turn_at(self) -> Optional[datetime]:
+        """The world instant of the user's last turn; ``None`` before any,
+        and for a save from before Task 16a."""
+        return getattr(self, "_last_user_turn_at", None)
 
     def tick(self) -> None:
         """Decay facets that haven't been reinforced recently."""
@@ -456,7 +513,8 @@ class IdentitySystem:
                     t.current += 0.005
                 if t.name == "greed":
                     t.current += 0.003
-            if mood in ("content", "happy", "joyful"):
+            # The pleasant mood labels (affect_system.MOOD_LABELS) ease them.
+            if mood in ("content", "happy", "calm", "joyful"):
                 t.current -= 0.005
 
             # Clamp
@@ -472,11 +530,25 @@ class IdentitySystem:
         return self._active_tendency
 
     def get_active_tendency_thought(self) -> Optional[str]:
-        """Return a random thought template for the active tendency, or None."""
+        """Return a random thought template for the active tendency, or None.
+
+        Some templates name someone from the social circle (``{npc}``) --
+        filled from `_perceptions` (seeded from the social circle at
+        construction) when it holds a real NPC, otherwise a nameless variant
+        is chosen instead so no template ever renders the literal placeholder.
+        """
         if not self._active_tendency:
             return None
         thoughts = TENDENCY_THOUGHTS.get(self._active_tendency, [])
-        return random.choice(thoughts) if thoughts else None
+        if not thoughts:
+            return None
+        npc_names = [name for name in self._perceptions if name != "__user__"]
+        if not npc_names:
+            thoughts = [t for t in thoughts if "{npc}" not in t] or thoughts
+        thought = self._rng.choice(thoughts)
+        if "{npc}" not in thought:
+            return thought
+        return thought.format(npc=self._rng.choice(npc_names)) if npc_names else thought.replace("{npc}", "someone")
 
     # ============= Self-Esteem =============
 
@@ -666,17 +738,6 @@ class IdentitySystem:
                 p.trust_level = max(0.0, p.trust_level - effects["trust_drain"] * m)
             if "warmth_boost" in effects:
                 p.emotional_valence = min(1.0, p.emotional_valence + effects["warmth_boost"] * m)
-
-    # ============= Personality Calculation =============
-
-    def _calc_trust_multiplier(self, core_traits: List[str]) -> float:
-        """Compute 0.5-1.5 trust/identity growth multiplier from personality traits."""
-        traits_lower = " ".join(t.lower() for t in core_traits)
-        modifier = 0.0
-        for trait, weight in IDENTITY_GROWTH_TRAITS.items():
-            if trait in traits_lower:
-                modifier += weight
-        return max(0.5, min(1.5, 1.0 + modifier))
 
     # ============= Properties =============
 
@@ -871,11 +932,14 @@ class IdentitySystem:
                 }
                 for name, t in self._tendencies.items()
             },
+            # Task 16a (ruling T16-R2): the world instant of the user's last turn.
+            "last_user_turn_at": self.last_user_turn_at.isoformat() if self.last_user_turn_at else None,
         }
 
     @classmethod
     def from_dict(cls, data: dict, npcs: Optional[List[NPC]] = None,
-                  core_traits: Optional[List[str]] = None) -> "IdentitySystem":
+                  core_traits: Optional[List[str]] = None,
+                  params: Optional[PersonaParameters] = None) -> "IdentitySystem":
         """Deserialize from DB."""
         system = cls.__new__(cls)
         system._facets = {}
@@ -885,7 +949,12 @@ class IdentitySystem:
         system._ideal_self = []
         system._taste = {}
         system._humor = HumorProfileState()
-        system._trust_multiplier = system._calc_trust_multiplier(core_traits or [])
+        if params is None:
+            params = PersonaParameters.from_core_traits(core_traits)
+        system._trust_multiplier = params.trust_multiplier
+        # An old save (before Task 16a) has no last user turn: None.
+        system._last_user_turn_at = (datetime.fromisoformat(data["last_user_turn_at"])
+                                     if data.get("last_user_turn_at") else None)
         system._struggles = data.get("struggles", [])
         system._character_defects = data.get("character_defects", [])
         system._pending_struggle_effects = []
@@ -912,10 +981,10 @@ class IdentitySystem:
                 interaction_count=pd.get("interaction_count", 0),
             )
 
-        # Ensure user perception exists
+        # Ensure user perception exists. Never "the user" -- see __init__.
         if "__user__" not in system._perceptions:
             system._perceptions["__user__"] = PersonPerception(
-                person_name="the user",
+                person_name="them",
                 is_user=True,
                 trust_level=0.5,
                 emotional_valence=0.6,

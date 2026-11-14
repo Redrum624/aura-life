@@ -23,6 +23,10 @@ None of the thirteen may be "fixed" here: they are moved code under a verbatim
 contract, and adding a guard would change behaviour the origin host's parity
 golden pins. See
 `DEFERRED.md` for the follow-up and for which two are live hazards.
+
+A hook added as optional -- the humanness program's ``embed`` (Task 12), which
+most hosts never register -- is pinned the other way round: its call sites are
+listed in ``GUARDED_CALL_SITES`` and must stay inside a ``try``.
 """
 
 import ast
@@ -61,6 +65,18 @@ UNGUARDED_CALL_SITES = frozenset({
     ("aura_life.personas.place_generation", "generate_appearance", "get_llm_service"),
     ("aura_life.personas.profile_db", "get_profile_db", "get_config"),
     ("aura_life.personas.profile_db", "get_owner_device_id", "get_config"),
+})
+
+#: Guarded hook call sites pinned by name: a hook added as optional must stay
+#: guarded at every site that calls it. The census above fails only on a new
+#: *unguarded* site; a hook whose absence is the normal case needs its guarded
+#: sites pinned as well, or a refactor could move one out of its ``try``
+#: unnoticed (it would then fail the census -- but only once someone runs a
+#: host without the hook).
+GUARDED_CALL_SITES = frozenset({
+    # Task 12 (humanness program): the memory stream's relevance. Most hosts
+    # register no ``embed``: relevance is then keyword overlap, said at DEBUG.
+    ("aura_life.memory.store", "_embed", "embed"),
 })
 
 #: Modules allowed to touch the hook registry by attribute (``hooks.configure``,
@@ -267,6 +283,16 @@ def test_no_new_unguarded_hook_call_sites():
             f"  {m}.{fn}() -> {hook}()" for m, fn, hook in removed
         )
     assert unguarded == set(UNGUARDED_CALL_SITES), detail + "\n" + _FAILURE_HELP
+
+
+def test_the_optional_hooks_are_called_only_at_their_guarded_sites():
+    """Task 12's ``embed``: its one call site is inside a ``try``, and there is
+    no other -- guarded or not."""
+    unguarded, guarded = _library_census()
+    assert GUARDED_CALL_SITES <= guarded
+    optional = {hook for _, _, hook in GUARDED_CALL_SITES}
+    assert {site for site in unguarded | guarded if site[2] in optional} == set(GUARDED_CALL_SITES)
+    assert optional <= set(HOOK_NAMES)
 
 
 def test_the_site_count_matches_the_documented_thirteen():

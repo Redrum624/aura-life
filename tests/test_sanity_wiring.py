@@ -71,7 +71,12 @@ def _stress_to_level(svc, level=None):
 
 
 def _svc(tmp_path, pid="agent0", definition=None, clock=None, **kw):
-    world = WorldEnvironment(now=clock) if clock is not None else WorldEnvironment()
+    # WorldEnvironment owns its own rng (ruling T26-R2: it is shared across
+    # personas, so it is never derived from any one persona's rng) -- seeded
+    # here so two services built by two separate calls to this helper (as
+    # test_a_sound_persona_leaves_every_other_engine_byte_identical does)
+    # still agree on weather, the way they did when it read module random.
+    world = WorldEnvironment(now=clock, seed=1) if clock is not None else WorldEnvironment(seed=1)
     return LifeService(
         db_path=str(tmp_path / f"{pid}.db"),
         persona_id=pid,

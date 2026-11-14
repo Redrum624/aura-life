@@ -8,7 +8,18 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Dict, List, Optional
+from typing import Dict, FrozenSet, List, Optional
+
+
+def _now() -> datetime:
+    """"Now", for a record made without a time (each ``created_at``,
+    ``timestamp`` ... below that defaults to it): this module's ``datetime``
+    looked up when the record is made, so a clock that replaces it -- a
+    simulated run's (tests/sim_helpers.py) -- is the one read. A field's
+    ``default_factory=datetime.now`` bound the host's clock once, at import:
+    a simulated run then stamped its goals and wants with the host's date,
+    and what it did hung on that date."""
+    return datetime.now()
 
 
 # ===== Location/Place Models =====
@@ -189,7 +200,7 @@ class WorldState:
     """Current state of the persona's virtual world."""
     current_location: Location = Location.LIVING_ROOM
     weather: Weather = Weather.SUNNY
-    virtual_time: datetime = field(default_factory=datetime.now)
+    virtual_time: datetime = field(default_factory=_now)
     time_of_day: TimeOfDay = TimeOfDay.MORNING
     season: Season = Season.SPRING
     ambiance_description: str = ""
@@ -218,7 +229,7 @@ class EnergyState:
     social_boost: float = 0.0  # From user interaction
     hours_awake: float = 0.0
     last_sleep_time: Optional[datetime] = None
-    last_update: datetime = field(default_factory=datetime.now)
+    last_update: datetime = field(default_factory=_now)
 
     @property
     def effective_level(self) -> float:
@@ -273,6 +284,42 @@ class Activity:
     can_be_interrupted: bool = True
     share_worthy: bool = False
     preferred_seasons: List[Season] = field(default_factory=list)
+    # The persona ids this activity is open to (a setting pack's restriction,
+    # aura_life.settings.SettingSpec.activities_for); empty = every persona.
+    persona_ids: List[str] = field(default_factory=list)
+    # What the engines know this activity as, instead of by its name
+    # (aura_life.settings.spec.ACTIVITY_TAGS: "sleep", "nap", "meal" ...).
+    tags: FrozenSet[str] = frozenset()
+    # How much it meets each of her needs, -1..1 (aura_life.settings.spec
+    # .NEED_KEYS; a negative value is a cost), for the needs it states; the
+    # rest are derived from its category and tags (aura_life.activities.choice).
+    needs: Dict[str, float] = field(default_factory=dict)
+    # What she says happened when it does not go well (Task 14): outcome --
+    # "mixed" or "fail" (aura_life.settings.spec.NON_SUCCESS_OUTCOMES) --
+    # -> narratives, one drawn instead of narrative_templates, which tell a
+    # success. An outcome it leaves out is told in the library's neutral
+    # words (aura_life.activities.activity_engine.NEUTRAL_OUTCOME_NARRATIVES).
+    outcomes: Dict[str, List[str]] = field(default_factory=dict)
+
+
+@dataclass
+class IntimateActivity:
+    """An intimate/private activity."""
+    name: str
+    description: str
+    min_arousal: float
+    arousal_change: float  # Positive during, negative after release
+    satisfaction_gain: float
+    energy_cost: float
+    duration_minutes: int
+    narrative_templates: List[str]
+    thought_possibilities: List[str]
+    emotion_effects: Dict[str, float]
+    preferred_locations: List[str]
+    preferred_times: List[TimeOfDay]
+    is_release: bool = False  # Does this provide release/satisfaction
+    share_worthy: bool = False
+    shyness_to_share: float = 0.7  # How shy she'd be sharing this
 
 
 @dataclass
@@ -281,7 +328,7 @@ class ActivityLog:
     id: Optional[int] = None
     activity_name: str = ""
     category: ActivityCategory = ActivityCategory.MENTAL
-    started_at: datetime = field(default_factory=datetime.now)
+    started_at: datetime = field(default_factory=_now)
     ended_at: Optional[datetime] = None
     location: str = "home"
     weather: Weather = Weather.SUNNY
@@ -292,6 +339,10 @@ class ActivityLog:
     energy_after: float = 0.0
     share_worthy: bool = False
     shared_with_user: bool = False
+    # How it went (Task 14): "success", "mixed" or "fail"
+    # (aura_life.emotion.appraisal.OUTCOMES). A success, as every activity
+    # was before, unless something rolled otherwise.
+    outcome: str = "success"
 
     def to_dict(self) -> dict:
         """Convert to dictionary for storage."""
@@ -310,6 +361,7 @@ class ActivityLog:
             "energy_after": self.energy_after,
             "share_worthy": self.share_worthy,
             "shared_with_user": self.shared_with_user,
+            "outcome": self.outcome,
         }
 
     @classmethod
@@ -337,6 +389,8 @@ class ActivityLog:
             energy_after=data.get("energy_after", 0.0),
             share_worthy=data.get("share_worthy", False),
             shared_with_user=data.get("shared_with_user", False),
+            # A row saved before outcomes existed went well: every one did.
+            outcome=data.get("outcome") or "success",
         )
 
 
@@ -374,7 +428,7 @@ class Goal:
     involves_user: bool = False
     motivation: str = ""  # Why this goal matters (text)
     related_activities: List[str] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=_now)
     last_progress_at: Optional[datetime] = None  # When progress last happened
     target_date: Optional[datetime] = None
     completed_at: Optional[datetime] = None
@@ -454,7 +508,7 @@ class ShortTermDesire:
     related_activities: List[str] = field(default_factory=list)
     related_goal_title: Optional[str] = None
     urgency: float = 0.5  # 0-1, higher = more eager
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=_now)
     expires_at: Optional[datetime] = None  # Auto-expire after a few days
     fulfilled: bool = False
     fulfilled_at: Optional[datetime] = None
@@ -531,7 +585,7 @@ class DailyPlan:
     """A full day schedule, generated once per day."""
     date: str = ""  # ISO date string (YYYY-MM-DD)
     slots: List[PlannedSlot] = field(default_factory=list)
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=_now)
     weather_at_creation: Optional[str] = None
     revision_notes: List[str] = field(default_factory=list)  # Silent plan changes
 
@@ -542,28 +596,34 @@ class DailyPlan:
                 return slot
         return None
 
-    def get_current_slot(self) -> Optional[PlannedSlot]:
-        """Get the slot for the current hour."""
-        now = datetime.now()
-        # Find the most recent slot at or before current time
+    # The slot lookups below answer for the instant they are asked about,
+    # ``now``: her plan's hours are her local hours, so every caller inside
+    # aura-life passes her local world time (``LifeService._local_world_now``;
+    # humanness program Task 28, ruling T13-R1). ``now`` omitted is the
+    # host's wall clock, as these always read -- kept only for a host
+    # outside aura-life that reads the plan itself.
+
+    def get_current_slot(self, now: Optional[datetime] = None) -> Optional[PlannedSlot]:
+        """The slot of the hour ``now`` is in: the latest at or before it."""
+        hour = (now if now is not None else datetime.now()).hour
         current = None
         for slot in sorted(self.slots, key=lambda s: s.hour):
-            if slot.hour <= now.hour:
+            if slot.hour <= hour:
                 current = slot
         return current
 
-    def get_next_slot(self) -> Optional[PlannedSlot]:
-        """Get the next upcoming slot."""
-        now = datetime.now()
+    def get_next_slot(self, now: Optional[datetime] = None) -> Optional[PlannedSlot]:
+        """The first slot after the hour ``now`` is in that is not done."""
+        hour = (now if now is not None else datetime.now()).hour
         for slot in sorted(self.slots, key=lambda s: s.hour):
-            if slot.hour > now.hour and not slot.completed:
+            if slot.hour > hour and not slot.completed:
                 return slot
         return None
 
-    def get_remaining_slots(self) -> List[PlannedSlot]:
-        """Get all remaining uncompleted slots."""
-        now = datetime.now()
-        return [s for s in self.slots if s.hour >= now.hour and not s.completed]
+    def get_remaining_slots(self, now: Optional[datetime] = None) -> List[PlannedSlot]:
+        """Every slot from the hour ``now`` is in on that is not done."""
+        hour = (now if now is not None else datetime.now()).hour
+        return [s for s in self.slots if s.hour >= hour and not s.completed]
 
     def to_dict(self) -> dict:
         return {
@@ -668,14 +728,22 @@ class ShareableExperience:
     thought: str = ""  # Related thought
     context: str = ""  # When/where it happened
     priority: float = 0.5  # 0-1, higher = more eager to share
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=_now)
     shared: bool = False
     shared_at: Optional[datetime] = None
+    #: Stable id for LifeService.mark_shared() (spec Sec 4.9): "share:<n>",
+    #: derived from `id` (the row's AUTOINCREMENT pk, assigned synchronously
+    #: at creation -- see LifeService._create_shareable/_create_shareable_from_text)
+    #: rather than stored on its own, so it needs no separate DB column.
+    #: The last field: a caller that builds one by position keeps the order
+    #: 0.5.0 had (Task 42).
+    share_id: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary for storage."""
         return {
             "id": self.id,
+            "share_id": self.share_id,
             "activity_log_id": self.activity_log_id,
             "content": self.content,
             "thought": self.thought,
@@ -689,8 +757,10 @@ class ShareableExperience:
     @classmethod
     def from_dict(cls, data: dict) -> "ShareableExperience":
         """Create from dictionary."""
+        _id = data.get("id")
         return cls(
-            id=data.get("id"),
+            id=_id,
+            share_id=data.get("share_id") or (f"share:{_id}" if _id is not None else ""),
             activity_log_id=data.get("activity_log_id"),
             content=data.get("content", ""),
             thought=data.get("thought", ""),
@@ -714,15 +784,23 @@ class LifeEvent:
     description: str = ""          # Narrative: "She finally submitted the last chapter..."
     emotional_impact: Dict[str, float] = field(default_factory=dict)  # emotion->intensity
     share_urgency: float = 0.7    # 0-1, how strongly she wants to tell someone (>0.6 can trigger proactive)
-    created_at: datetime = field(default_factory=datetime.now)
+    created_at: datetime = field(default_factory=_now)
     shared: bool = False
     shared_at: Optional[datetime] = None
     source: str = ""              # What generated it: "goal_completion", "activity", "chaos", etc.
+    #: Stable id for LifeService.mark_shared() (spec Sec 4.9): "event:<n>",
+    #: assigned by LifeEventSystem.record_event() at creation (`id`, the DB
+    #: row pk, is only assigned on the next batched _save_life_events(), so
+    #: the stable id cannot be derived from it the way ShareableExperience's
+    #: is -- see LifeEventSystem._next_share_id). The last field: a caller
+    #: that builds one by position keeps the order 0.5.0 had (Task 42).
+    share_id: str = ""
 
     def to_dict(self) -> dict:
         """Convert to dictionary for serialization."""
         return {
             "id": self.id,
+            "share_id": self.share_id,
             "event_type": self.event_type,
             "title": self.title,
             "description": self.description,
@@ -744,8 +822,14 @@ class LifeEvent:
                 emotional_impact = json.loads(emotional_impact)
             except (json.JSONDecodeError, TypeError):
                 emotional_impact = {}
+        _id = data.get("id")
         return cls(
-            id=data.get("id"),
+            id=_id,
+            # A row saved before the share_id column existed has it NULL/""
+            # in the DB -- backfill from `id` (as ShareableExperience.share_id
+            # does) so an old row gets a usable id instead of a permanently
+            # blank one.
+            share_id=data.get("share_id") or (f"event:{_id}" if _id is not None else ""),
             event_type=data.get("event_type", ""),
             title=data.get("title", ""),
             description=data.get("description", ""),
@@ -885,6 +969,10 @@ class NPC:
     personality_brief: str = ""
     shared_interests: List[str] = field(default_factory=list)
     contact_frequency: str = "regular"  # daily, regular, occasional
+    # Who they are to her: the social-circle entry's "[kind]" tag
+    # (aura_life.personas.keys.NPC_KINDS), "friend" -- spec section 4.1's
+    # default -- when it names none.
+    kind: str = "friend"
 
 
 @dataclass
@@ -893,8 +981,14 @@ class SocialEvent:
     npc_name: str = ""
     event_type: str = ""             # text_received, hangout, mentioned, call, invitation
     description: str = ""
-    timestamp: datetime = field(default_factory=datetime.now)
+    timestamp: datetime = field(default_factory=_now)
     share_worthy: bool = False
+    # The NPC's kind (NPC.kind), and what the event is to her
+    # (SocialSystem._generate_event): 1.0 contact she is glad of, 0.0 her
+    # thinking of someone, -1.0 anything from someone whose contact she does
+    # not want (aura_life.settings.spec.UNWELCOME_NPC_KINDS).
+    kind: str = "friend"
+    valence: float = 0.0
 
 
 # ============= Tendency Models =============
@@ -941,21 +1035,59 @@ class PersonPerception:
 
 @dataclass
 class MoodState:
-    """Background emotional coloring persisting hours-days."""
-    current_mood: str = "neutral"          # "blue", "restless", "content", "raw", "neutral"
-    intensity: float = 0.0                 # 0-1
+    """Background emotional coloring persisting hours-days.
+
+    The mood is the (valence, arousal) pair; ``current_mood`` and ``intensity``
+    are read off it by ``aura_life.affect.affect_system.mood_label`` and
+    ``mood_intensity``. The defaults are the emotion vocabulary's neutral point
+    (``aura_life.emotion.vocabulary.NEUTRAL_POINT``).
+    """
+    current_mood: str = "neutral"          # affect_system.MOOD_LABELS: content, happy, calm, restless, irritable, anxious, low, flat, neutral
+    intensity: float = 0.0                 # 0-1, distance from neutral
     since: Optional[datetime] = None       # When this mood started
     weather_influence: float = 0.0         # How much weather is affecting mood
     seasonal_influence: float = 0.0        # How much season is affecting mood
+    valence: float = 0.0                   # -1..1, unpleasant..pleasant
+    arousal: float = 0.3                   # 0..1, depleted..keyed up
+
+
+@dataclass
+class Stressor:
+    """Something that weighs on her (humanness program Task 15).
+
+    ``source`` is what she is stressed about, in the words a person would use
+    ("money worries", "putting off finishing that project") -- what
+    ``StressState.sources`` lists and a host may quote; it is also the
+    stressor's identity. ``severity`` (0..1] is how much it weighs on her
+    stress; ``controllability`` (0..1) how far ending it is in her own hands
+    -- what the problem-focused part of her coping acts on. ``expires_at`` is
+    the world instant it lapses unless its producer raises it again (``None``:
+    it lasts until it is resolved). ``kind`` names what produced it
+    (``aura_life.affect.affect_system.STRESSOR_KINDS``); ``""`` for one a
+    host named.
+    """
+    source: str
+    severity: float
+    controllability: float
+    expires_at: Optional[datetime] = None
+    kind: str = ""
 
 
 @dataclass
 class StressState:
-    """Cumulative pressure from unmet needs and obligations."""
+    """What weighs on her, and how much (Task 15: stressors as objects).
+
+    ``level`` is what her stressors weigh together, plus the tension a hard
+    moment adds on top of them (it fades by the world hour --
+    ``aura_life.affect.affect_system``, "Stress"). ``stressors`` are the
+    :class:`Stressor` objects, heaviest first, and ``sources`` their words in
+    the same order: a listed source always weighs, so ``level`` is above 0
+    whenever ``sources`` is not empty."""
     level: float = 0.0                     # 0-1
-    sources: List[str] = field(default_factory=list)  # Active stressors
+    sources: List[str] = field(default_factory=list)  # what she is stressed about, heaviest first
     coping_capacity: float = 0.7           # 0-1, baseline resilience
     last_relief: Optional[datetime] = None
+    stressors: List[Stressor] = field(default_factory=list)  # the same, as Stressor objects
 
 
 @dataclass
@@ -1331,7 +1463,10 @@ class SeasonalConsciousnessState:
 class NostalgiaEvent:
     """A nostalgia trigger event."""
     trigger: str = ""                  # "song", "smell", "season", "anniversary"
-    memory_reference: str = ""         # What it brought back
+    memory_reference: str = ""         # What it brought back: a setting template
+                                        # (unrendered pronoun/user tokens -- render
+                                        # before use) or, once LifeService finds an
+                                        # episode old enough (Task 13), a real gist
     intensity: float = 0.3
     bittersweet: float = 0.5          # 0=bitter, 1=sweet
     timestamp: Optional[datetime] = None

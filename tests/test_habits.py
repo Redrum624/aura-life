@@ -313,8 +313,8 @@ def _plan(planner, habits=None):
 
 def test_without_habits_the_planner_draws_exactly_as_before():
     def seeded(**kw):
-        random.seed(11)
-        planner = DailyPlanner(occupation="", interests=[])
+        # The branch's planner draws from its injected rng (Task 13), not the random module: seed that.
+        planner = DailyPlanner(occupation="", interests=[], rng=random.Random(11))
         return planner.generate_daily_plan(goals=[], weather=Weather.CLOUDY, available_activities=ACTIVITIES,
                                            recent_activity_names=[], **kw)
 
@@ -350,9 +350,9 @@ def test_each_slot_draws_with_its_own_part_of_the_day_within_the_bound(monkeypat
     draws = _record_draws(monkeypatch)
     moved = 0
     for seed in range(10):
-        random.seed(seed)
         start = len(draws)
-        plan = DailyPlanner(occupation="", interests=[], is_ai=is_ai).generate_daily_plan(
+        # The branch's planner draws from its injected rng (Task 13), not the random module: seed that.
+        plan = DailyPlanner(occupation="", interests=[], is_ai=is_ai, rng=random.Random(seed)).generate_daily_plan(
             goals=[], weather=Weather.CLOUDY, available_activities=ACTIVITIES, recent_activity_names=[],
             habits=BAND_HABITS)
         # The slots that drew, in the order they were drawn: the free hours of a human day, the AI's daytime hours,
@@ -416,9 +416,9 @@ def _simulate_weeks(monkeypatch):
     planned = defaultdict(lambda: defaultdict(int))   # band -> activity -> planned slots, over every week
     per_day = []                                      # (week, day index, band, draw)
     for week in range(WEEKS):
-        random.seed(SEED_BASE + week)
         bs = BehaviorSystem()
-        planner = DailyPlanner(occupation="", interests=[])
+        # The branch's planner draws from its injected rng (Task 13), not the random module: seed that.
+        planner = DailyPlanner(occupation="", interests=[], rng=random.Random(SEED_BASE + week))
         state = {"i": -1}
         for d in range(7):
             day = MONDAY + timedelta(days=d)
@@ -499,7 +499,9 @@ def test_a_simulated_week_drifts_toward_what_she_repeats_and_away_from_what_she_
 def test_a_lived_tick_is_dated_on_the_world_clock_and_her_hour(tmp_path, monkeypatch):
     clock = ScriptedClock(MONDAY.replace(hour=10))
     svc = _service(tmp_path / "tick.db", WorldEnvironment(now=clock))
-    monkeypatch.setattr(svc, "persona_local_hour", lambda: 15)   # her local hour, not the world clock's
+    # Her local world hour, not the world clock's: on the branch a habit is dated by _local_world_now (the clock her
+    # plan runs on, the world clock only; Task 31), not by the host-derived persona_local_hour.
+    monkeypatch.setattr(svc, "_local_world_now", lambda: MONDAY.replace(hour=15))
     monkeypatch.setattr(svc._energy, "should_sleep", lambda **kw: False)
     monkeypatch.setattr(svc._energy, "should_rest", lambda: False)
     monkeypatch.setattr(svc._desire_system, "should_do_intimate_activity", lambda *a, **k: False)
@@ -524,7 +526,8 @@ def test_the_daily_plan_is_drawn_with_her_habits_on_the_world_clock(tmp_path, mo
     seen = []
     real = svc._daily_planner.generate_daily_plan
     monkeypatch.setattr(svc._daily_planner, "generate_daily_plan", lambda **kw: seen.append(kw) or real(**kw))
-    monkeypatch.setattr(svc._daily_planner, "needs_new_plan", lambda: True)
+    # The branch's plan tick asks needs_new_plan(now=...) on her local world clock (Task 28).
+    monkeypatch.setattr(svc._daily_planner, "needs_new_plan", lambda **kw: True)
 
     svc._on_plan_tick()
 
@@ -580,10 +583,11 @@ def test_her_own_picks_between_slots_lean_the_same_way_before_their_cut(monkeypa
     from aura_life.activities import activity_engine
     from aura_life.models import TimeOfDay
     seen = []
-    real = random.choices
-    monkeypatch.setattr(activity_engine.random, "choices",
+    # The branch's engine draws her pick from its injected rng (Task 13), not the random module: spy on that.
+    engine = ActivityEngine(rng=random.Random(3))
+    real = engine._rng.choices
+    monkeypatch.setattr(engine._rng, "choices",
                         lambda pop, weights: seen.append((list(pop), list(weights))) or real(pop, weights=weights))
-    engine = ActivityEngine()
 
     def pick(habit=None):
         engine._recent_activities = []
@@ -593,10 +597,20 @@ def test_her_own_picks_between_slots_lean_the_same_way_before_their_cut(monkeypa
 
     base_pop, base_weights = pick()
     assert len(base_pop) == 5
-    outside = next(a for a in engine.get_all_activities() if a not in base_pop and TimeOfDay.MORNING in a.preferred_times
-                   and "home" in a.suitable_locations and a.min_energy <= 0.8)
+    # On the branch a pick's weight is context x exp(utility / TEMPERATURE 0.5), not a near-tied score, and x1.5 is
+    # +0.203 utility: a raised outsider within reach enters the five but cannot head it (Task 31). So the outsider is
+    # one whose habit-free weight x1.5 beats the fifth's, by the calls select_activity makes (habit_free_weights).
+    from test_habit_merge import habit_free_weights
+    engine._recent_activities = []
+    free = habit_free_weights(engine, 0.8, TimeOfDay.MORNING, Weather.CLOUDY, "home")
+    assert sorted(free, key=free.get, reverse=True)[:5] == [a.name for a in base_pop]
+    within_reach = [a for a in engine.get_all_activities() if a not in base_pop and TimeOfDay.MORNING in a.preferred_times
+                    and "home" in a.suitable_locations and a.min_energy <= 0.8
+                    and free.get(a.name, 0.0) * MAX_RATIO > free[base_pop[4].name]]
+    assert within_reach
+    outside = within_reach[0]
     pop, weights = pick({outside.name: (MAX_RATIO, 1.0), base_pop[4].name: (1.0, 1 / MAX_RATIO)})
-    assert pop[0] is outside                     # her comfort brought it into the five (its score, before the cut)
+    assert outside in pop and outside not in base_pop   # her comfort brought it into the five (its weight, before the cut)
     assert base_pop[4] in pop                    # the stale one, last of the five, stays in it...
     stale, hab = base_pop[4].name, dict(zip((a.name for a in pop), weights))
     base = dict(zip((a.name for a in base_pop), base_weights))
@@ -610,7 +624,8 @@ def test_her_own_picks_use_the_habits_of_her_hour(tmp_path, monkeypatch):
     svc = _service(tmp_path / "adhoc.db", WorldEnvironment(now=clock))
     _lived(svc._behavior, {"daydreaming": 40, "people watching": 20}, MONDAY - timedelta(hours=20), hour=15)
     _lived(svc._behavior, {"journaling": 40, "reading": 20}, MONDAY - timedelta(hours=20), hour=9)
-    monkeypatch.setattr(svc, "persona_local_hour", lambda: 15)   # her afternoon
+    # Her afternoon, on her local world hour (the clock her plan runs on; Task 31), not the host-derived one.
+    monkeypatch.setattr(svc, "_local_world_now", lambda: MONDAY.replace(hour=15))
     monkeypatch.setattr(svc._energy, "should_sleep", lambda **kw: False)
     monkeypatch.setattr(svc._energy, "should_rest", lambda: False)
     monkeypatch.setattr(svc._desire_system, "should_do_intimate_activity", lambda *a, **k: False)

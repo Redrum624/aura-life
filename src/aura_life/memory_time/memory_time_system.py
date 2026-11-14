@@ -18,6 +18,12 @@ from ..models import (
     TemporalRhythm,
     Anticipation,
 )
+from ..settings import DEFAULT_SETTING, SettingSpec, get_setting
+# Legacy names: the nostalgia fragments and their activity triggers moved,
+# unchanged, into the contemporary setting pack
+# (aura_life.settings.contemporary) in Task 9 -- the system reads its
+# persona's setting now; re-exported so an import from here keeps working.
+from ..settings.contemporary import NOSTALGIA_ACTIVITIES, NOSTALGIA_MEMORIES  # noqa: F401
 
 logger = __import__("logging").getLogger(__name__)
 
@@ -28,32 +34,6 @@ SEASON_FEELINGS = {
     "autumn": ["autumn melancholy", "cozy nostalgia", "reflective calm"],
     "winter": ["winter introspection", "quiet stillness", "hibernation mode"],
 }
-
-# Activity -> nostalgia trigger chance
-NOSTALGIA_ACTIVITIES = {
-    "listening to music": ("song", 0.15),
-    "cooking a meal": ("smell", 0.08),
-    "baking something": ("smell", 0.10),
-    "reading": ("passage", 0.05),
-    "stargazing": ("season", 0.12),
-    "walking in the park": ("season", 0.08),
-    "having coffee with a friend": ("social", 0.06),
-    "catching up with family": ("social", 0.10),
-}
-
-# Nostalgia memory fragments (templated)
-NOSTALGIA_MEMORIES = [
-    "that time we stayed up way too late",
-    "the first time she tried making pasta from scratch",
-    "a warm afternoon that felt like it would last forever",
-    "the sound of rain through an open window, years ago",
-    "a song that used to play on repeat during a different time",
-    "the smell of her mom's kitchen on a Sunday",
-    "a laugh she hasn't thought about in a while",
-    "the feeling of a new city for the first time",
-    "an old friend's voice she can barely remember",
-    "a book she read in one sitting on a rainy day",
-]
 
 # Day-of-week patterns
 WEEKDAY_MOODS = {
@@ -66,9 +46,18 @@ WEEKDAY_MOODS = {
 class MemoryTimeSystem:
     """Tracks time perception, nostalgia, seasonal feeling, life narrative."""
 
-    def __init__(self, rng=None):
+    def __init__(self, rng=None, setting: Optional[SettingSpec] = None):
+        """``setting``: her setting pack (:class:`~aura_life.settings.SettingSpec`),
+        whose ``nostalgia_triggers`` (activity -> trigger and chance) and
+        ``nostalgia_fragments`` nostalgia is drawn from, and whose "flow"
+        tag says which activities make time fly. ``None`` -- the
+        default -- is :data:`~aura_life.settings.DEFAULT_SETTING`'s. With no
+        fragments, nothing comes back to her."""
         self._time_perception = TimePerceptionState()
         self._rng = rng if rng is not None else random
+        self._setting = setting if setting is not None else get_setting(DEFAULT_SETTING)
+        # The names time flies doing (her setting's tag "flow"; ruling T9-R5).
+        self._flow = self._setting.names_tagged("flow")
         self._seasonal = SeasonalConsciousnessState()
         self._nostalgia_log: List[NostalgiaEvent] = []
         self._life_chapters: List[LifeChapter] = []
@@ -111,11 +100,8 @@ class MemoryTimeSystem:
         """Update subjective time speed based on activity and mood."""
         speed = 0.5  # baseline
 
-        # Flow activities make time fly
-        flow_activities = {"reading", "writing poetry", "sketching ideas",
-                          "creating a playlist", "exploring a new idea",
-                          "learning something new"}
-        if activity in flow_activities:
+        # Flow activities make time fly (tag "flow")
+        if activity in self._flow:
             speed += 0.15
 
         # Social activities speed time
@@ -129,10 +115,11 @@ class MemoryTimeSystem:
         if activity in boring_activities:
             speed -= 0.20
 
-        # Mood effects
-        if mood in ("bored", "restless", "anxious"):
+        # Mood effects ("flat" and "happy" are mood labels, like "restless",
+        # "anxious" and "content": affect_system.MOOD_LABELS)
+        if mood in ("bored", "flat", "restless", "anxious"):
             speed -= 0.10
-        elif mood in ("joyful", "excited", "content"):
+        elif mood in ("joyful", "excited", "content", "happy"):
             speed += 0.10
 
         # Smooth update (weighted average)
@@ -179,8 +166,17 @@ class MemoryTimeSystem:
 
     def _check_nostalgia(self, activity: str, season: str,
                          now: Optional[datetime] = None) -> Optional[NostalgiaEvent]:
-        """Check if current activity/season triggers nostalgia."""
-        trigger_info = NOSTALGIA_ACTIVITIES.get(activity)
+        """Check if current activity/season triggers nostalgia (her
+        setting's triggers and fragments): whether it fires, and how
+        intense, stay this method's own call -- unchanged since before
+        Task 13. What ``memory_reference`` ends up holding does not: one of
+        these fragments is only ever the draft. ``LifeService`` (which
+        owns her memory stream, not this class) overwrites it with a real
+        episode's gist when she has one at least
+        ``NOSTALGIA_MIN_EPISODE_AGE_DAYS`` simulated days old (Task 13
+        brief), leaving a fragment here only as the fallback for a persona
+        who does not yet."""
+        trigger_info = self._setting.nostalgia_triggers.get(activity)
         if not trigger_info:
             # Small chance from season transition
             if season and self._rng.random() < 0.02:
@@ -192,7 +188,10 @@ class MemoryTimeSystem:
         if self._rng.random() > chance:
             return None
 
-        memory = self._rng.choice(NOSTALGIA_MEMORIES)
+        fragments = self._setting.nostalgia_fragments
+        if not fragments:
+            return None
+        memory = self._rng.choice(fragments)
         bittersweet = self._rng.uniform(0.3, 0.8)
 
         event = NostalgiaEvent(
@@ -303,7 +302,16 @@ class MemoryTimeSystem:
 
     def add_anticipation(self, event: str, feeling: str = "curious",
                          intensity: float = 0.3, date: Optional[datetime] = None):
-        """Add an anticipated future event."""
+        """Add an anticipated future event -- or, when she already looks
+        forward to ``event``, keep that one current (its newest feeling,
+        intensity and date, in its place): the goal tick adds a goal due
+        within two days at every tick, and each was appended, so the same
+        goal filled her five places and pushed out what the user had told
+        her of (Task 40)."""
+        for known in self._anticipations:
+            if known.event == event:
+                known.feeling, known.intensity, known.date = feeling, intensity, date
+                return
         self._anticipations.append(Anticipation(
             event=event,
             feeling=feeling,
@@ -314,9 +322,11 @@ class MemoryTimeSystem:
         if len(self._anticipations) > 5:
             self._anticipations = self._anticipations[-5:]
 
-    def get_anticipations(self) -> List[Anticipation]:
-        """Get current anticipations, filtering expired ones."""
-        now = datetime.now()
+    def get_anticipations(self, *, now: Optional[datetime] = None) -> List[Anticipation]:
+        """Get current anticipations, filtering the ones whose date is past at
+        ``now`` (the world instant ``LifeService`` passes, humanness Task 19;
+        the host's clock when omitted)."""
+        now = now if now is not None else datetime.now()
         active = [a for a in self._anticipations
                   if not a.date or a.date > now]
         self._anticipations = active
@@ -326,26 +336,23 @@ class MemoryTimeSystem:
 
     def on_activity(self, activity_name: str):
         """Engaging activities make time feel faster; trigger nostalgia checks."""
-        # Flow activities speed up time more
-        flow_activities = {"reading", "writing poetry", "sketching ideas",
-                          "creating a playlist", "exploring a new idea",
-                          "learning something new"}
-        boost = 0.04 if activity_name in flow_activities else 0.02
+        # Flow activities speed up time more (tag "flow")
+        boost = 0.04 if activity_name in self._flow else 0.02
         self._time_perception.subjective_speed = min(
             1.0, self._time_perception.subjective_speed + boost
         )
-        # Check for nostalgia trigger from activity
-        trigger_info = NOSTALGIA_ACTIVITIES.get(activity_name)
+        # Check for nostalgia trigger from activity (her setting's)
+        trigger_info = self._setting.nostalgia_triggers.get(activity_name)
+        fragments = self._setting.nostalgia_fragments
         if trigger_info:
             trigger_type, chance = trigger_info
-            import random as _rng
-            if _rng.random() < chance * 0.5:  # Reduced chance vs tick
-                memory = _rng.choice(NOSTALGIA_MEMORIES)
+            if self._rng.random() < chance * 0.5 and fragments:  # Reduced chance vs tick
+                memory = self._rng.choice(fragments)
                 event = NostalgiaEvent(
                     trigger=trigger_type,
                     memory_reference=memory,
-                    intensity=_rng.uniform(0.15, 0.4),
-                    bittersweet=_rng.uniform(0.3, 0.7),
+                    intensity=self._rng.uniform(0.15, 0.4),
+                    bittersweet=self._rng.uniform(0.3, 0.7),
                     timestamp=datetime.now(),
                 )
                 self._nostalgia_log.append(event)
@@ -369,7 +376,7 @@ class MemoryTimeSystem:
 
     # ============= Export / Serialize =============
 
-    def export_state(self) -> dict:
+    def export_state(self, *, now: Optional[datetime] = None) -> dict:
         """Structured export for pipeline digest."""
         result = {}
         # Time perception
@@ -398,7 +405,7 @@ class MemoryTimeSystem:
             result["life_chapter"] = chapter.title
 
         # Anticipations
-        anticipations = self.get_anticipations()
+        anticipations = self.get_anticipations(now=now)
         if anticipations:
             result["looking_forward_to"] = [
                 {"event": a.event, "feeling": a.feeling}
@@ -477,9 +484,9 @@ class MemoryTimeSystem:
         }
 
     @classmethod
-    def from_dict(cls, data: dict, rng=None) -> "MemoryTimeSystem":
-        """Deserialize from DB."""
-        system = cls(rng=rng)
+    def from_dict(cls, data: dict, rng=None, setting: Optional[SettingSpec] = None) -> "MemoryTimeSystem":
+        """Deserialize from DB (``rng`` and ``setting`` as in the constructor)."""
+        system = cls(rng=rng, setting=setting)
         if not data:
             return system
 

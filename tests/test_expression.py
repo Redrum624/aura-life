@@ -39,31 +39,52 @@ class TestRelationshipStages:
         es = ExpressionSystem()
         assert es._style.relationship_stage == "early"
 
+    # Task 16b: these three asserted the stage moved with the message count
+    # (comfortable at 50 messages, deep at 200). The stage is now read from
+    # relationship depth -- reciprocity and time, regressing in silence
+    # (aura_life.expression.relationship) -- so 50 messages in one sitting
+    # leave her early, and contact days move her on.
+
     def test_transitions_to_comfortable(self):
         es = ExpressionSystem()
         for _ in range(50):
             es.on_user_message()
+        assert es._style.relationship_stage == "early"
+        _contact_days(es, 8)
         assert es._style.relationship_stage == "comfortable"
 
     def test_transitions_to_deep(self):
         es = ExpressionSystem()
-        for _ in range(200):
-            es.on_user_message()
+        _contact_days(es, 21)
+        assert es._style.relationship_stage == "comfortable"
+        _contact_days(es, 1, start=21)
         assert es._style.relationship_stage == "deep"
 
     def test_formality_decreases_with_stage(self):
         es = ExpressionSystem()
         initial_formality = es._style.formality
-        for _ in range(50):
-            es.on_user_message()
+        _contact_days(es, 8)
         assert es._style.formality < initial_formality
+
+
+def _contact_days(es, days, start=0):
+    """One user turn a day, on ``days`` consecutive world days."""
+    first = datetime(2031, 1, 1, 12, 0)
+    for day in range(start, start + days):
+        at = first + timedelta(days=day)
+        es.note_user_turn(at, at - timedelta(days=1) if day else None)
 
 
 class TestStyleHint:
     def test_early_style_hint(self):
+        # Task 16b: the early hint said "Write in complete sentences" -- a
+        # register the library set for every persona. The style hint is now
+        # her own communication traits plus a distance line by depth; the
+        # early line is about what she discloses.
         es = ExpressionSystem()
         hint = es.get_style_hint()
-        assert "complete sentences" in hint.lower()
+        assert "complete sentences" not in hint.lower()
+        assert "personal" in hint.lower()
 
     def test_deep_style_hint(self):
         es = ExpressionSystem()

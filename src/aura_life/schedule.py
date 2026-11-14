@@ -69,6 +69,19 @@ class ScheduledEvent:
     # Pre-event message templates (persona will rephrase naturally)
     pre_event_prompts: List[str] = field(default_factory=list)
 
+    # Optional random.Random for should_share_now / get_pre_event_context.
+    # None (the default, and what a caller who never mentions it gets) becomes
+    # a fresh, unseeded random.Random() in __post_init__ -- never the module
+    # -- so a bare ScheduledEvent(...) still works and shares no draw
+    # sequence with any other instance or the module. Excluded from the
+    # generated __eq__/repr: two events describing the same thing are equal
+    # regardless of which Random object either happens to hold.
+    rng: Optional[random.Random] = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        if self.rng is None:
+            self.rng = random.Random()
+
     def get_next_occurrence(self, from_time: datetime = None) -> Optional[datetime]:
         """Get the next occurrence of this event."""
         now = from_time or datetime.now()
@@ -111,14 +124,14 @@ class ScheduledEvent:
         # Within the share window?
         if 0 < minutes_until <= self.share_before_minutes:
             # Random chance based on probability
-            return random.random() < self.share_probability
+            return self.rng.random() < self.share_probability
 
         return False
 
     def get_pre_event_context(self) -> str:
         """Get a random pre-event prompt for message generation."""
         if self.pre_event_prompts:
-            return random.choice(self.pre_event_prompts)
+            return self.rng.choice(self.pre_event_prompts)
         return f"About to: {self.title}"
 
 
